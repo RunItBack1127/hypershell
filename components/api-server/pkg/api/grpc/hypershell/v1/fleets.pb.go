@@ -591,7 +591,7 @@ const file_hypershell_v1_fleets_proto_rawDesc = "" +
 	"\vDeleteFleet\x12!.hypershell.v1.DeleteFleetRequest\x1a\".hypershell.v1.DeleteFleetResponse\x12Q\n" +
 	"\n" +
 	"ListFleets\x12 .hypershell.v1.ListFleetsRequest\x1a!.hypershell.v1.ListFleetsResponse\x12R\n" +
-	"\vWatchFleets\x12!.hypershell.v1.WatchFleetsRequest\x1a\x1e.hypershell.v1.FleetWatchEvent0\x01BQZOgithub.com/openshift-online/hypershell/components/api-server/pkg/api/grpc/hypershell/v1;hypershell_v1b\x06proto3"
+	"\vWatchFleets\x12!.hypershell.v1.WatchFleetsRequest\x1a\x1e.hypershell.v1.FleetWatchEvent0\x01BgZegithub.com/openshift-online/hypershell/components/api-server/pkg/api/grpc/hypershell/v1;hypershell_v1b\x06proto3"
 
 var (
 	file_hypershell_v1_fleets_proto_rawDescOnce sync.Once

@@ -681,7 +681,7 @@ const file_hypershell_v1_gateway_networks_proto_rawDesc = "" +
 	"\x14UpdateGatewayNetwork\x12*.hypershell.v1.UpdateGatewayNetworkRequest\x1a\x1d.hypershell.v1.GatewayNetwork\x12o\n" +
 	"\x14DeleteGatewayNetwork\x12*.hypershell.v1.DeleteGatewayNetworkRequest\x1a+.hypershell.v1.DeleteGatewayNetworkResponse\x12l\n" +
 	"\x13ListGatewayNetworks\x12).hypershell.v1.ListGatewayNetworksRequest\x1a*.hypershell.v1.ListGatewayNetworksResponse\x12m\n" +
-	"\x14WatchGatewayNetworks\x12*.hypershell.v1.WatchGatewayNetworksRequest\x1a'.hypershell.v1.GatewayNetworkWatchEvent0\x01BQZOgithub.com/openshift-online/hypershell/components/api-server/pkg/api/grpc/hypershell/v1;hypershell_v1b\x06proto3"
+	"\x14WatchGatewayNetworks\x12*.hypershell.v1.WatchGatewayNetworksRequest\x1a'.hypershell.v1.GatewayNetworkWatchEvent0\x01BgZegithub.com/openshift-online/hypershell/components/api-server/pkg/api/grpc/hypershell/v1;hypershell_v1b\x06proto3"
 
 var (
 	file_hypershell_v1_gateway_networks_proto_rawDescOnce sync.Once

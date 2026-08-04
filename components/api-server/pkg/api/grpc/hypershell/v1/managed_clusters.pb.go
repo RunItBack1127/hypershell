@@ -704,7 +704,7 @@ const file_hypershell_v1_managed_clusters_proto_rawDesc = "" +
 	"\x14UpdateManagedCluster\x12*.hypershell.v1.UpdateManagedClusterRequest\x1a\x1d.hypershell.v1.ManagedCluster\x12o\n" +
 	"\x14DeleteManagedCluster\x12*.hypershell.v1.DeleteManagedClusterRequest\x1a+.hypershell.v1.DeleteManagedClusterResponse\x12l\n" +
 	"\x13ListManagedClusters\x12).hypershell.v1.ListManagedClustersRequest\x1a*.hypershell.v1.ListManagedClustersResponse\x12m\n" +
-	"\x14WatchManagedClusters\x12*.hypershell.v1.WatchManagedClustersRequest\x1a'.hypershell.v1.ManagedClusterWatchEvent0\x01BQZOgithub.com/openshift-online/hypershell/components/api-server/pkg/api/grpc/hypershell/v1;hypershell_v1b\x06proto3"
+	"\x14WatchManagedClusters\x12*.hypershell.v1.WatchManagedClustersRequest\x1a'.hypershell.v1.ManagedClusterWatchEvent0\x01BgZegithub.com/openshift-online/hypershell/components/api-server/pkg/api/grpc/hypershell/v1;hypershell_v1b\x06proto3"
 
 var (
 	file_hypershell_v1_managed_clusters_proto_rawDescOnce sync.Once

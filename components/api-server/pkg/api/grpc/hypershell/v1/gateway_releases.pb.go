@@ -706,7 +706,7 @@ const file_hypershell_v1_gateway_releases_proto_rawDesc = "" +
 	"\x14UpdateGatewayRelease\x12*.hypershell.v1.UpdateGatewayReleaseRequest\x1a\x1d.hypershell.v1.GatewayRelease\x12o\n" +
 	"\x14DeleteGatewayRelease\x12*.hypershell.v1.DeleteGatewayReleaseRequest\x1a+.hypershell.v1.DeleteGatewayReleaseResponse\x12l\n" +
 	"\x13ListGatewayReleases\x12).hypershell.v1.ListGatewayReleasesRequest\x1a*.hypershell.v1.ListGatewayReleasesResponse\x12m\n" +
-	"\x14WatchGatewayReleases\x12*.hypershell.v1.WatchGatewayReleasesRequest\x1a'.hypershell.v1.GatewayReleaseWatchEvent0\x01BQZOgithub.com/openshift-online/hypershell/components/api-server/pkg/api/grpc/hypershell/v1;hypershell_v1b\x06proto3"
+	"\x14WatchGatewayReleases\x12*.hypershell.v1.WatchGatewayReleasesRequest\x1a'.hypershell.v1.GatewayReleaseWatchEvent0\x01BgZegithub.com/openshift-online/hypershell/components/api-server/pkg/api/grpc/hypershell/v1;hypershell_v1b\x06proto3"
 
 var (
 	file_hypershell_v1_gateway_releases_proto_rawDescOnce sync.Once

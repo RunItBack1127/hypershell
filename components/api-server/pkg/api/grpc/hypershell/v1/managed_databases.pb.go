@@ -768,7 +768,7 @@ const file_hypershell_v1_managed_databases_proto_rawDesc = "" +
 	"\x15UpdateManagedDatabase\x12+.hypershell.v1.UpdateManagedDatabaseRequest\x1a\x1e.hypershell.v1.ManagedDatabase\x12r\n" +
 	"\x15DeleteManagedDatabase\x12+.hypershell.v1.DeleteManagedDatabaseRequest\x1a,.hypershell.v1.DeleteManagedDatabaseResponse\x12o\n" +
 	"\x14ListManagedDatabases\x12*.hypershell.v1.ListManagedDatabasesRequest\x1a+.hypershell.v1.ListManagedDatabasesResponse\x12p\n" +
-	"\x15WatchManagedDatabases\x12+.hypershell.v1.WatchManagedDatabasesRequest\x1a(.hypershell.v1.ManagedDatabaseWatchEvent0\x01BQZOgithub.com/openshift-online/hypershell/components/api-server/pkg/api/grpc/hypershell/v1;hypershell_v1b\x06proto3"
+	"\x15WatchManagedDatabases\x12+.hypershell.v1.WatchManagedDatabasesRequest\x1a(.hypershell.v1.ManagedDatabaseWatchEvent0\x01BgZegithub.com/openshift-online/hypershell/components/api-server/pkg/api/grpc/hypershell/v1;hypershell_v1b\x06proto3"
 
 var (
 	file_hypershell_v1_managed_databases_proto_rawDescOnce sync.Once

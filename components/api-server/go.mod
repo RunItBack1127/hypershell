@@ -7,7 +7,7 @@ require (
 	github.com/golang/glog v1.2.5
 	github.com/gorilla/mux v1.7.3
 	github.com/onsi/gomega v1.27.1
-	github.com/openshift-online/rh-trex-ai v0.0.0-00010101000000-000000000000
+	github.com/openshift-online/rh-trex-ai v0.0.0-20260804164518-7b5a01f4c73a
 	github.com/spf13/pflag v1.0.5
 	google.golang.org/grpc v1.82.1
 	google.golang.org/protobuf v1.36.11
@@ -109,5 +109,3 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	gorm.io/driver/postgres v1.6.0 // indirect
 )
-
-replace github.com/openshift-online/rh-trex-ai => ../../../rh-trex-ai

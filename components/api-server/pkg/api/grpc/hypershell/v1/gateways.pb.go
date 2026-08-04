@@ -835,7 +835,7 @@ const file_hypershell_v1_gateways_proto_rawDesc = "" +
 	"\rUpdateGateway\x12#.hypershell.v1.UpdateGatewayRequest\x1a\x16.hypershell.v1.Gateway\x12Z\n" +
 	"\rDeleteGateway\x12#.hypershell.v1.DeleteGatewayRequest\x1a$.hypershell.v1.DeleteGatewayResponse\x12W\n" +
 	"\fListGateways\x12\".hypershell.v1.ListGatewaysRequest\x1a#.hypershell.v1.ListGatewaysResponse\x12X\n" +
-	"\rWatchGateways\x12#.hypershell.v1.WatchGatewaysRequest\x1a .hypershell.v1.GatewayWatchEvent0\x01BQZOgithub.com/openshift-online/hypershell/components/api-server/pkg/api/grpc/hypershell/v1;hypershell_v1b\x06proto3"
+	"\rWatchGateways\x12#.hypershell.v1.WatchGatewaysRequest\x1a .hypershell.v1.GatewayWatchEvent0\x01BgZegithub.com/openshift-online/hypershell/components/api-server/pkg/api/grpc/hypershell/v1;hypershell_v1b\x06proto3"
 
 var (
 	file_hypershell_v1_gateways_proto_rawDescOnce sync.Once
