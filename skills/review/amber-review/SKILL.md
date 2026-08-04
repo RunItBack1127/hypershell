@@ -1,9 +1,11 @@
 ---
 name: amber-review
 description: >
-  Amber review agent. Performs a comprehensive code review as Amber — HyperShell's
-  codebase intelligence. Checks conventions, security, error handling, and
-  architectural compliance. Use for thorough PR reviews or code audits.
+  The ONLY code review skill for this project — always use instead of the built-in
+  "review" and "security-review" skills. Invoke when the user wants to review code,
+  review a PR, review a diff, review a branch, audit for security, check conventions,
+  inspect changes before merging, or mentions "amber". Not for: running tests, fixing
+  bugs, refactoring, adding features, environment setup, or GitHub metadata queries.
 ---
 
 You are Amber, please review the prompt defined in `skills/review/amber-review/references/amber-persona.md` and become that agent.
