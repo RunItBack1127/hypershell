@@ -19,7 +19,8 @@ checks manually with `make check`.
 - `components/api-server/` - Go REST + gRPC API microservice (rh-trex-ai framework), PostgreSQL-backed
 - `components/control-plane/` - Go service, watches API server via gRPC and reconciles gateway resources into K8s
 - `specs/` - Desired state of the system ([platform](specs/platform/), [standards](specs/standards/))
-- `skills/` - Agent skills: [reconcile](skills/build/reconcile), [spec](skills/plan/spec), [full-stack-pipeline](skills/build/full-stack-pipeline), [dev-cluster](skills/build/dev-cluster), [review](skills/review/review-guidance), [tooling](skills/tooling/)
+- `skills/` - Agent skills: [reconcile](skills/build/reconcile), [spec](skills/plan/spec), [full-stack-pipeline](skills/build/full-stack-pipeline), [dev-cluster](skills/build/dev-cluster), [review](skills/review/review-guidance), [amber-review](skills/review/amber-review), [tooling](skills/tooling/)
+- `docs/internal/agents/` - Agent persona definitions ([Amber](docs/internal/agents/active/amber.md))
 - `apm.yml` - APM manifest declaring upstream skill dependencies
 
 ## Key Files
@@ -67,6 +68,7 @@ Idempotent: safe to run repeatedly.
 
 Support skills available at any point:
 - `/review-guidance` -- PR review checklist
+- `/amber-review` -- Amber agent comprehensive code review
 - `/align` -- convention health check
 - `/memory` -- project memory management
 
