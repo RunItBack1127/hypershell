@@ -1,15 +1,16 @@
 # OpenShell Gateway OIDC Specification
 
-**Date:** 2026-08-05
-**Status:** Draft
+**Date:** 2026-07-22
+**Status:** Implementation-Verified
 **Parent:** `openshell-gateway.spec.md` — core gateway provisioning
-**Related:** `openshell-gateway-tls.spec.md` — TLS certificate management; `openshell-gateway-routing.spec.md` — external connectivity
+**Related:** `openshell-gateway-tls.spec.md` — TLS and optional mTLS modes; `cli/gateway-cli.spec.md` — CLI gateway commands
+**Verified by:** Working ROSA deployment (PR #415), e2e-openshell.sh (11/11 pass)
 
 ---
 
 ## Purpose
 
-This specification defines per-gateway OIDC authentication for OpenShell gateways. OIDC enables CLI users and external clients to authenticate via Bearer tokens from an identity provider (e.g., Keycloak). OIDC is the sole authentication mechanism for HyperShell gateways in production.
+This specification defines optional per-gateway OIDC authentication for OpenShell gateways. OIDC enables CLI users and external clients to authenticate via Bearer tokens from an identity provider (e.g., Keycloak), while sandbox supervisors continue to authenticate via mTLS client certificates.
 
 ---
 
@@ -24,21 +25,25 @@ CLI User
     ▼
 OpenShell Gateway
     │  Validates JWT: issuer, audience, signature (JWKS), expiry
-    │  Extracts roles from roles_claim (e.g., "groups" → ["hypershell-admins", "hypershell-users"])
+    │  Extracts roles from roles_claim (e.g., "groups" → ["ambient-admins", "ambient-users"])
     │  Maps to admin/user tier
     ▼
 Authorized (sandbox create, list, exec, etc.)
 ```
 
+### Interaction with mTLS
+
+When OIDC is configured alongside `client_ca_path`, the gateway operates in **optional mTLS** mode. See `openshell-gateway-tls.spec.md` for the full TLS mode table. Key point: `client_ca_path` is RETAINED — it is NOT removed when OIDC is enabled.
+
 ### Verified Keycloak Configuration (ROSA)
 
 ```
-Realm:      hypershell
-Client:     hypershell-frontend (public, standard flow + direct access grants)
-Audience:   hypershell-frontend
+Realm:      ambient-code
+Client:     ambient-frontend (public, standard flow + direct access grants)
+Audience:   ambient-frontend
 Roles claim: groups (via group membership, not realm_access.roles)
-Groups:     hypershell-admins, hypershell-users
-Users:      admin (both groups), developer (hypershell-users only)
+Groups:     ambient-admins, ambient-users
+Users:      admin (both groups), developer (ambient-users only)
 ```
 
 > **Implementation note:** Keycloak exposes group membership under the `groups` claim (not `realm_access.roles`). The `roles_claim` field in the gateway config maps to wherever the IdP puts role/group information. The naming is upstream OpenShell convention.
@@ -72,13 +77,13 @@ The Gateway API resource SHALL accept an optional `oidc` object containing OIDC 
   server_dns_names:
     - openshell-gateway.tenant-a.svc.cluster.local
   oidc:
-    issuer: https://keycloak.example.com/realms/hypershell
-    audience: hypershell-frontend
+    issuer: https://keycloak.example.com/realms/ambient-code
+    audience: ambient-frontend
     roles_claim: groups
-    admin_role: hypershell-admins
-    user_role: hypershell-users
+    admin_role: ambient-admins
+    user_role: ambient-users
   ```
-- WHEN the user runs `hsctl apply -k`
+- WHEN the user runs `acpctl apply -k`
 - THEN the API server SHALL persist the Gateway with OIDC configuration
 - AND the GatewayReconciler SHALL generate a `gateway.toml` containing the `[openshell.gateway.oidc]` section
 
@@ -97,12 +102,12 @@ When OIDC role-based access control is configured, both `admin_role` and `user_r
 
 #### Scenario: Valid RBAC configuration
 
-- GIVEN `oidc.admin_role = "hypershell-admins"` and `oidc.user_role = "hypershell-users"`
+- GIVEN `oidc.admin_role = "ambient-admins"` and `oidc.user_role = "ambient-users"`
 - THEN validation SHALL pass
 
 #### Scenario: Invalid partial RBAC configuration
 
-- GIVEN `oidc.admin_role = "hypershell-admins"` and `oidc.user_role = ""`
+- GIVEN `oidc.admin_role = "ambient-admins"` and `oidc.user_role = ""`
 - THEN validation SHALL fail: both must be set or both must be empty
 
 ---
@@ -121,11 +126,11 @@ When a Gateway has OIDC enabled (non-empty `oidc.issuer`), the GatewayReconciler
   allow_unauthenticated_users = false
 
   [openshell.gateway.oidc]
-  issuer      = "https://keycloak.example.com/realms/hypershell"
-  audience    = "hypershell-frontend"
+  issuer      = "https://keycloak.example.com/realms/ambient-code"
+  audience    = "ambient-frontend"
   roles_claim = "groups"
-  admin_role  = "hypershell-admins"
-  user_role   = "hypershell-users"
+  admin_role  = "ambient-admins"
+  user_role   = "ambient-users"
   ```
 - AND `allow_unauthenticated_users` SHALL be `false`
 
@@ -163,23 +168,33 @@ The GatewayReconciler SHALL detect changes to OIDC configuration and trigger a g
 
 ---
 
-## CLI Authentication Flow
+### Requirement: Kind Cluster OIDC Testing
+
+In Kind test environments, OIDC SHALL be testable against the Keycloak instance deployed during `make kind-up`.
+
+- The Keycloak realm SHALL include an `openshell-cli` client (or `ambient-frontend` for shared SSO)
+- Realm roles or groups SHALL include admin and user tiers
+- The OIDC issuer URL SHALL be reachable from both inside the cluster (gateway pod) and outside (developer workstation)
+
+---
+
+## CLI Authentication Flow (Verified)
 
 ```bash
 # 1. Get OIDC token (password grant for automation, browser for interactive)
 TOKEN=$(curl -sk -X POST \
-  "https://${KC_HOST}/realms/hypershell/protocol/openid-connect/token" \
+  "https://${KC_HOST}/realms/ambient-code/protocol/openid-connect/token" \
   -d "grant_type=password" \
-  -d "client_id=hypershell-frontend" \
+  -d "client_id=ambient-frontend" \
   -d "client_secret=${KC_CLIENT_SECRET}" \
   -d "username=admin" \
   -d "password=admin" | python3 -c "import json,sys; print(json.load(sys.stdin)['access_token'])")
 
-# 2. Login to hsctl
-hsctl login --token "$TOKEN" --url "$API_URL" --insecure-skip-tls-verify
+# 2. Login to acpctl
+acpctl login --token "$TOKEN" --url "$API_URL" --insecure-skip-tls-verify
 
 # 3. Register openshell CLI with gateway
-hsctl gateway setup-cli --project tenant-a --gateway-url "$GATEWAY_URL"
+acpctl gateway setup-cli --project tenant-a --gateway-url "$GATEWAY_URL"
 
 # 4. Use openshell CLI
 OPENSHELL_GATEWAY_INSECURE=true openshell -g tenant-a-openshell-gateway status
@@ -195,7 +210,7 @@ OPENSHELL_GATEWAY_INSECURE=true openshell -g tenant-a-openshell-gateway sandbox 
 | `role 'openshell-user' required` | OIDC `roles_claim` misconfigured — JWT has `groups` not `roles` | Set `roles_claim: groups` |
 | `Invalid client or Invalid client credentials` | Wrong client_secret or client_id | Check `sso-credentials` Secret |
 | Token expires after 5 minutes | Keycloak access token TTL | Use refresh token or increase session timeout |
-| `openshell gateway add` opens browser | No `--no-browser` flag | Write `metadata.json` directly, then use `hsctl gateway setup-cli` |
+| `openshell gateway add` opens browser | No `--no-browser` flag | Write `metadata.json` directly, then use `acpctl gateway setup-cli` |
 | `GROUPS` env var returns `1000` in bash | Bash builtin collision — `GROUPS` is a reserved readonly array | Use `USER_GROUPS` instead of `GROUPS` for role/group env vars |
 | `openshell sandbox create` hangs | Blocking interactive command | Background the command and poll for pod status; use `ExecSandbox` for runner startup |
 
