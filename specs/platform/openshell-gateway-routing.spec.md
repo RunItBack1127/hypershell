@@ -1,10 +1,9 @@
 # OpenShell Gateway Routing Specification
 
-**Date:** 2026-07-22
-**Status:** Implementation-Verified
+**Date:** 2026-08-05
+**Status:** Draft
 **Parent:** `openshell-gateway.spec.md` — core gateway provisioning
-**Related:** `openshell-gateway-tls.spec.md` — TLS modes; `cli/gateway-cli.spec.md` — CLI route address display
-**Verified by:** Working ROSA deployment (PR #415), e2e-openshell.sh (11/11 pass)
+**Related:** `openshell-gateway-tls.spec.md` — TLS modes; `openshell-gateway-oidc.spec.md` — OIDC authentication
 
 ---
 
@@ -34,8 +33,8 @@ openshell-gateway Pod
 
 Requires:
 - OpenShift 4.22+ (GatewayClass `openshift-default`)
-- Networking Gateway `acpgw` in `openshift-ingress`
-- Wildcard TLS certificate for `*.acpgw.<base-domain>`
+- Networking Gateway `hsgw` in `openshift-ingress`
+- Wildcard TLS certificate for `*.hsgw.<base-domain>`
 
 ### Strategy 2: NLB Passthrough (ROSA/AWS)
 
@@ -181,7 +180,7 @@ The control plane SHALL detect at startup whether a compatible networking Gatewa
 #### Scenario: Networking Gateway available
 
 - GIVEN the `gateway.networking.k8s.io` API group is available (GRPCRoute CRD exists)
-- AND a Gateway resource named `acpgw` exists in `openshift-ingress`
+- AND a Gateway resource named `hsgw` exists in `openshift-ingress`
 - AND the Gateway's `.status.conditions` includes `Accepted: True`
 - THEN the control plane SHALL enable GRPCRoute provisioning
 
@@ -200,7 +199,7 @@ The Gateway resource SHALL support an optional `route` field that declares exter
 #### Scenario: Gateway with auto-assigned route host
 
 - GIVEN a Gateway with `route: {}`
-- THEN the GRPCRoute hostname SHALL be `openshell-gateway-<namespace>.acpgw.<base-domain>`
+- THEN the GRPCRoute hostname SHALL be `openshell-gateway-<namespace>.hsgw.<base-domain>`
 
 #### Scenario: Gateway without route configuration
 
@@ -221,10 +220,10 @@ metadata:
   labels:
     app.kubernetes.io/name: openshell
     app.kubernetes.io/component: gateway
-    app.kubernetes.io/managed-by: agent-control-plane
+    app.kubernetes.io/managed-by: hypershell-control-plane
   ownerReferences:
   - apiVersion: apps/v1
-    kind: StatefulSet
+    kind: Deployment
     name: openshell-gateway
     controller: true
     blockOwnerDeletion: true
@@ -259,7 +258,7 @@ The GatewayReconciler SHALL derive the external route address from the GRPCRoute
 
 - Format: `grpcs://<hostname>:443`
 - Stored in the Gateway API resource for CLI consumption
-- `acpctl get gateways` displays the routeAddress
+- `hsctl get gateways` displays the routeAddress
 
 ---
 
@@ -267,7 +266,7 @@ The GatewayReconciler SHALL derive the external route address from the GRPCRoute
 
 | Variable | Default | Description |
 |---|---|---|
-| `GATEWAY_API_GATEWAY_NAME` | `acpgw` | Name of the networking Gateway resource |
+| `GATEWAY_API_GATEWAY_NAME` | `hsgw` | Name of the networking Gateway resource |
 | `GATEWAY_API_GATEWAY_NAMESPACE` | `openshift-ingress` | Namespace of the networking Gateway |
 | `GATEWAY_API_BASE_DOMAIN` | auto-detected | Cluster base domain for hostname generation |
 
@@ -309,7 +308,7 @@ The GatewayReconciler SHALL derive the external route address from the GRPCRoute
 | TLS handshake: 0 bytes read, immediate EOF | NetworkPolicy blocking router → gateway | Create `openshell-gateway-allow-router` |
 | 503 Service Unavailable from route | SNI mismatch — HAProxy can't match hostname | Ensure Route hostname matches cert SAN |
 | grpcurl hangs but openssl s_client works | grpcurl blocked by NetworkPolicy | Check source namespace |
-| `acpctl apply` creates gateway but no external access | No `route` field on Gateway resource | Add `route: {}` or create NLB Route manually |
+| `hsctl apply` creates gateway but no external access | No `route` field on Gateway resource | Add `route: {}` or create NLB Route manually |
 
 ---
 
