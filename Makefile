@@ -83,8 +83,12 @@ web-console-image:
 check-forbidden-terms:
 	python3 scripts/check_forbidden_terms.py
 
+.PHONY: test-dependency-pin-policy
+test-dependency-pin-policy:
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest scripts/test_check_dependency_pins.py
+
 .PHONY: check-dependency-pins
-check-dependency-pins:
+check-dependency-pins: test-dependency-pin-policy
 	python3 scripts/check_dependency_pins.py
 
 .PHONY: check-ci-components
@@ -144,6 +148,11 @@ lint-control-plane:
 lint-sdk-typescript: install-js
 	$(PNPM) --filter @openshift-online/hypershell-sdk check
 
+.PHONY: lint-gateway-ui
+lint-gateway-ui: install-js
+	$(PNPM) --filter @openshift-online/hypershell-domain-probes build
+	$(PNPM) --filter @openshift-online/hypershell-gateway-ui check
+
 .PHONY: lint-web-console
 lint-web-console: install-js
 	$(PNPM) --filter @openshift-online/hypershell-domain-probes check
@@ -151,7 +160,7 @@ lint-web-console: install-js
 	$(PNPM) --filter @openshift-online/hypershell-web-console-bff check
 
 .PHONY: lint
-lint: check install-js lint-api-server lint-control-plane lint-sdk-typescript lint-web-console
+lint: check install-js lint-api-server lint-control-plane lint-sdk-typescript lint-gateway-ui lint-web-console
 
 # ============================================================================
 # Test targets
@@ -161,6 +170,7 @@ lint: check install-js lint-api-server lint-control-plane lint-sdk-typescript li
 test-all: install-js
 	cd components/api-server && $(MAKE) test
 	$(PNPM) --filter @openshift-online/hypershell-domain-probes test:run
+	$(PNPM) --filter @openshift-online/hypershell-gateway-ui test:run
 	$(PNPM) --filter @openshift-online/hypershell-web-console test:run
 	$(PNPM) --filter @openshift-online/hypershell-web-console-bff test:run
 

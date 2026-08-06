@@ -1,6 +1,11 @@
 import { defineMessages } from "react-intl";
 
 export const messages = defineMessages({
+  breadcrumbLabel: {
+    id: "app.breadcrumb.ariaLabel",
+    defaultMessage: "Breadcrumb",
+    description: "Accessible label for the application breadcrumb navigation.",
+  },
   errorBody: {
     id: "app.error.body",
     defaultMessage: "Refresh the page to try again.",

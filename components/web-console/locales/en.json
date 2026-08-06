@@ -1,4 +1,24 @@
 {
+  "app.action.cancel": {
+    "defaultMessage": "Cancel",
+    "description": "Action that leaves a form without submitting it."
+  },
+  "app.action.close": {
+    "defaultMessage": "Close",
+    "description": "Accessible label for closing an overlay."
+  },
+  "app.breadcrumb.ariaLabel": {
+    "defaultMessage": "Breadcrumb",
+    "description": "Accessible label for the application breadcrumb navigation."
+  },
+  "app.clipboard.copied": {
+    "defaultMessage": "Copied",
+    "description": "Confirmation shown after text is copied to the clipboard."
+  },
+  "app.clipboard.copy": {
+    "defaultMessage": "Copy",
+    "description": "Tooltip for a button that copies text to the clipboard."
+  },
   "app.error.body": {
     "defaultMessage": "Refresh the page to try again.",
     "description": "Recovery guidance shown after an unexpected route failure."
@@ -6,6 +26,142 @@
   "app.error.title": {
     "defaultMessage": "The page could not be loaded",
     "description": "Title shown after an unexpected route failure."
+  },
+  "app.form.requiredField": {
+    "defaultMessage": "This field is required.",
+    "description": "Validation message for an empty required form field."
+  },
+  "app.gateway.cliConnection": {
+    "defaultMessage": "CLI connection",
+    "description": "Label for a gateway's OpenShell CLI connection command."
+  },
+  "app.gateway.cliConnectionCommandCopied": {
+    "defaultMessage": "CLI connection command for {gatewayName} copied",
+    "description": "Success notification after copying a gateway CLI command."
+  },
+  "app.gateway.cliConnectionCommandCopyFailed": {
+    "defaultMessage": "CLI connection command for {gatewayName} could not be copied",
+    "description": "Error notification when copying a gateway CLI command fails."
+  },
+  "app.gateway.cluster": {
+    "defaultMessage": "Cluster",
+    "description": "Heading for the gateway placement cluster column."
+  },
+  "app.gateway.copyCliConnectionCommand": {
+    "defaultMessage": "Copy CLI connection command",
+    "description": "Menu action that copies a gateway's CLI connection command."
+  },
+  "app.gateway.copyConnectionCommand": {
+    "defaultMessage": "Copy connection command for {gatewayName}",
+    "description": "Accessible label for copying a specific gateway's CLI connection command."
+  },
+  "app.gateway.copyEndpoint": {
+    "defaultMessage": "Copy gateway endpoint for {gatewayName}",
+    "description": "Accessible label for copying a specific gateway's network endpoint."
+  },
+  "app.gateway.delete": {
+    "defaultMessage": "Delete gateway",
+    "description": "Action that permanently deletes a gateway."
+  },
+  "app.gateway.delete.confirmation": {
+    "defaultMessage": "Deleting {gatewayName} will permanently remove the gateway. This action cannot be undone.",
+    "description": "Warning shown before permanently deleting a gateway."
+  },
+  "app.gateway.delete.error.body": {
+    "defaultMessage": "No changes were made. Try again.",
+    "description": "Recovery guidance when gateway deletion fails."
+  },
+  "app.gateway.delete.error.title": {
+    "defaultMessage": "Gateway could not be deleted",
+    "description": "Title shown when gateway deletion fails."
+  },
+  "app.gateway.delete.pending": {
+    "defaultMessage": "Deleting gateway",
+    "description": "Accessible progress text while a gateway is being deleted."
+  },
+  "app.gateway.delete.title": {
+    "defaultMessage": "Delete {gatewayName}?",
+    "description": "Title for the gateway deletion confirmation dialog."
+  },
+  "app.gateway.deleted": {
+    "defaultMessage": "Gateway {gatewayName} deleted",
+    "description": "Success notification after deleting a gateway."
+  },
+  "app.gateway.endpoint": {
+    "defaultMessage": "Gateway endpoint",
+    "description": "Label for an OpenShell gateway network endpoint."
+  },
+  "app.gateway.load.error.body": {
+    "defaultMessage": "Refresh the page to try again.",
+    "description": "Recovery guidance when gateway data cannot be loaded."
+  },
+  "app.gateway.load.error.title": {
+    "defaultMessage": "Gateways could not be loaded",
+    "description": "Title shown when gateway data cannot be loaded from the API."
+  },
+  "app.gateway.loading": {
+    "defaultMessage": "Loading gateways",
+    "description": "Accessible label shown while gateway data is loading."
+  },
+  "app.gateway.managedDatabaseId": {
+    "defaultMessage": "Managed database ID",
+    "description": "Label for a gateway's managed database identifier."
+  },
+  "app.gateway.name": {
+    "defaultMessage": "Gateway name",
+    "description": "Label for a gateway name form field."
+  },
+  "app.gateway.namespace": {
+    "defaultMessage": "Namespace",
+    "description": "Label for a gateway namespace form field."
+  },
+  "app.gateway.openConsole": {
+    "defaultMessage": "Open gateway console",
+    "description": "Action that opens an OpenShell gateway's console."
+  },
+  "app.gateway.openConsoleFor": {
+    "defaultMessage": "Open console for {gatewayName} in a new tab",
+    "description": "Accessible label for opening a specific gateway console in a new tab."
+  },
+  "app.gateway.releaseId": {
+    "defaultMessage": "Gateway release ID",
+    "description": "Label for a gateway's release identifier."
+  },
+  "app.gateway.rename": {
+    "defaultMessage": "Rename gateway",
+    "description": "Action that changes a gateway's name."
+  },
+  "app.gateway.rename.error.body": {
+    "defaultMessage": "No changes were made. Choose a different name or try again.",
+    "description": "Recovery guidance when gateway renaming fails."
+  },
+  "app.gateway.rename.error.title": {
+    "defaultMessage": "Gateway could not be renamed",
+    "description": "Title shown when gateway renaming fails."
+  },
+  "app.gateway.rename.pending": {
+    "defaultMessage": "Renaming gateway",
+    "description": "Accessible progress text while a gateway is being renamed."
+  },
+  "app.gateway.rename.title": {
+    "defaultMessage": "Rename {gatewayName}",
+    "description": "Title for the gateway rename dialog."
+  },
+  "app.gateway.renamed": {
+    "defaultMessage": "Gateway renamed to {gatewayName}",
+    "description": "Success notification after renaming a gateway."
+  },
+  "app.gateway.rowActions": {
+    "defaultMessage": "Actions for {gatewayName}",
+    "description": "Accessible label for a gateway row actions menu."
+  },
+  "app.gateway.singular": {
+    "defaultMessage": "Gateway",
+    "description": "Fallback breadcrumb label while a gateway is loading."
+  },
+  "app.gateways.refresh": {
+    "defaultMessage": "Refresh gateways",
+    "description": "Accessible label for refreshing the gateway list."
   },
   "app.hello.description": {
     "defaultMessage": "The HyperShell web console is ready for development.",
@@ -15,6 +171,10 @@
     "defaultMessage": "Hello world",
     "description": "Main heading on the initial web-console landing page."
   },
+  "app.nav.gateways": {
+    "defaultMessage": "OpenShell Gateways",
+    "description": "Page and resource collection label for OpenShell gateways."
+  },
   "app.notFound.body": {
     "defaultMessage": "Check the address and try again.",
     "description": "Recovery guidance shown when an application route does not exist."
@@ -23,6 +183,62 @@
     "defaultMessage": "Page not found",
     "description": "Heading shown when an application route does not exist."
   },
+  "app.notifications": {
+    "defaultMessage": "Notifications",
+    "description": "Accessible label for transient application notifications."
+  },
+  "app.page.gateway.description": {
+    "defaultMessage": "Review this gateway's configuration and operational status.",
+    "description": "Supporting text on the gateway detail page."
+  },
+  "app.page.gatewayDetails.title": {
+    "defaultMessage": "Gateway details",
+    "description": "Metadata title for a user-facing gateway details page."
+  },
+  "app.page.gatewayProvision.description": {
+    "defaultMessage": "Configure a new OpenShell gateway.",
+    "description": "Supporting text on the gateway provisioning page."
+  },
+  "app.page.gatewayProvision.error.body": {
+    "defaultMessage": "Check the values and try again.",
+    "description": "Recovery guidance when gateway provisioning fails."
+  },
+  "app.page.gatewayProvision.error.title": {
+    "defaultMessage": "Gateway could not be provisioned",
+    "description": "Title shown when gateway provisioning fails."
+  },
+  "app.page.gatewayProvision.pending": {
+    "defaultMessage": "Provisioning gateway",
+    "description": "Accessible progress text while a gateway is provisioning."
+  },
+  "app.page.gatewayProvision.title": {
+    "defaultMessage": "Provision gateway",
+    "description": "Page title and action for provisioning a gateway."
+  },
+  "app.page.gateways.description": {
+    "defaultMessage": "HyperShell gateways.",
+    "description": "Browser metadata description for the gateways page."
+  },
+  "app.page.gateways.empty.body": {
+    "defaultMessage": "Provisioned gateways will appear here.",
+    "description": "Body text when the gateway list is empty."
+  },
+  "app.page.gateways.empty.title": {
+    "defaultMessage": "No gateways",
+    "description": "Heading when the gateway list is empty."
+  },
+  "app.page.gateways.filter": {
+    "defaultMessage": "Filter by name, cluster, status, or endpoint",
+    "description": "Placeholder and accessible label for gateway search."
+  },
+  "app.page.gateways.noResults.body": {
+    "defaultMessage": "Adjust or clear the filter to see gateways.",
+    "description": "Guidance when no gateways match the current filter."
+  },
+  "app.page.gateways.noResults.title": {
+    "defaultMessage": "No matching gateways",
+    "description": "Heading when no gateways match the current filter."
+  },
   "app.productName": {
     "defaultMessage": "HyperShell",
     "description": "HyperShell product name."
@@ -30,5 +246,25 @@
   "app.skipToContent": {
     "defaultMessage": "Skip to content",
     "description": "Accessibility link that moves focus to the main page content."
+  },
+  "app.table.clearFilters": {
+    "defaultMessage": "Clear filters",
+    "description": "Action that clears collection filters."
+  },
+  "app.table.column.actions": {
+    "defaultMessage": "Actions",
+    "description": "Accessible heading for table row actions."
+  },
+  "app.table.column.status": {
+    "defaultMessage": "Status",
+    "description": "Heading for a resource status column."
+  },
+  "app.table.results": {
+    "defaultMessage": "results",
+    "description": "Context announced after a filtered collection result count."
+  },
+  "app.value.notAvailable": {
+    "defaultMessage": "Not available",
+    "description": "Shown when the API does not provide a value."
   }
 }

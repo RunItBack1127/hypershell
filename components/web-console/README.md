@@ -6,7 +6,7 @@ The web console is a React 19 single-page application built with React Router Fr
 
 React, React Router, and TanStack Query are driving adapters. A real product workflow enters a framework-independent application use case, which owns the purposeful ports needed for API, session, storage, time, and domain-probe effects. SDK and other infrastructure imports belong only in concrete adapters and the explicit runtime composition root. Pure helpers and presentational components remain direct code and do not receive ceremonial interfaces.
 
-The current Hello world scaffold has no domain workflow or API query, so it intentionally defines no empty API port or pass-through SDK adapter. The former unused global SDK singleton has been removed. The first API-backed feature must add its use case, capability-shaped port, SDK adapter, TanStack query integration, and composition together.
+API-backed workflows enter application use cases through capability-shaped ports. Generated SDK access is isolated in adapters, while TanStack Query owns presentation-side cache and synchronization policy.
 
 `domain-probes/` is the shared browser/BFF probe contract and fan-out implementation. Each real workflow must own a closed probe union and checked catalog, then compose at least two production sinks. ESLint enforces the inward dependency rule, SDK and telemetry adapter boundaries, external-effect restrictions, and the production `console.*` ban.
 
@@ -66,4 +66,6 @@ podman run --rm \
   localhost/hypershell-web-console:dev
 ```
 
-The image is multi-stage and pins Red Hat's `hi/nodejs` builder and runtime variants by digest. Its runtime contains the production BFF dependency closure and built assets, runs as a numeric non-root user, writes no files, exposes port 8080, and provides `/health/live` and `/health/ready` probes. The initial public Hello world scaffold intentionally exposes no API proxy or authentication bypass; OIDC session and authenticated API proxy work belongs to the next architecture delivery increment.
+The image is multi-stage and pins Red Hat's `hi/nodejs` builder and runtime variants by digest. Its runtime contains the production BFF dependency closure and built assets, runs as a numeric non-root user, writes no files, exposes port 8080, and provides `/health/live` and `/health/ready` probes.
+
+The BFF proxies `/api/*` to the fixed `HYPERSHELL_API_ORIGIN` origin, which defaults to `http://127.0.0.1:8000` for a colocated API. Set that variable to an HTTP(S) origin reachable from the container when the API is deployed separately. Browser cookies and authorization headers are not forwarded; the current product assumption is that all gateway records are visible. `HYPERSHELL_API_TIMEOUT_MS` bounds each upstream request and defaults to 30 seconds.
