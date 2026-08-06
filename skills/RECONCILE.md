@@ -45,28 +45,30 @@ skills/
 
 ## Reconciliation State
 
-**Last analyzed**: 2026-08-06 (post-reconciliation)
-**Spec corpus**: 9 specs across 2 domains (5 gateway sub-specs added)
-**Codebase commit**: 0585632+waves (add-gateway-reconciler-e2e)
+**Last analyzed**: 2026-08-06 (post-rebase on main including gateway reconciler PR #14)
+**Spec corpus**: 16 specs across 3 domains (including 5 gateway sub-specs)
+**Codebase commit**: f27730f + local-development reconciliation
 
 ### Coverage Summary
 
 | Domain | Specs | Requirements | Present | Partial | Missing | Coverage |
 |--------|-------|-------------|---------|---------|---------|----------|
 | Platform — Core | 2 | 9 | 9 | 0 | 0 | 100% |
+| Platform — Local Dev | 1 | 17 | 13 | 3 | 1 | 85% |
 | Platform — Gateway | 1 | 10 | 8 | 1 | 1 | 85% |
 | Platform — Gateway DB | 1 | 7 | 4 | 0 | 3 | 57% |
 | Platform — Gateway TLS | 1 | 4 | 4 | 0 | 0 | 100% |
 | Platform — Gateway OIDC | 1 | 4 | 3 | 1 | 0 | 88% |
 | Platform — Gateway Routing | 1 | 7 | 6 | 1 | 0 | 93% |
-| Standards | 3 | 0 | 0 | 0 | 0 | N/A |
-| **TOTAL** | **9** | **41** | **34** | **3** | **4** | **85%** |
+| Standards | 13 | 0 | 0 | 0 | 0 | N/A |
+| Web console | 1 | 28 | 10 | 9 | 9 | 52% |
+| **TOTAL** | **22** | **86** | **57** | **15** | **14** | **73%** |
 
 ### Spec Dependency Order
 
 ```
 Layer 0 (roots):  data-model, standards/*
-Layer 1:          control-plane
+Layer 1:          control-plane, local-development, web-console architecture
 Layer 2:          openshell-gateway (core)
 Layer 3:          openshell-gateway-database, openshell-gateway-tls
 Layer 4:          openshell-gateway-oidc (depends on TLS for trusted CA)
@@ -140,6 +142,28 @@ Layer 5:          openshell-gateway-routing (depends on TLS for BackendTLSPolicy
 |---|------|--------|-----|------|------|
 | E1 | StatefulSet → Deployment | Aligned | e2e now checks `deployment` | 196-216 | W1 ✅ |
 
+### local-development.spec.md
+
+| # | Requirement | Status | Gap | Code Location | Priority |
+|---|-------------|--------|-----|---------------|----------|
+| L1 | Single-Command Setup (`kind-up`) | Present | Root Makefile + `scripts/kind/up.sh` | `Makefile`, `scripts/kind/up.sh` | P0 |
+| L2 | Per-Component Swap | Missing | Swap targets not yet implemented | — | P1 |
+| L3 | Cluster Teardown (`kind-down`) | Present | Root Makefile + `scripts/kind/down.sh` | `Makefile`, `scripts/kind/down.sh` | P0 |
+| L4 | Cluster Status (`kind-status`) | Present | Root Makefile + `scripts/kind/status.sh` | `Makefile`, `scripts/kind/status.sh` | P0 |
+| L5 | Configurable Cluster Name | Present | `KIND_CLUSTER_NAME` in lib.sh | `scripts/kind/lib.sh` | — |
+| L6 | Hostname Routing (Gateway API) | Partial | HTTPRoutes + `/etc/hosts` wired; multi-namespace routing missing | `deploy/kind/prerequisites/` | P1 |
+| L7 | NodePort Fallback | Partial | Config variables defined; nodeport-services.yaml exists | `scripts/kind/lib.sh` | P2 |
+| L8 | Gateway via REST API | Present | Fleet + Gateway seeded via curl in up.sh | `scripts/kind/up.sh` | P0 |
+| L9 | Controller RBAC | Present | ClusterRole + ClusterRoleBinding | `deploy/kind/controller-rbac.yaml` | P0 |
+| L10 | API Server Database | Present | postgres.yaml (Secret + Deployment + Service) | `deploy/kind/postgres.yaml` | P0 |
+| L11 | Hot Reload | Missing | Not yet implemented | — | P2 |
+| L12 | Multi-Namespace Deployments | Missing | Not yet implemented | — | P2 |
+| L13 | Swap Tracking | Missing | `.kind-swaps` file not implemented | — | P2 |
+| L14 | Developer Documentation | Present | `DEVELOPMENT.md` created | `DEVELOPMENT.md` | P0 |
+| L15 | Container Engine Support | Present | Auto-detection (Podman preferred) | `scripts/kind/lib.sh` | — |
+| L16 | Offline Development (`LOCAL_IMAGES`) | Present | `build-images.sh` + up.sh integration | `scripts/kind/build-images.sh` | — |
+| L17 | Red Hat HI Images | Partial | Spec requires HI; `KIND_DB_IMAGE` override exists but default still standard RHEL | — | P1 |
+
 ---
 
 ## Wave Plan
@@ -204,6 +228,10 @@ Layer 5:          openshell-gateway-routing (depends on TLS for BackendTLSPolicy
 - D4: Manual Credential Rotation
 - D6: Database Field Immutability (API server validation)
 - D7: Gateway Deletion Protection (API server validation)
+- L2: Per-Component Swap targets (`kind-<component>-up` / `kind-<component>-down`)
+- L11: Hot Reload (web console source mount + `npm run dev`)
+- L12: Multi-Namespace Deployments (`kind-deploy` / `kind-undeploy`)
+- L13: Swap Tracking (`.kind-swaps` file)
 
 ---
 
@@ -218,3 +246,5 @@ Layer 5:          openshell-gateway-routing (depends on TLS for BackendTLSPolicy
 | 2026-08-05 | working tree | Web-console bootstrap increments 1-3 | 64% overall | Root pnpm migration, browser-compatible SDK, React Router/PatternFly scaffold, secure static BFF, tests, and production container; authenticated product increments remain open |
 | 2026-08-06 | 0585632 | Gap analysis after gateway spec update | 44% | 5 gateway sub-specs added; 19 missing, 7 partial, 15 present |
 | 2026-08-06 | 0585632+W1-W4 | Executed waves 1-4 | 85% | 4 waves: Deployment+PG, cert-manager, OIDC+CA, GatewayAPI |
+| 2026-08-06 | working tree | Local-dev reconciliation | 73% | Kind cluster scripts, deploy manifests, REST API seeding, controller RBAC, DEVELOPMENT.md |
+| 2026-08-06 | f27730f | Rebased on main (PR #14 gateway reconciler merged) | 73% | Gateway reconciler in codebase; updated Dockerfiles with dropreplace + -mod=mod; control-plane Dockerfile with manifests COPY |
