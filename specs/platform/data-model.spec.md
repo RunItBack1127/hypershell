@@ -11,7 +11,7 @@ The HyperShell API server provides a control plane for deploying and managing di
 - **ManagedCluster** — a Kubernetes cluster registered into a fleet. Tracks provider, region, API server URL, and a kubeconfig secret reference.
 - **ManagedDatabase** — a database instance provisioned for a fleet. Tracks provider, region, engine type/version, instance class, and a connection secret reference.
 - **GatewayRelease** — a versioned container image for gateway deployments within a fleet. Supports rollout strategies with canary percent/duration controls.
-- **Gateway** — an API gateway instance deployed onto a specific cluster, using a specific release and database, within a namespace. Tracks TLS mode, service type, external DNS, and lifecycle phase.
+- **Gateway** — an API gateway instance deployed onto a specific cluster, using a specific release and database, within a namespace. Tracks TLS mode, service type, external DNS, lifecycle phase, OIDC authentication configuration, server DNS names for TLS certificates, and optional inline database provisioning config. The control plane reconciles Gateway resources into Kubernetes workloads (see [gateway deployment spec](openshell-gateway-deployment.spec.md)).
 - **GatewayNetwork** — defines network connectivity topology between gateways in a fleet. Supports tunnel modes and designates a hub gateway for hub-and-spoke or mesh networking.
 
 ## Entity Relationship Diagram
@@ -84,6 +84,11 @@ erDiagram
         string external_dns
         string tls_mode
         string service_type
+        jsonb database
+        jsonb oidc
+        string[] server_dns_names
+        string route_address
+        text config
         string status
         string phase
         time created_at
@@ -147,6 +152,38 @@ A Gateway SHALL track its deployment lifecycle through the `phase` field. The `s
 - WHEN the control plane provisions it on the target cluster
 - THEN the phase SHALL transition to "Provisioning"
 - AND upon successful deployment, to "Running"
+
+### Requirement: Gateway Database Strategy
+
+A Gateway SHALL support two mutually exclusive database strategies: referencing an external ManagedDatabase via `database_id`, or provisioning an in-cluster PostgreSQL instance via the inline `database` JSONB field. Setting both is a validation error. The inline `database` field accepts `image` (PostgreSQL container image) and `storage_size` (PVC size, default `5Gi`). See [database provisioning spec](openshell-gateway-database.spec.md).
+
+#### Scenario: Inline Database
+- GIVEN a Gateway with `database: {image: "registry.access.redhat.com/hi/postgresql:18"}` and `database_id` null
+- WHEN the control plane processes the Gateway
+- THEN it SHALL provision an in-cluster PostgreSQL instance in the Gateway's namespace
+
+#### Scenario: External Database
+- GIVEN a Gateway with `database_id` referencing a ManagedDatabase and no inline `database`
+- WHEN the control plane processes the Gateway
+- THEN it SHALL use the ManagedDatabase's connection endpoint
+
+### Requirement: Gateway OIDC Configuration
+
+A Gateway SHALL support optional OIDC authentication via the `oidc` JSONB field. When `oidc.issuer` is set, the control plane injects OIDC settings into the gateway's configuration and disables unauthenticated access. See [OIDC spec](openshell-gateway-oidc.spec.md).
+
+#### Scenario: OIDC Enabled
+- GIVEN a Gateway with `oidc: {issuer: "https://keycloak.example.com/realms/hypershell", audience: "hypershell-frontend"}`
+- WHEN the control plane generates the gateway configuration
+- THEN the OIDC section SHALL be injected into `gateway.toml`
+- AND `allow_unauthenticated_users` SHALL be `false`
+
+### Requirement: Gateway Server DNS Names
+
+A Gateway SHALL declare TLS certificate DNS SANs via the `server_dns_names` field. The control plane uses these names when issuing certificates via cert-manager or the certgen Job. See [TLS spec](openshell-gateway-tls.spec.md).
+
+### Requirement: Gateway Route Address
+
+The `route_address` field SHALL be set by the control plane (not the user) after creating GRPCRoute resources. It contains the gateway's external gRPC endpoint (e.g. `grpcs://openshell-gateway.gw.localhost:443`). See [routing spec](openshell-gateway-routing.spec.md).
 
 ### Requirement: Canary Release Strategy
 
