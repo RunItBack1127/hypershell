@@ -98,7 +98,7 @@ func ApplyManifestToNamespace(manifest *unstructured.Unstructured, namespace str
 	}
 	dbImage := config.Database.Image
 	if dbImage == "" {
-		dbImage = "registry.redhat.io/rhel9/postgresql-16:latest"
+		dbImage = "postgres:16"
 	}
 	dbStorage := config.Database.StorageSize
 	if dbStorage == "" {
@@ -131,7 +131,7 @@ func ApplyDatabaseOverrides(obj *unstructured.Unstructured, dbConfig DatabaseCon
 	}
 	dbImage := dbConfig.Image
 	if dbImage == "" {
-		dbImage = "registry.redhat.io/rhel9/postgresql-16:latest"
+		dbImage = "postgres:16"
 	}
 
 	if strings.Contains(manifestJSON, "DB_STORAGE_PLACEHOLDER") || strings.Contains(manifestJSON, "DB_IMAGE_PLACEHOLDER") {
