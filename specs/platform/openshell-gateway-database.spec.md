@@ -41,7 +41,7 @@ The GatewayReconciler SHALL dynamically detect the PostgreSQL image variant and 
 
 This detection SHALL be applied in both the credential Secret provisioning and the Deployment manifest construction, ensuring the env vars in the Deployment match the keys in the Secret and the data volume mount matches the image's expected data directory.
 
-> **Reference implementation:** The upstream `agent-control-plane` repository (`components/ambient-control-plane/internal/gateway/reconciler.go`) uses this same `strings.Contains(pgImage, "rhel")` heuristic.
+> **Reference implementation:** The upstream OpenShell control plane uses this same `strings.Contains(pgImage, "rhel")` heuristic for image variant detection.
 
 ---
 
