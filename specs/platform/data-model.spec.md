@@ -81,6 +81,12 @@ erDiagram
         string release_id FK
         string database_id FK
         string namespace
+        string image
+        string[] server_dns_names
+        jsonb oidc
+        jsonb route
+        text route_address
+        jsonb database
         string external_dns
         string tls_mode
         string service_type
@@ -137,6 +143,23 @@ All resources (ManagedCluster, ManagedDatabase, GatewayRelease, Gateway, Gateway
 - WHEN a POST request is made to `/api/hypershell/v1/gateways`
 - THEN a new Gateway is created within the specified sector
 - AND the Gateway references valid cluster, release, and database resources
+
+### Requirement: Gateway Provisioning Fields
+
+A Gateway SHALL include provisioning configuration fields that the control plane uses to deploy and configure the OpenShell gateway workload on a target cluster.
+
+> **Relationship to fleet management fields:** The `image` field provides a direct image reference for the control plane reconciler, while `release_id` references a GatewayRelease for fleet-level rollout management (canary, rollback). When both are set, `release_id` takes precedence and the reconciler resolves it to an image. Similarly, `database` (JSONB) carries inline provisioning config for the reconciler, while `database_id` references a ManagedDatabase for fleet-level database lifecycle. When `database_id` is set, it takes precedence and the reconciler reads the connection details from the referenced ManagedDatabase.
+
+| Field | Type | Description |
+|---|---|---|
+| `image` | string | Gateway container image reference (e.g., `ghcr.io/nvidia/openshell/gateway:21da343c9f838bd9ac85dc61bf44889de1a72873`) |
+| `server_dns_names` | string[] | DNS names for TLS certificate SANs |
+| `oidc` | JSONB | OIDC authentication config: `{issuer, audience, jwks_ttl, roles_claim, admin_role, user_role, scopes_claim}` |
+| `route` | JSONB | Route exposure config for GRPCRoute provisioning: `{host}` |
+| `route_address` | text | Read-only external address populated by the control plane (e.g., `grpcs://hostname:443`) |
+| `database` | JSONB | Database backend config: `{storageSize, image, externalSecretRef}` |
+
+See [`openshell-gateway.spec.md`](./openshell-gateway.spec.md) and its sub-specs for full provisioning details.
 
 ### Requirement: Gateway Deployment Lifecycle
 

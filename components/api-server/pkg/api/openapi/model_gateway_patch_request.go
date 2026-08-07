@@ -19,17 +19,23 @@ var _ MappedNullable = &GatewayPatchRequest{}
 
 // GatewayPatchRequest struct for GatewayPatchRequest
 type GatewayPatchRequest struct {
-	Name        *string `json:"name,omitempty"`
-	FleetId     *string `json:"fleet_id,omitempty"`
-	ClusterId   *string `json:"cluster_id,omitempty"`
-	ReleaseId   *string `json:"release_id,omitempty"`
-	DatabaseId  *string `json:"database_id,omitempty"`
-	Namespace   *string `json:"namespace,omitempty"`
-	ExternalDns *string `json:"external_dns,omitempty"`
-	TlsMode     *string `json:"tls_mode,omitempty"`
-	ServiceType *string `json:"service_type,omitempty"`
-	Status      *string `json:"status,omitempty"`
-	Phase       *string `json:"phase,omitempty"`
+	Name           *string  `json:"name,omitempty"`
+	FleetId        *string  `json:"fleet_id,omitempty"`
+	ClusterId      *string  `json:"cluster_id,omitempty"`
+	ReleaseId      *string  `json:"release_id,omitempty"`
+	DatabaseId     *string  `json:"database_id,omitempty"`
+	Namespace      *string  `json:"namespace,omitempty"`
+	ExternalDns    *string  `json:"external_dns,omitempty"`
+	TlsMode        *string  `json:"tls_mode,omitempty"`
+	ServiceType    *string  `json:"service_type,omitempty"`
+	Status         *string  `json:"status,omitempty"`
+	Phase          *string  `json:"phase,omitempty"`
+	Image          *string  `json:"image,omitempty"`
+	ServerDnsNames []string `json:"server_dns_names,omitempty"`
+	RouteAddress   *string  `json:"route_address,omitempty"`
+	Oidc           *string  `json:"oidc,omitempty"`
+	Route          *string  `json:"route,omitempty"`
+	DatabaseConfig *string  `json:"database_config,omitempty"`
 }
 
 // NewGatewayPatchRequest instantiates a new GatewayPatchRequest object
@@ -401,6 +407,198 @@ func (o *GatewayPatchRequest) SetPhase(v string) {
 	o.Phase = &v
 }
 
+// GetImage returns the Image field value if set, zero value otherwise.
+func (o *GatewayPatchRequest) GetImage() string {
+	if o == nil || IsNil(o.Image) {
+		var ret string
+		return ret
+	}
+	return *o.Image
+}
+
+// GetImageOk returns a tuple with the Image field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *GatewayPatchRequest) GetImageOk() (*string, bool) {
+	if o == nil || IsNil(o.Image) {
+		return nil, false
+	}
+	return o.Image, true
+}
+
+// HasImage returns a boolean if a field has been set.
+func (o *GatewayPatchRequest) HasImage() bool {
+	if o != nil && !IsNil(o.Image) {
+		return true
+	}
+
+	return false
+}
+
+// SetImage gets a reference to the given string and assigns it to the Image field.
+func (o *GatewayPatchRequest) SetImage(v string) {
+	o.Image = &v
+}
+
+// GetServerDnsNames returns the ServerDnsNames field value if set, zero value otherwise.
+func (o *GatewayPatchRequest) GetServerDnsNames() []string {
+	if o == nil || IsNil(o.ServerDnsNames) {
+		var ret []string
+		return ret
+	}
+	return o.ServerDnsNames
+}
+
+// GetServerDnsNamesOk returns a tuple with the ServerDnsNames field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *GatewayPatchRequest) GetServerDnsNamesOk() ([]string, bool) {
+	if o == nil || IsNil(o.ServerDnsNames) {
+		return nil, false
+	}
+	return o.ServerDnsNames, true
+}
+
+// HasServerDnsNames returns a boolean if a field has been set.
+func (o *GatewayPatchRequest) HasServerDnsNames() bool {
+	if o != nil && !IsNil(o.ServerDnsNames) {
+		return true
+	}
+
+	return false
+}
+
+// SetServerDnsNames gets a reference to the given []string and assigns it to the ServerDnsNames field.
+func (o *GatewayPatchRequest) SetServerDnsNames(v []string) {
+	o.ServerDnsNames = v
+}
+
+// GetRouteAddress returns the RouteAddress field value if set, zero value otherwise.
+func (o *GatewayPatchRequest) GetRouteAddress() string {
+	if o == nil || IsNil(o.RouteAddress) {
+		var ret string
+		return ret
+	}
+	return *o.RouteAddress
+}
+
+// GetRouteAddressOk returns a tuple with the RouteAddress field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *GatewayPatchRequest) GetRouteAddressOk() (*string, bool) {
+	if o == nil || IsNil(o.RouteAddress) {
+		return nil, false
+	}
+	return o.RouteAddress, true
+}
+
+// HasRouteAddress returns a boolean if a field has been set.
+func (o *GatewayPatchRequest) HasRouteAddress() bool {
+	if o != nil && !IsNil(o.RouteAddress) {
+		return true
+	}
+
+	return false
+}
+
+// SetRouteAddress gets a reference to the given string and assigns it to the RouteAddress field.
+func (o *GatewayPatchRequest) SetRouteAddress(v string) {
+	o.RouteAddress = &v
+}
+
+// GetOidc returns the Oidc field value if set, zero value otherwise.
+func (o *GatewayPatchRequest) GetOidc() string {
+	if o == nil || IsNil(o.Oidc) {
+		var ret string
+		return ret
+	}
+	return *o.Oidc
+}
+
+// GetOidcOk returns a tuple with the Oidc field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *GatewayPatchRequest) GetOidcOk() (*string, bool) {
+	if o == nil || IsNil(o.Oidc) {
+		return nil, false
+	}
+	return o.Oidc, true
+}
+
+// HasOidc returns a boolean if a field has been set.
+func (o *GatewayPatchRequest) HasOidc() bool {
+	if o != nil && !IsNil(o.Oidc) {
+		return true
+	}
+
+	return false
+}
+
+// SetOidc gets a reference to the given string and assigns it to the Oidc field.
+func (o *GatewayPatchRequest) SetOidc(v string) {
+	o.Oidc = &v
+}
+
+// GetRoute returns the Route field value if set, zero value otherwise.
+func (o *GatewayPatchRequest) GetRoute() string {
+	if o == nil || IsNil(o.Route) {
+		var ret string
+		return ret
+	}
+	return *o.Route
+}
+
+// GetRouteOk returns a tuple with the Route field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *GatewayPatchRequest) GetRouteOk() (*string, bool) {
+	if o == nil || IsNil(o.Route) {
+		return nil, false
+	}
+	return o.Route, true
+}
+
+// HasRoute returns a boolean if a field has been set.
+func (o *GatewayPatchRequest) HasRoute() bool {
+	if o != nil && !IsNil(o.Route) {
+		return true
+	}
+
+	return false
+}
+
+// SetRoute gets a reference to the given string and assigns it to the Route field.
+func (o *GatewayPatchRequest) SetRoute(v string) {
+	o.Route = &v
+}
+
+// GetDatabaseConfig returns the DatabaseConfig field value if set, zero value otherwise.
+func (o *GatewayPatchRequest) GetDatabaseConfig() string {
+	if o == nil || IsNil(o.DatabaseConfig) {
+		var ret string
+		return ret
+	}
+	return *o.DatabaseConfig
+}
+
+// GetDatabaseConfigOk returns a tuple with the DatabaseConfig field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *GatewayPatchRequest) GetDatabaseConfigOk() (*string, bool) {
+	if o == nil || IsNil(o.DatabaseConfig) {
+		return nil, false
+	}
+	return o.DatabaseConfig, true
+}
+
+// HasDatabaseConfig returns a boolean if a field has been set.
+func (o *GatewayPatchRequest) HasDatabaseConfig() bool {
+	if o != nil && !IsNil(o.DatabaseConfig) {
+		return true
+	}
+
+	return false
+}
+
+// SetDatabaseConfig gets a reference to the given string and assigns it to the DatabaseConfig field.
+func (o *GatewayPatchRequest) SetDatabaseConfig(v string) {
+	o.DatabaseConfig = &v
+}
+
 func (o GatewayPatchRequest) MarshalJSON() ([]byte, error) {
 	toSerialize, err := o.ToMap()
 	if err != nil {
@@ -443,6 +641,24 @@ func (o GatewayPatchRequest) ToMap() (map[string]interface{}, error) {
 	}
 	if !IsNil(o.Phase) {
 		toSerialize["phase"] = o.Phase
+	}
+	if !IsNil(o.Image) {
+		toSerialize["image"] = o.Image
+	}
+	if !IsNil(o.ServerDnsNames) {
+		toSerialize["server_dns_names"] = o.ServerDnsNames
+	}
+	if !IsNil(o.RouteAddress) {
+		toSerialize["route_address"] = o.RouteAddress
+	}
+	if !IsNil(o.Oidc) {
+		toSerialize["oidc"] = o.Oidc
+	}
+	if !IsNil(o.Route) {
+		toSerialize["route"] = o.Route
+	}
+	if !IsNil(o.DatabaseConfig) {
+		toSerialize["database_config"] = o.DatabaseConfig
 	}
 	return toSerialize, nil
 }
