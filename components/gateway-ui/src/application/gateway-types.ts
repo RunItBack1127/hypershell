@@ -9,6 +9,7 @@ export interface GatewayRecord {
   oidcAudience?: string;
   oidcClientId?: string;
   oidcIssuer?: string;
+  oidcScopes?: string;
   phase?: string;
   releaseId: string;
   status?: string;
@@ -49,6 +50,13 @@ export interface GatewayInvocationContext {
 export interface GatewayProvisionInput {
   name: string;
   namespace: string;
+  releaseId: string;
+}
+
+export interface GatewayReleaseOption {
+  id: string;
+  image: string;
+  name: string;
 }
 
 export type GatewayFailureKind =
@@ -79,6 +87,9 @@ export interface GatewayControlPlane {
     request: GatewayListRequest,
     context: GatewayInvocationContext,
   ): Promise<GatewayPage<GatewayRecord>>;
+  listGatewayReleases(
+    context: GatewayInvocationContext,
+  ): Promise<readonly GatewayReleaseOption[]>;
   provisionGateway(
     input: GatewayProvisionInput,
     context: GatewayInvocationContext,
@@ -101,6 +112,9 @@ export interface GatewayOperations {
     request: GatewayListRequest,
     signal?: AbortSignal,
   ): Promise<GatewayPage<GatewayRecord>>;
+  listGatewayReleases(
+    signal?: AbortSignal,
+  ): Promise<readonly GatewayReleaseOption[]>;
   provisionGateway(
     input: GatewayProvisionInput,
     signal?: AbortSignal,

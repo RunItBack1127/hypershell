@@ -2,13 +2,13 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: hypershell-api-server
-  namespace: hypershell-system
+  namespace: NAMESPACE_PLACEHOLDER
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: hypershell-api-server
-  namespace: hypershell-system
+  namespace: NAMESPACE_PLACEHOLDER
 spec:
   replicas: 1
   selector:
@@ -18,16 +18,23 @@ spec:
     metadata:
       labels:
         app: hypershell-api-server
+      annotations:
+        hypershell.redhat.io/baseline-image: API_IMAGE_PLACEHOLDER
+        hypershell.redhat.io/image-revision: API_IMAGE_REVISION_PLACEHOLDER
     spec:
       serviceAccountName: hypershell-api-server
       securityContext:
         runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
       initContainers:
         - name: migrate
-          image: quay.io/redhat-services-prod/hcm-eng-prod-tenant/hypershell-main/hypershell-api-server-main:latest
-          imagePullPolicy: IfNotPresent
+          image: API_IMAGE_PLACEHOLDER
+          imagePullPolicy: IMAGE_PULL_POLICY_PLACEHOLDER
           securityContext:
             allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
           command:
@@ -52,10 +59,12 @@ spec:
               readOnly: true
       containers:
         - name: api-server
-          image: quay.io/redhat-services-prod/hcm-eng-prod-tenant/hypershell-main/hypershell-api-server-main:latest
-          imagePullPolicy: IfNotPresent
+          image: API_IMAGE_PLACEHOLDER
+          imagePullPolicy: IMAGE_PULL_POLICY_PLACEHOLDER
           securityContext:
             allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
           command:
@@ -115,7 +124,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: hypershell-api-server
-  namespace: hypershell-system
+  namespace: NAMESPACE_PLACEHOLDER
 spec:
   selector:
     app: hypershell-api-server

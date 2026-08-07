@@ -1,0 +1,11 @@
+FROM registry.access.redhat.com/hi/nodejs:24.18.1-builder@sha256:63f3ae9ba3ac4af3c809d58c0845effbfbb75a6f2e08148af8ae2e95d889132f
+
+USER 0
+ADD --checksum=sha256:27460629b10111604e7f98882753b53398986820c20e0a065f3a4a5e9e7db71f \
+    https://registry.npmjs.org/pnpm/-/pnpm-11.15.1.tgz /tmp/pnpm.tgz
+RUN npm install --global /tmp/pnpm.tgz --ignore-scripts \
+    && test "$(pnpm --version)" = "11.15.1" \
+    && rm /tmp/pnpm.tgz
+
+USER 65532:65532
+WORKDIR /mnt/host

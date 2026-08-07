@@ -7,6 +7,10 @@
     "defaultMessage": "Close",
     "description": "Accessible label for closing an overlay."
   },
+  "app.action.tryAgain": {
+    "defaultMessage": "Try again",
+    "description": "Action that retries a failed operation."
+  },
   "app.breadcrumb.ariaLabel": {
     "defaultMessage": "Breadcrumb",
     "description": "Accessible label for the application breadcrumb navigation."
@@ -122,6 +126,26 @@
   "app.gateway.openConsoleFor": {
     "defaultMessage": "Open console for {gatewayName} in a new tab",
     "description": "Accessible label for opening a specific gateway console in a new tab."
+  },
+  "app.gateway.release": {
+    "defaultMessage": "Gateway release",
+    "description": "Label for selecting the release used by a new gateway."
+  },
+  "app.gateway.release.empty": {
+    "defaultMessage": "No gateway releases are available",
+    "description": "Warning shown when no release can be selected."
+  },
+  "app.gateway.release.loadError": {
+    "defaultMessage": "Gateway releases could not be loaded",
+    "description": "Error shown when release choices cannot be loaded."
+  },
+  "app.gateway.release.noResults": {
+    "defaultMessage": "No matching gateway releases",
+    "description": "Message shown when release filtering has no results."
+  },
+  "app.gateway.release.select": {
+    "defaultMessage": "Select a gateway release",
+    "description": "Placeholder for the gateway release typeahead."
   },
   "app.gateway.releaseId": {
     "defaultMessage": "Gateway release ID",

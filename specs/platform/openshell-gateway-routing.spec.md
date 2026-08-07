@@ -9,7 +9,7 @@
 
 ## Purpose
 
-This specification defines how OpenShell gateways are exposed to external clients. Two routing strategies are supported: **Gateway API** (GRPCRoute + BackendTLSPolicy for clusters with Gateway API support) and **NLB passthrough** (for ROSA/AWS clusters where CloudFront breaks gRPC). The control plane auto-detects the available strategy. A NetworkPolicy for external router ingress is required for both strategies.
+This specification defines how OpenShell gateways are exposed to external clients. Two routing strategies are supported: **Gateway API** (GRPCRoute + BackendTLSPolicy for clusters with Gateway API support) and **NLB passthrough** (for ROSA/AWS clusters where CloudFront breaks gRPC). The control plane auto-detects the available strategy. A NetworkPolicy for public gateway ingress is required for both strategies.
 
 ---
 
@@ -132,17 +132,20 @@ The Route hostname must be included in the gateway's `serverDnsNames` so the cer
 
 ---
 
-### Requirement: NetworkPolicy for External Router Ingress
+### Requirement: NetworkPolicy for External Gateway Ingress
 
-The GatewayReconciler creates `openshell-gateway-allow-sandbox` which allows ingress only from pods in the same namespace. Router pods in `openshift-ingress` are blocked by this policy. A separate NetworkPolicy SHALL be required for external route connectivity.
+The GatewayReconciler creates sandbox NetworkPolicies which select the gateway pod. Once any ingress policy selects a pod, traffic not allowed by the union of its ingress rules is denied. The reconciler SHALL therefore create a separate `openshell-gateway-public-grpc` NetworkPolicy whenever it deploys the gateway. That policy SHALL permit TCP ingress to the public gRPC port `8080` without exposing the health or metrics ports. Gateway authentication and TLS remain responsible for application-level access control.
 
-#### Scenario: Router NetworkPolicy required for NLB passthrough
+The policy is required for both routing strategies: a Gateway API data plane must establish its re-encrypted backend connection, and an NLB passthrough path must deliver external traffic to the pod. Local development exercises the Gateway API data plane and SHALL NOT add a direct-access Service bypass.
 
-- GIVEN an OpenShell gateway exposed via NLB passthrough Route
+#### Scenario: Public gRPC NetworkPolicy required for routed traffic
+
+- GIVEN an OpenShell gateway exposed by a GRPCRoute or NLB passthrough Route
 - AND the gateway namespace has NetworkPolicies applied
-- WHEN an external client connects via the NLB
-- THEN HAProxy router pods in `openshift-ingress` namespace must reach the gateway pod on port 8080
-- AND without the router NetworkPolicy, the TLS handshake hangs with zero bytes read
+- WHEN an external client invokes a gateway gRPC method
+- THEN the routing data plane must reach the gateway pod on port 8080
+- AND ports 8081 and 9090 SHALL NOT be opened by the public ingress policy
+- AND an end-to-end test SHALL invoke the `openshell.v1.OpenShell/Health` RPC through the external route rather than treating route acceptance or a frontend TLS handshake as proof of backend connectivity
 
 #### NetworkPolicy Definition
 
@@ -150,7 +153,7 @@ The GatewayReconciler creates `openshell-gateway-allow-sandbox` which allows ing
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: openshell-gateway-allow-router
+  name: openshell-gateway-public-grpc
   namespace: <tenant-namespace>
 spec:
   podSelector:
@@ -158,18 +161,10 @@ spec:
       app.kubernetes.io/instance: openshell-gateway
       app.kubernetes.io/name: openshell
   ingress:
-  - from:
-    - namespaceSelector:
-        matchLabels:
-          kubernetes.io/metadata.name: openshift-ingress
-    ports:
+  - ports:
     - port: 8080
       protocol: TCP
-    - port: 8081
-      protocol: TCP
 ```
-
-> **Implementation note:** The reconciler SHOULD create this NetworkPolicy automatically when it detects OpenShift (`isOpenShift=true`). This is a known gap — currently it must be created manually. See "Reconciler Improvements" below.
 
 ---
 
@@ -198,14 +193,26 @@ The Gateway resource SHALL support an optional `route` field that declares exter
 
 #### Scenario: Gateway with auto-assigned route host
 
-- GIVEN a Gateway with `route: {}`
-- THEN the GRPCRoute hostname SHALL be `openshell-gateway-<namespace>.hsgw.<base-domain>`
+- GIVEN Gateway API routing is enabled
+- AND a Gateway API record omits `external_dns`
+- AND `GATEWAY_API_BASE_DOMAIN` is configured as `hsgw.<cluster-base-domain>`
+- THEN the control plane SHALL derive `external_dns` as `openshell-gateway-<namespace>.hsgw.<cluster-base-domain>`
+- AND it SHALL use that hostname for the GRPCRoute and the gateway certificate SAN
+- AND it SHALL persist the derived value on the Gateway API record so clients can discover the endpoint
+
+#### Scenario: Route host cannot be derived
+
+- GIVEN Gateway API routing is enabled
+- AND a Gateway API record omits `external_dns`
+- AND `GATEWAY_API_BASE_DOMAIN` is empty
+- THEN reconciliation SHALL fail with an actionable configuration error
+- AND the controller SHALL mark the record `Failed` once without reconciling its own phase update again
 
 #### Scenario: Gateway without route configuration
 
 - GIVEN a Gateway with no `route` field
 - THEN no GRPCRoute SHALL be created
-- AND the gateway SHALL be accessible only via cluster-internal DNS and `kubectl port-forward`
+- AND the gateway SHALL be accessible only via cluster-internal DNS
 
 ---
 
@@ -268,7 +275,7 @@ The GatewayReconciler SHALL derive the external route address from the GRPCRoute
 |---|---|---|
 | `GATEWAY_API_GATEWAY_NAME` | `hsgw` | Name of the networking Gateway resource |
 | `GATEWAY_API_GATEWAY_NAMESPACE` | `openshift-ingress` | Namespace of the networking Gateway |
-| `GATEWAY_API_BASE_DOMAIN` | auto-detected | Cluster base domain for hostname generation |
+| `GATEWAY_API_BASE_DOMAIN` | — | Required hostname suffix when Gateway API routing is enabled and `external_dns` is omitted, for example `hsgw.<cluster-base-domain>` |
 
 ---
 
@@ -292,11 +299,9 @@ The GatewayReconciler SHALL derive the external route address from the GRPCRoute
 
 ## Reconciler Improvements (Planned)
 
-1. **NetworkPolicy for router ingress**: The reconciler SHOULD create `openshell-gateway-allow-router` automatically when a Route is configured on an OpenShift cluster.
+1. **Route management**: The reconciler SHOULD create/update the passthrough Route with the `router: grpc` label for NLB-backed ingress, as an alternative to Gateway API GRPCRoutes.
 
-2. **Route management**: The reconciler SHOULD create/update the passthrough Route with the `router: grpc` label for NLB-backed ingress, as an alternative to Gateway API GRPCRoutes.
-
-3. **Gateway restart on ConfigMap change**: The gateway workload needs a hash annotation on the ConfigMap content so it automatically restarts when the TOML changes.
+2. **Gateway restart on ConfigMap change**: The gateway workload needs a hash annotation on the ConfigMap content so it automatically restarts when the TOML changes.
 
 ---
 
@@ -305,7 +310,7 @@ The GatewayReconciler SHALL derive the external route address from the GRPCRoute
 | Symptom | Root Cause | Fix |
 |---|---|---|
 | Route times out on ROSA (all types via default ingress) | CloudFront L7 CDN buffering/killing gRPC | Use NLB IngressController |
-| TLS handshake: 0 bytes read, immediate EOF | NetworkPolicy blocking router → gateway | Create `openshell-gateway-allow-router` |
+| TLS handshake: 0 bytes read, immediate EOF | NetworkPolicy blocking router → gateway | Verify `openshell-gateway-public-grpc` exists and selects the gateway pod |
 | 503 Service Unavailable from route | SNI mismatch — HAProxy can't match hostname | Ensure Route hostname matches cert SAN |
 | grpcurl hangs but openssl s_client works | grpcurl blocked by NetworkPolicy | Check source namespace |
 | `hsctl apply` creates gateway but no external access | No `route` field on Gateway resource | Add `route: {}` or create NLB Route manually |

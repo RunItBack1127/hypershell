@@ -4,7 +4,7 @@ metadata:
   name: hypershell-gw
   namespace: hypershell-system
 spec:
-  gatewayClassName: cloud-provider-kind
+  gatewayClassName: envoy-gateway
   listeners:
     - name: https
       hostname: "*.hypershell.localhost"
@@ -27,6 +27,13 @@ spec:
         certificateRefs:
           - name: hypershell-gw-tls
             kind: Secret
+      allowedRoutes:
+        namespaces:
+          from: All
+    - name: keycloak
+      hostname: "KEYCLOAK_HOSTNAME_PLACEHOLDER"
+      port: KEYCLOAK_PORT_PLACEHOLDER
+      protocol: HTTP
       allowedRoutes:
         namespaces:
           from: All

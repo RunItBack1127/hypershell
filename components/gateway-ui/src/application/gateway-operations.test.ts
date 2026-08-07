@@ -38,6 +38,7 @@ function setup() {
   const controlPlane: GatewayControlPlane = {
     getGateway: vi.fn().mockResolvedValue(gateway),
     listGateways,
+    listGatewayReleases: vi.fn().mockResolvedValue([]),
     provisionGateway: vi.fn().mockResolvedValue(gateway),
     removeGateway: vi.fn().mockResolvedValue(undefined),
     renameGateway,
@@ -76,11 +77,17 @@ describe("gateway application operations", () => {
         operations.listGateways(listRequest),
     ],
     [
+      "list-releases",
+      (operations: ReturnType<typeof setup>["operations"]) =>
+        operations.listGatewayReleases(),
+    ],
+    [
       "provision",
       (operations: ReturnType<typeof setup>["operations"]) =>
         operations.provisionGateway({
           name: "Team gateway",
           namespace: "openshell",
+          releaseId: "release-1",
         }),
     ],
     [

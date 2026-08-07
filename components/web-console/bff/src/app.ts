@@ -174,6 +174,11 @@ export async function buildApp(config: ServerConfig): Promise<FastifyInstance> {
     return { status: "ready" };
   });
 
+  app.get("/api/console/v1/config", async (_request, reply) => {
+    reply.header("Cache-Control", "no-store");
+    return { gatewayConnection: config.gatewayConnection };
+  });
+
   const sendApplication = (
     _request: unknown,
     reply: {

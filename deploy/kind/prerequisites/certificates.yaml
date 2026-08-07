@@ -9,7 +9,7 @@ apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
   name: hypershell-ca
-  namespace: hypershell-system
+  namespace: NAMESPACE_PLACEHOLDER
 spec:
   isCA: true
   commonName: hypershell-ca
@@ -26,7 +26,7 @@ apiVersion: cert-manager.io/v1
 kind: Issuer
 metadata:
   name: hypershell-ca-issuer
-  namespace: hypershell-system
+  namespace: NAMESPACE_PLACEHOLDER
 spec:
   ca:
     secretName: hypershell-ca-secret
@@ -35,7 +35,7 @@ apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
   name: hypershell-https-tls
-  namespace: hypershell-system
+  namespace: NAMESPACE_PLACEHOLDER
 spec:
   secretName: hypershell-https-tls
   privateKey:
@@ -52,7 +52,7 @@ apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
   name: hypershell-gw-tls
-  namespace: hypershell-system
+  namespace: NAMESPACE_PLACEHOLDER
 spec:
   secretName: hypershell-gw-tls
   privateKey:

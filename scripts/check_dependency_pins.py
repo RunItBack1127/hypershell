@@ -22,6 +22,17 @@ _FROM_LINE = re.compile(
     r"^\s*FROM\s+(?:--[^\s]+\s+)*([^\s]+)", re.IGNORECASE
 )
 _IMAGE_LINE = re.compile(r"^(\s*)image:\s*([^\s#]+)")
+_ALLOWED_IMAGE_PLACEHOLDERS = frozenset(
+    {
+        "API_IMAGE_PLACEHOLDER",
+        "CONTROL_PLANE_IMAGE_PLACEHOLDER",
+        "DB_IMAGE_PLACEHOLDER",
+        "GATEWAY_IMAGE_PLACEHOLDER",
+        "KEYCLOAK_IMAGE_PLACEHOLDER",
+        "POSTGRES_IMAGE_PLACEHOLDER",
+        "WEB_CONSOLE_IMAGE_PLACEHOLDER",
+    }
+)
 _MAKE_IMAGE = re.compile(
     r"^\s*([A-Z][A-Z0-9_]*_IMAGE)\s*(?::|\?)?=\s*([^\s#]+)"
 )
@@ -124,6 +135,11 @@ def _is_openshift_internal_dev_image(reference: str) -> bool:
     )
 
 
+def _is_rendered_image_placeholder(reference: str) -> bool:
+    """Allow only explicit tokens replaced by approved manifest renderers."""
+    return reference in _ALLOWED_IMAGE_PLACEHOLDERS
+
+
 def _workflow_violations(
     relative_path: str, lines: list[str]
 ) -> list[tuple[str, int, str]]:
@@ -207,6 +223,8 @@ def _manifest_violations(
         if not match:
             continue
         reference = _unquote(match.group(2))
+        if _is_rendered_image_placeholder(reference):
+            continue
         if _is_openshift_internal_dev_image(reference):
             continue
         if _is_local_image(reference):
@@ -376,7 +394,6 @@ def _is_manifest(relative_path: str) -> bool:
     name = path.name.lower()
     return (
         "/deploy/" in f"/{relative_path}"
-        and "/deploy/kind/" not in f"/{relative_path}"
         and path.suffix.lower() in {".yaml", ".yml"}
     ) or name in {
         "compose.yaml",

@@ -55,6 +55,7 @@ export function toGatewayConnection(
     ...(gateway.oidcAudience ? { oidcAudience: gateway.oidcAudience } : {}),
     ...(gateway.oidcClientId ? { oidcClientId: gateway.oidcClientId } : {}),
     ...(gateway.oidcIssuer ? { oidcIssuer: gateway.oidcIssuer } : {}),
+    ...(gateway.oidcScopes ? { oidcScopes: gateway.oidcScopes } : {}),
     status: status ?? "Unknown",
   };
 }

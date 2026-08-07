@@ -2,13 +2,13 @@ apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
   name: api-server
-  namespace: hypershell-system
+  namespace: NAMESPACE_PLACEHOLDER
 spec:
   parentRefs:
     - name: hypershell-gw
       namespace: hypershell-system
   hostnames:
-    - api.hypershell.localhost
+    - API_HOSTNAME_PLACEHOLDER
   rules:
     - backendRefs:
         - name: hypershell-api-server
@@ -18,13 +18,13 @@ apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
   name: web-console
-  namespace: hypershell-system
+  namespace: NAMESPACE_PLACEHOLDER
 spec:
   parentRefs:
     - name: hypershell-gw
       namespace: hypershell-system
   hostnames:
-    - console.hypershell.localhost
+    - CONSOLE_HOSTNAME_PLACEHOLDER
   rules:
     - backendRefs:
         - name: hypershell-web-console
@@ -34,13 +34,13 @@ apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
   name: health
-  namespace: hypershell-system
+  namespace: NAMESPACE_PLACEHOLDER
 spec:
   parentRefs:
     - name: hypershell-gw
       namespace: hypershell-system
   hostnames:
-    - health.hypershell.localhost
+    - HEALTH_HOSTNAME_PLACEHOLDER
   rules:
     - backendRefs:
         - name: hypershell-api-server
@@ -55,9 +55,10 @@ spec:
   parentRefs:
     - name: hypershell-gw
       namespace: hypershell-system
+      sectionName: keycloak
   hostnames:
-    - keycloak.hypershell.localhost
+    - KEYCLOAK_HOSTNAME_PLACEHOLDER
   rules:
     - backendRefs:
         - name: keycloak-service
-          port: 8080
+          port: KEYCLOAK_PORT_PLACEHOLDER

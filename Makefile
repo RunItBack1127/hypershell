@@ -23,23 +23,34 @@ control_plane_ref=$(IMAGE_REGISTRY)/hypershell-control-plane-main:$(IMAGE_TAG)
 web_console_ref=$(IMAGE_REGISTRY)/hypershell-web-console-main:$(IMAGE_TAG)
 
 # Local dev image names
-api_server_local=hypershell:dev
-control_plane_local=hypershell-controller:dev
-web_console_local=hypershell-web-console:dev
+api_server_local=localhost/hypershell-api-server:dev
+control_plane_local=localhost/hypershell-control-plane:dev
+web_console_local=localhost/hypershell-web-console:dev
+api_server_baseline_local=localhost/hypershell-api-server:baseline
+control_plane_baseline_local=localhost/hypershell-control-plane:baseline
+web_console_baseline_local=localhost/hypershell-web-console:baseline
 
 # --- Kind cluster configuration ---
 KIND_CLUSTER_NAME?=hypershell-dev
 KIND_NAMESPACE?=hypershell-system
 KIND_HOT_RELOAD?=true
 KIND_HOST_MOUNT_PATH?=$(shell git rev-parse --show-toplevel 2>/dev/null || pwd)
-KIND_KEYCLOAK_URL?=
+KIND_KEYCLOAK_PORT?=18080
 LOCAL_IMAGES?=
 KIND_PULL_SECRET?=
 
 # Prerequisite versions
-GATEWAY_API_VERSION?=v1.2.1
-CLOUD_PROVIDER_KIND_VERSION?=v0.6.0
+CLOUD_PROVIDER_KIND_VERSION?=v0.11.1
+ENVOY_GATEWAY_VERSION?=v1.8.3
+ENVOY_GATEWAY_CHART?=oci://docker.io/envoyproxy/gateway-helm@sha256:cfb34ff4266c87a394cd6be5c13607a2dd47083aef771368302eaeaa99c4a0a9
+ENVOY_GATEWAY_CRDS_CHART?=oci://docker.io/envoyproxy/gateway-crds-helm@sha256:99b14db0bc57c8f413023d66145a2c53e8ed47f85fe0163b675c04165ff242d4
+ENVOY_GATEWAY_IMAGE?=docker.io/envoyproxy/gateway:v1.8.3@sha256:e7a8c70537628bf996e5dec5c4c835704b4b9f4f715a74cf361bea30608c49ac
+ENVOY_PROXY_IMAGE?=docker.io/envoyproxy/envoy:distroless-v1.38.3@sha256:574348fada8eb1130b448132287d76626dfb07525b16668075382f8e154a45a8
+ENVOY_RATELIMIT_IMAGE?=docker.io/envoyproxy/ratelimit:1e50889b@sha256:5bb3741fd6709bab1d498eae1a5807faa2113b712dfb236fb76c04a00871ffc9
 CERT_MANAGER_VERSION?=v1.21.1
+KIND_NODE_IMAGE?=docker.io/kindest/node:v1.35.0@sha256:4613778f3cfcd10e615029370f5786704559103cf27bef934597ba562b269661
+KIND_POSTGRES_IMAGE?=docker.io/library/postgres:16@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
+KIND_GATEWAY_IMAGE?=ghcr.io/nvidia/openshell/gateway:0.0.92@sha256:6a789b7cba7a121245687653a3f7e7781fd569f495b3bf7f2a43ea1387d20d22
 
 # Kind config
 KIND_CONFIG=deploy/kind/kind-config.yaml
@@ -135,6 +146,7 @@ lint-api-server:
 
 .PHONY: lint-control-plane
 lint-control-plane:
+	bash -n scripts/kind/*.sh
 	@unformatted="$$(gofmt -l components/control-plane)"; \
 	if [ -n "$$unformatted" ]; then \
 		echo "The following control plane files are not formatted:"; \
@@ -179,12 +191,16 @@ test-all: install-js
 # ============================================================================
 
 export CONTAINER_ENGINE KIND_CLUSTER_NAME KIND_NAMESPACE
-export KIND_HOT_RELOAD KIND_HOST_MOUNT_PATH KIND_KEYCLOAK_URL LOCAL_IMAGES
+export KIND_HOT_RELOAD KIND_HOST_MOUNT_PATH KIND_KEYCLOAK_PORT LOCAL_IMAGES
 export KIND_PULL_SECRET
-export GATEWAY_API_VERSION CLOUD_PROVIDER_KIND_VERSION CERT_MANAGER_VERSION
+export CLOUD_PROVIDER_KIND_VERSION CERT_MANAGER_VERSION KIND_NODE_IMAGE
+export ENVOY_GATEWAY_VERSION ENVOY_GATEWAY_CHART ENVOY_GATEWAY_CRDS_CHART
+export ENVOY_GATEWAY_IMAGE ENVOY_PROXY_IMAGE ENVOY_RATELIMIT_IMAGE
+export KIND_POSTGRES_IMAGE KIND_GATEWAY_IMAGE KIND_DB_IMAGE
 export IMAGE_REGISTRY IMAGE_TAG KIND_CONFIG
 export api_server_ref control_plane_ref web_console_ref
 export api_server_local control_plane_local web_console_local
+export api_server_baseline_local control_plane_baseline_local web_console_baseline_local
 export build_version build_time
 export API_HOSTNAME CONSOLE_HOSTNAME HEALTH_HOSTNAME KEYCLOAK_HOSTNAME
 

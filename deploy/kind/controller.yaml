@@ -2,13 +2,13 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: hypershell-controller
-  namespace: hypershell-system
+  namespace: NAMESPACE_PLACEHOLDER
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: hypershell-controller
-  namespace: hypershell-system
+  namespace: NAMESPACE_PLACEHOLDER
 spec:
   replicas: 1
   selector:
@@ -18,16 +18,23 @@ spec:
     metadata:
       labels:
         app: hypershell-controller
+      annotations:
+        hypershell.redhat.io/baseline-image: CONTROL_PLANE_IMAGE_PLACEHOLDER
+        hypershell.redhat.io/image-revision: CONTROL_PLANE_IMAGE_REVISION_PLACEHOLDER
     spec:
       serviceAccountName: hypershell-controller
       securityContext:
         runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: controller
-          image: quay.io/redhat-services-prod/hcm-eng-prod-tenant/hypershell-main/hypershell-control-plane-main:latest
-          imagePullPolicy: IfNotPresent
+          image: CONTROL_PLANE_IMAGE_PLACEHOLDER
+          imagePullPolicy: IMAGE_PULL_POLICY_PLACEHOLDER
           securityContext:
             allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
           env:
@@ -36,9 +43,33 @@ spec:
             - name: HYPERSHELL_API_SERVER_URL
               value: "http://hypershell-api-server:8000"
             - name: HYPERSHELL_NAMESPACE
-              value: "hypershell-system"
+              value: "NAMESPACE_PLACEHOLDER"
             - name: HYPERSHELL_LOG_LEVEL
               value: "info"
+            - name: OPENSHELL_GATEWAY_DATABASE_IMAGE
+              value: "GATEWAY_DATABASE_IMAGE_PLACEHOLDER"
+            - name: OPENSHELL_GATEWAY_DATABASE_STORAGE_SIZE
+              value: "5Gi"
+            - name: OPENSHELL_GATEWAY_OIDC_ISSUER
+              value: "http://KEYCLOAK_HOSTNAME_PLACEHOLDER:KEYCLOAK_PORT_PLACEHOLDER/realms/hypershell"
+            - name: OPENSHELL_GATEWAY_OIDC_AUDIENCE
+              value: "openshell-cli"
+            - name: OPENSHELL_GATEWAY_OIDC_ROLES_CLAIM
+              value: "groups"
+            - name: OPENSHELL_GATEWAY_OIDC_ADMIN_ROLE
+              value: "hypershell-admins"
+            - name: OPENSHELL_GATEWAY_OIDC_USER_ROLE
+              value: "hypershell-users"
+            - name: OPENSHELL_GATEWAY_OIDC_SCOPES_CLAIM
+              value: "scope"
+            - name: OPENSHELL_GATEWAY_ROUTE_ENABLED
+              value: "true"
+            - name: GATEWAY_API_GATEWAY_NAME
+              value: "hypershell-gw"
+            - name: GATEWAY_API_GATEWAY_NAMESPACE
+              value: "hypershell-system"
+            - name: GATEWAY_API_BASE_DOMAIN
+              value: "gw.localhost"
           resources:
             requests:
               cpu: 100m

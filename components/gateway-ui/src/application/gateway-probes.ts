@@ -5,7 +5,8 @@ import type {
 
 import type { GatewayFailureKind } from "./gateway-types";
 
-export type GatewayAction = "get" | "list" | "provision" | "remove" | "rename";
+export type GatewayAction =
+  "get" | "list" | "list-releases" | "provision" | "remove" | "rename";
 export type GatewayProbeOutcome =
   "started" | "succeeded" | "failed" | "cancelled" | "denied" | "conflicted";
 export type GatewayProbeName =

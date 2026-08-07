@@ -103,6 +103,8 @@ jobs:
             echo "Run 'gofmt -w .' in components/control-plane and commit the result."
             exit 1
           fi
+      - name: Check local-development shell syntax
+        run: bash -n scripts/kind/*.sh
       - name: Run go vet
         working-directory: components/control-plane
         run: go vet ./...

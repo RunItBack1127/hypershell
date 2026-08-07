@@ -2,13 +2,13 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: hypershell-web-console
-  namespace: hypershell-system
+  namespace: NAMESPACE_PLACEHOLDER
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: hypershell-web-console
-  namespace: hypershell-system
+  namespace: NAMESPACE_PLACEHOLDER
 spec:
   replicas: 1
   selector:
@@ -18,16 +18,23 @@ spec:
     metadata:
       labels:
         app: hypershell-web-console
+      annotations:
+        hypershell.redhat.io/baseline-image: WEB_CONSOLE_IMAGE_PLACEHOLDER
+        hypershell.redhat.io/image-revision: WEB_CONSOLE_IMAGE_REVISION_PLACEHOLDER
     spec:
       serviceAccountName: hypershell-web-console
       securityContext:
         runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: web-console
-          image: quay.io/redhat-services-prod/hcm-eng-prod-tenant/hypershell-main/hypershell-web-console-main:latest
-          imagePullPolicy: IfNotPresent
+          image: WEB_CONSOLE_IMAGE_PLACEHOLDER
+          imagePullPolicy: IMAGE_PULL_POLICY_PLACEHOLDER
           securityContext:
             allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
           ports:
@@ -40,6 +47,16 @@ spec:
               value: "0.0.0.0"
             - name: NODE_ENV
               value: "production"
+            - name: HYPERSHELL_API_ORIGIN
+              value: "http://hypershell-api-server:8000"
+            - name: HYPERSHELL_GATEWAY_OIDC_ISSUER
+              value: "http://KEYCLOAK_HOSTNAME_PLACEHOLDER:KEYCLOAK_PORT_PLACEHOLDER/realms/hypershell"
+            - name: HYPERSHELL_GATEWAY_OIDC_CLIENT_ID
+              value: "openshell-cli"
+            - name: HYPERSHELL_GATEWAY_OIDC_AUDIENCE
+              value: "openshell-cli"
+            - name: HYPERSHELL_GATEWAY_OIDC_SCOPES
+              value: "openid profile email openshell:all"
           startupProbe:
             httpGet:
               path: /health/ready
@@ -68,7 +85,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: hypershell-web-console
-  namespace: hypershell-system
+  namespace: NAMESPACE_PLACEHOLDER
 spec:
   selector:
     app: hypershell-web-console

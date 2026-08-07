@@ -73,6 +73,12 @@ describe("web-console BFF", () => {
     const config: ServerConfig = {
       apiOrigin: `http://127.0.0.1:${String(address.port)}`,
       apiTimeoutMs: 100,
+      gatewayConnection: {
+        oidcAudience: "openshell-cli",
+        oidcClientId: "openshell-cli",
+        oidcIssuer: "https://issuer.example.test/realms/hypershell",
+        oidcScopes: "openid profile email openshell:all",
+      },
       host: "127.0.0.1",
       logLevel: "silent",
       nodeEnv: "test",
@@ -103,6 +109,25 @@ describe("web-console BFF", () => {
     expect(live.statusCode).toBe(200);
     expect(live.headers["cache-control"]).toBe("no-store");
     expect(ready.statusCode).toBe(200);
+  });
+
+  it("serves allowlisted gateway connection configuration without proxying", async () => {
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/console/v1/config",
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["cache-control"]).toBe("no-store");
+    expect(response.json()).toEqual({
+      gatewayConnection: {
+        oidcAudience: "openshell-cli",
+        oidcClientId: "openshell-cli",
+        oidcIssuer: "https://issuer.example.test/realms/hypershell",
+        oidcScopes: "openid profile email openshell:all",
+      },
+    });
+    expect(requests).toHaveLength(0);
   });
 
   it("serves known application routes with an enforcing CSP and no-store HTML", async () => {

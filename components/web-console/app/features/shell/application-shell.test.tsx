@@ -18,6 +18,7 @@ vi.mock("../../composition/gateway-composition", () => ({
   gatewayOperations: {
     getGateway: getGatewayMock,
     listGateways: vi.fn(),
+    listGatewayReleases: vi.fn(),
     provisionGateway: vi.fn(),
     removeGateway: vi.fn(),
     renameGateway: vi.fn(),

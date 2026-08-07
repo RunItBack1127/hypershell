@@ -161,6 +161,16 @@ export const messages = defineMessages({
     defaultMessage: "Gateway release ID",
     description: "Label for a gateway's release identifier.",
   },
+  gatewayRelease: {
+    id: "app.gateway.release",
+    defaultMessage: "Gateway release",
+    description: "Label for selecting the release used by a new gateway.",
+  },
+  gatewayReleaseLoadError: {
+    id: "app.gateway.release.loadError",
+    defaultMessage: "Gateway releases could not be loaded",
+    description: "Error shown when release choices cannot be loaded.",
+  },
   gatewayRenameError: {
     id: "app.gateway.rename.error.title",
     defaultMessage: "Gateway could not be renamed",
@@ -232,6 +242,16 @@ export const messages = defineMessages({
     defaultMessage: "Adjust or clear the filter to see gateways.",
     description: "Guidance when no gateways match the current filter.",
   },
+  noGatewayReleases: {
+    id: "app.gateway.release.empty",
+    defaultMessage: "No gateway releases are available",
+    description: "Warning shown when no release can be selected.",
+  },
+  noMatchingGatewayReleases: {
+    id: "app.gateway.release.noResults",
+    defaultMessage: "No matching gateway releases",
+    description: "Message shown when release filtering has no results.",
+  },
   notifications: {
     id: "app.notifications",
     defaultMessage: "Notifications",
@@ -262,6 +282,11 @@ export const messages = defineMessages({
     id: "app.page.gatewayProvision.pending",
     defaultMessage: "Provisioning gateway",
     description: "Accessible progress text while a gateway is provisioning.",
+  },
+  selectGatewayRelease: {
+    id: "app.gateway.release.select",
+    defaultMessage: "Select a gateway release",
+    description: "Placeholder for the gateway release typeahead.",
   },
   refreshGateways: {
     id: "app.gateways.refresh",
@@ -297,5 +322,10 @@ export const messages = defineMessages({
     id: "app.table.column.status",
     defaultMessage: "Status",
     description: "Heading for a resource status column.",
+  },
+  tryAgain: {
+    id: "app.action.tryAgain",
+    defaultMessage: "Try again",
+    description: "Action that retries a failed operation.",
   },
 });

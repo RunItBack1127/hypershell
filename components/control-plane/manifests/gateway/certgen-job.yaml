@@ -66,12 +66,17 @@ spec:
     spec:
       restartPolicy: OnFailure
       serviceAccountName: openshell-gateway-certgen
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: certgen
-          image: IMAGE_PLACEHOLDER
+          image: GATEWAY_IMAGE_PLACEHOLDER
           imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false
+            runAsNonRoot: true
             readOnlyRootFilesystem: true
             seccompProfile:
               type: RuntimeDefault

@@ -39,6 +39,35 @@ test.beforeEach(async ({ browserName, page }) => {
     });
   }
 
+  await page.route("**/api/hypershell/v1/gateway_releases**", async (route) => {
+    await route.fulfill({
+      body: JSON.stringify({
+        items: [
+          {
+            canary_duration: "",
+            canary_percent: 0,
+            created_at: null,
+            fleet_id: "fleet-1",
+            href: "/api/hypershell/v1/gateway_releases/release-1",
+            id: "release-1",
+            image: "ghcr.io/nvidia/openshell/gateway:0.0.92@sha256:1234567890",
+            kind: "GatewayRelease",
+            name: "OpenShell 0.0.92",
+            rollout_strategy: "immediate",
+            status: "Ready",
+            updated_at: null,
+          },
+        ],
+        kind: "GatewayReleaseList",
+        page: 1,
+        size: 1,
+        total: 1,
+      }),
+      contentType: "application/json",
+      status: 200,
+    });
+  });
+
   await page.route("**/api/hypershell/v1/gateways**", async (route) => {
     const request = route.request();
     if (request.method() === "DELETE") {
@@ -153,6 +182,9 @@ test("operates gateway rows and opens provisioning", async ({ page }) => {
   await page.getByRole("link", { name: "Provision gateway" }).click();
   await expect(page).toHaveURL(/\/gateways\/new$/);
   await expect(page.getByLabel("Cluster", { exact: true })).toHaveCount(0);
+  await expect(
+    page.getByRole("combobox", { name: "Gateway release" }),
+  ).toBeVisible();
 });
 
 test("keeps connection methods on gateway details", async ({
@@ -323,7 +355,7 @@ test("does not preserve removed administration routes", async ({ page }) => {
   }
 });
 
-test("provisions a gateway without exposing placement fields", async ({
+test("provisions a gateway with a searchable release selector", async ({
   page,
 }) => {
   let requestBody: Record<string, unknown> | undefined;
@@ -349,7 +381,7 @@ test("provisions a gateway without exposing placement fields", async ({
         name: "team-gateway",
         namespace: "openshell",
         phase: "",
-        release_id: "",
+        release_id: "release-1",
         service_type: "",
         status: "",
         tls_mode: "",
@@ -364,8 +396,16 @@ test("provisions a gateway without exposing placement fields", async ({
     page.getByRole("heading", { level: 1, name: "Provision gateway" }),
   ).toBeFocused();
   await expect(page.getByLabel("Cluster", { exact: true })).toHaveCount(0);
-  await expect(page.getByLabel("Gateway release")).toHaveCount(0);
   await expect(page.getByLabel("Managed database")).toHaveCount(0);
+  const releaseSelect = page.getByRole("combobox", {
+    name: "Gateway release",
+  });
+  await releaseSelect.fill("0.0.92");
+  await expect(page.getByText("OpenShell 0.0.92")).toBeVisible();
+  await expect(
+    page.getByText("ghcr.io/nvidia/openshell/gateway:0.0.92@sha256:1234567890"),
+  ).toBeVisible();
+  await page.getByText("OpenShell 0.0.92").click();
   await page.getByLabel("Gateway name").fill("team-gateway");
   await page.getByRole("button", { name: "Provision gateway" }).click();
 
@@ -384,7 +424,7 @@ test("provisions a gateway without exposing placement fields", async ({
     fleet_id: "",
     name: "team-gateway",
     namespace: "openshell",
-    release_id: "",
+    release_id: "release-1",
   });
 });
 

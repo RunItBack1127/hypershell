@@ -9,11 +9,14 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 
@@ -46,10 +49,12 @@ func ReconcileGateway(
 	if err := reconcileDatabaseCredentials(ctx, clientset, nsConfig.Name); err != nil {
 		return fmt.Errorf("reconcile database credentials in %s: %w", nsConfig.Name, err)
 	}
-
 	if opts.HasCertManager {
 		if err := reconcileCertManagerResources(ctx, dynamicClient, nsConfig); err != nil {
 			return fmt.Errorf("reconcile cert-manager resources in %s: %w", nsConfig.Name, err)
+		}
+		if err := waitForTLSSecret(ctx, clientset, nsConfig.Name, 2*time.Minute); err != nil {
+			return err
 		}
 	} else {
 		log.Printf("WARN cert-manager not available, TLS certificates must be provisioned by certgen job in %s", nsConfig.Name)
@@ -75,11 +80,67 @@ func ReconcileGateway(
 
 	if opts.HasGatewayAPI {
 		if err := reconcileGatewayAPIResources(ctx, dynamicClient, clientset, nsConfig); err != nil {
-			log.Printf("WARN failed to reconcile Gateway API resources in %s: %v", nsConfig.Name, err)
+			return fmt.Errorf("reconcile Gateway API resources in %s: %w", nsConfig.Name, err)
 		}
 	}
 
 	log.Printf("INFO gateway reconciled in namespace %s", nsConfig.Name)
+	return nil
+}
+
+func WaitForGatewayReady(ctx context.Context, clientset kubernetes.Interface, namespace string, timeout time.Duration) error {
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	for _, name := range []string{"openshell-gateway-db", "openshell-gateway"} {
+		err := wait.PollUntilContextCancel(waitCtx, 2*time.Second, true, func(ctx context.Context) (bool, error) {
+			deployment, err := clientset.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
+			if err != nil {
+				if k8serrors.IsNotFound(err) {
+					return false, nil
+				}
+				return false, fmt.Errorf("get Deployment %s: %w", name, err)
+			}
+			if deployment.Status.ObservedGeneration < deployment.Generation {
+				return false, nil
+			}
+			for _, condition := range deployment.Status.Conditions {
+				if condition.Type == appsv1.DeploymentAvailable && condition.Status == corev1.ConditionTrue {
+					return true, nil
+				}
+			}
+			return false, nil
+		})
+		if err != nil {
+			return fmt.Errorf("deployment %s/%s did not become available within %s: %w", namespace, name, timeout, err)
+		}
+	}
+
+	return nil
+}
+
+func waitForTLSSecret(ctx context.Context, clientset kubernetes.Interface, namespace string, timeout time.Duration) error {
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	err := wait.PollUntilContextCancel(waitCtx, 2*time.Second, true, func(ctx context.Context) (bool, error) {
+		secret, err := clientset.CoreV1().Secrets(namespace).Get(ctx, "openshell-server-tls", metav1.GetOptions{})
+		if err != nil {
+			if k8serrors.IsNotFound(err) {
+				return false, nil
+			}
+			return false, fmt.Errorf("get server TLS Secret: %w", err)
+		}
+		for _, key := range []string{"ca.crt", "tls.crt", "tls.key"} {
+			if len(secret.Data[key]) == 0 {
+				return false, nil
+			}
+		}
+		return true, nil
+	})
+	if err != nil {
+		return fmt.Errorf("server TLS Secret %s/openshell-server-tls did not become ready within %s: %w", namespace, timeout, err)
+	}
 	return nil
 }
 
@@ -724,12 +785,12 @@ func reconcileGatewayAPIResources(ctx context.Context, dynamicClient dynamic.Int
 
 	hostname := routeConfig.Host
 	if hostname == "" {
-		baseDomain := os.Getenv("GATEWAY_API_BASE_DOMAIN")
+		baseDomain := strings.Trim(strings.TrimSpace(os.Getenv("GATEWAY_API_BASE_DOMAIN")), ".")
 		if baseDomain == "" {
 			log.Printf("WARN cannot derive GRPCRoute hostname: GATEWAY_API_BASE_DOMAIN not set")
 			return nil
 		}
-		hostname = fmt.Sprintf("openshell-gateway-%s.hsgw.%s", namespace, baseDomain)
+		hostname = fmt.Sprintf("openshell-gateway-%s.%s", namespace, baseDomain)
 	}
 
 	grpcRoute := &unstructured.Unstructured{
@@ -771,83 +832,83 @@ func reconcileGatewayAPIResources(ctx context.Context, dynamicClient dynamic.Int
 		return fmt.Errorf("reconcile GRPCRoute: %w", err)
 	}
 
-	caData := ""
 	tlsSecret, err := clientset.CoreV1().Secrets(namespace).Get(ctx, "openshell-server-tls", metav1.GetOptions{})
-	if err == nil {
-		if ca, ok := tlsSecret.Data["ca.crt"]; ok {
-			caData = string(ca)
+	if err != nil {
+		return fmt.Errorf("get gateway TLS Secret: %w", err)
+	}
+	caData := string(tlsSecret.Data["ca.crt"])
+	if caData == "" {
+		return fmt.Errorf("gateway TLS Secret %s/openshell-server-tls has no ca.crt", namespace)
+	}
+
+	backendCA := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "openshell-backend-ca",
+			Namespace: namespace,
+			Labels: map[string]string{
+				"app.kubernetes.io/name":       "openshell",
+				"app.kubernetes.io/component":  "gateway",
+				"app.kubernetes.io/managed-by": "hypershell-control-plane",
+				"hypershell.redhat.io/managed": "true",
+			},
+		},
+		Data: map[string]string{
+			"ca.crt": caData,
+		},
+	}
+
+	existing, err := clientset.CoreV1().ConfigMaps(namespace).Get(ctx, "openshell-backend-ca", metav1.GetOptions{})
+	if err != nil {
+		if !k8serrors.IsNotFound(err) {
+			return fmt.Errorf("get backend CA ConfigMap: %w", err)
+		}
+		if _, err := clientset.CoreV1().ConfigMaps(namespace).Create(ctx, backendCA, metav1.CreateOptions{}); err != nil {
+			return fmt.Errorf("create backend CA ConfigMap: %w", err)
+		}
+	} else {
+		backendCA.ResourceVersion = existing.ResourceVersion
+		if _, err := clientset.CoreV1().ConfigMaps(namespace).Update(ctx, backendCA, metav1.UpdateOptions{}); err != nil {
+			return fmt.Errorf("update backend CA ConfigMap: %w", err)
 		}
 	}
 
-	if caData != "" {
-		backendCA := &corev1.ConfigMap{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "openshell-backend-ca",
-				Namespace: namespace,
-				Labels: map[string]string{
+	btlsPolicy := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "gateway.networking.k8s.io/v1",
+			"kind":       "BackendTLSPolicy",
+			"metadata": map[string]interface{}{
+				"name":      "openshell-gateway",
+				"namespace": namespace,
+				"labels": map[string]interface{}{
 					"app.kubernetes.io/name":       "openshell",
 					"app.kubernetes.io/component":  "gateway",
 					"app.kubernetes.io/managed-by": "hypershell-control-plane",
 					"hypershell.redhat.io/managed": "true",
 				},
 			},
-			Data: map[string]string{
-				"ca.crt": caData,
-			},
-		}
-
-		existing, err := clientset.CoreV1().ConfigMaps(namespace).Get(ctx, "openshell-backend-ca", metav1.GetOptions{})
-		if err != nil {
-			if k8serrors.IsNotFound(err) {
-				if _, err := clientset.CoreV1().ConfigMaps(namespace).Create(ctx, backendCA, metav1.CreateOptions{}); err != nil {
-					log.Printf("WARN failed to create backend CA ConfigMap: %v", err)
-				}
-			}
-		} else {
-			backendCA.ResourceVersion = existing.ResourceVersion
-			if _, err := clientset.CoreV1().ConfigMaps(namespace).Update(ctx, backendCA, metav1.UpdateOptions{}); err != nil {
-				log.Printf("WARN failed to update backend CA ConfigMap: %v", err)
-			}
-		}
-
-		btlsPolicy := &unstructured.Unstructured{
-			Object: map[string]interface{}{
-				"apiVersion": "gateway.networking.k8s.io/v1alpha3",
-				"kind":       "BackendTLSPolicy",
-				"metadata": map[string]interface{}{
-					"name":      "openshell-gateway",
-					"namespace": namespace,
-					"labels": map[string]interface{}{
-						"app.kubernetes.io/name":       "openshell",
-						"app.kubernetes.io/component":  "gateway",
-						"app.kubernetes.io/managed-by": "hypershell-control-plane",
-						"hypershell.redhat.io/managed": "true",
+			"spec": map[string]interface{}{
+				"targetRefs": []interface{}{
+					map[string]interface{}{
+						"group": "",
+						"kind":  "Service",
+						"name":  "openshell-gateway",
 					},
 				},
-				"spec": map[string]interface{}{
-					"targetRefs": []interface{}{
+				"validation": map[string]interface{}{
+					"caCertificateRefs": []interface{}{
 						map[string]interface{}{
 							"group": "",
-							"kind":  "Service",
-							"name":  "openshell-gateway",
+							"kind":  "ConfigMap",
+							"name":  "openshell-backend-ca",
 						},
 					},
-					"validation": map[string]interface{}{
-						"caCertificateRefs": []interface{}{
-							map[string]interface{}{
-								"group": "",
-								"kind":  "ConfigMap",
-								"name":  "openshell-backend-ca",
-							},
-						},
-						"hostname": fmt.Sprintf("openshell-gateway.%s.svc.cluster.local", namespace),
-					},
+					"hostname": fmt.Sprintf("openshell-gateway.%s.svc.cluster.local", namespace),
 				},
 			},
-		}
-		if err := reconcileResource(ctx, dynamicClient, btlsPolicy); err != nil {
-			log.Printf("WARN failed to reconcile BackendTLSPolicy (may require OpenShift 4.22+): %v", err)
-		}
+		},
+	}
+	if err := reconcileResource(ctx, dynamicClient, btlsPolicy); err != nil {
+		return fmt.Errorf("reconcile BackendTLSPolicy: %w", err)
 	}
 
 	log.Printf("INFO Gateway API resources reconciled in namespace %s (hostname=%s)", namespace, hostname)

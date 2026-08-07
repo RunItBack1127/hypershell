@@ -1,12 +1,15 @@
 package gateway
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
-
-	"log"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/util/yaml"
@@ -90,7 +93,7 @@ func ApplyManifestToNamespace(manifest *unstructured.Unstructured, namespace str
 	if config.Image != "" {
 		image = config.Image
 	}
-	manifestJSON = strings.ReplaceAll(manifestJSON, "IMAGE_PLACEHOLDER", image)
+	manifestJSON = strings.ReplaceAll(manifestJSON, "GATEWAY_IMAGE_PLACEHOLDER", image)
 
 	result := &unstructured.Unstructured{}
 	if err := result.UnmarshalJSON([]byte(manifestJSON)); err != nil {
@@ -103,7 +106,7 @@ func ApplyManifestToNamespace(manifest *unstructured.Unstructured, namespace str
 func ApplyDatabaseOverrides(obj *unstructured.Unstructured, dbConfig DatabaseConfig) error {
 	jsonBytes, err := obj.MarshalJSON()
 	if err != nil {
-		return nil
+		return fmt.Errorf("marshal database manifest: %w", err)
 	}
 	manifestJSON := string(jsonBytes)
 
@@ -113,7 +116,7 @@ func ApplyDatabaseOverrides(obj *unstructured.Unstructured, dbConfig DatabaseCon
 	}
 	dbImage := dbConfig.Image
 	if dbImage == "" {
-		dbImage = "registry.redhat.io/rhel9/postgresql-16:latest"
+		dbImage = "docker.io/library/postgres:16@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b"
 	}
 
 	if strings.Contains(manifestJSON, "DB_STORAGE_PLACEHOLDER") || strings.Contains(manifestJSON, "DB_IMAGE_PLACEHOLDER") {
@@ -131,6 +134,25 @@ func ApplyDatabaseOverrides(obj *unstructured.Unstructured, dbConfig DatabaseCon
 func ApplyConfigOverrides(obj *unstructured.Unstructured, config GatewayConfig) error {
 	kind := obj.GetKind()
 
+	if kind == "Deployment" && obj.GetName() == "openshell-gateway" {
+		configJSON, err := json.Marshal(config)
+		if err != nil {
+			return fmt.Errorf("marshal gateway config for rollout hash: %w", err)
+		}
+		digest := sha256.Sum256(configJSON)
+		annotations, _, err := unstructured.NestedStringMap(obj.Object, "spec", "template", "metadata", "annotations")
+		if err != nil {
+			return fmt.Errorf("read gateway pod annotations: %w", err)
+		}
+		if annotations == nil {
+			annotations = make(map[string]string)
+		}
+		annotations["hypershell.redhat.io/config-hash"] = hex.EncodeToString(digest[:])
+		if err := unstructured.SetNestedStringMap(obj.Object, annotations, "spec", "template", "metadata", "annotations"); err != nil {
+			return fmt.Errorf("set gateway pod annotations: %w", err)
+		}
+	}
+
 	if kind == "ConfigMap" && obj.GetName() == "openshell-gateway-config" && len(config.ServerDnsNames) > 0 {
 		data, found, err := unstructured.NestedMap(obj.Object, "data")
 		if err != nil || !found {
@@ -147,7 +169,7 @@ func ApplyConfigOverrides(obj *unstructured.Unstructured, config GatewayConfig) 
 			if i > 0 {
 				serverSans += ", "
 			}
-			serverSans += fmt.Sprintf("\"%s\"", dns)
+			serverSans += strconv.Quote(dns)
 		}
 		serverSans += "]"
 
@@ -168,26 +190,26 @@ func ApplyConfigOverrides(obj *unstructured.Unstructured, config GatewayConfig) 
 			}
 
 			oidcSection := "\n    [openshell.gateway.oidc]\n"
-			oidcSection += fmt.Sprintf("    issuer      = \"%s\"\n", config.OIDC.Issuer)
+			oidcSection += fmt.Sprintf("    issuer      = %s\n", strconv.Quote(config.OIDC.Issuer))
 			audience := config.OIDC.Audience
 			if audience == "" {
 				audience = "openshell-cli"
 			}
-			oidcSection += fmt.Sprintf("    audience    = \"%s\"\n", audience)
+			oidcSection += fmt.Sprintf("    audience    = %s\n", strconv.Quote(audience))
 			if config.OIDC.JwksTTL > 0 {
 				oidcSection += fmt.Sprintf("    jwks_ttl    = %d\n", config.OIDC.JwksTTL)
 			}
 			if config.OIDC.RolesClaim != "" {
-				oidcSection += fmt.Sprintf("    roles_claim = \"%s\"\n", config.OIDC.RolesClaim)
+				oidcSection += fmt.Sprintf("    roles_claim = %s\n", strconv.Quote(config.OIDC.RolesClaim))
 			}
 			if config.OIDC.AdminRole != "" {
-				oidcSection += fmt.Sprintf("    admin_role  = \"%s\"\n", config.OIDC.AdminRole)
+				oidcSection += fmt.Sprintf("    admin_role  = %s\n", strconv.Quote(config.OIDC.AdminRole))
 			}
 			if config.OIDC.UserRole != "" {
-				oidcSection += fmt.Sprintf("    user_role   = \"%s\"\n", config.OIDC.UserRole)
+				oidcSection += fmt.Sprintf("    user_role   = %s\n", strconv.Quote(config.OIDC.UserRole))
 			}
 			if config.OIDC.ScopesClaim != "" {
-				oidcSection += fmt.Sprintf("    scopes_claim = \"%s\"\n", config.OIDC.ScopesClaim)
+				oidcSection += fmt.Sprintf("    scopes_claim = %s\n", strconv.Quote(config.OIDC.ScopesClaim))
 			}
 
 			lines = append(lines, oidcSection)

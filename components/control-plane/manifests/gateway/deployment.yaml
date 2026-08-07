@@ -31,9 +31,17 @@ spec:
     spec:
       terminationGracePeriodSeconds: 5
       serviceAccountName: openshell-gateway
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
       initContainers:
         - name: wait-for-db
-          image: IMAGE_PLACEHOLDER
+          image: DB_IMAGE_PLACEHOLDER
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -55,6 +63,8 @@ spec:
               drop:
               - ALL
             runAsNonRoot: true
+            runAsUser: 999
+            runAsGroup: 999
             readOnlyRootFilesystem: true
       containers:
         - name: openshell-gateway
@@ -67,7 +77,7 @@ spec:
               - ALL
             runAsNonRoot: true
             readOnlyRootFilesystem: true
-          image: IMAGE_PLACEHOLDER
+          image: GATEWAY_IMAGE_PLACEHOLDER
           imagePullPolicy: IfNotPresent
           args:
             - --config
@@ -93,6 +103,8 @@ spec:
             - name: tls-client-ca
               mountPath: /etc/openshell-tls/client-ca
               readOnly: true
+            - name: tmp
+              mountPath: /tmp
           ports:
             - name: grpc
               containerPort: 8080
@@ -140,7 +152,7 @@ spec:
         - name: sandbox-jwt
           secret:
             secretName: openshell-gateway-jwt-keys
-            defaultMode: 256
+            defaultMode: 288
         - name: tls-cert
           secret:
             secretName: openshell-server-tls
@@ -150,3 +162,5 @@ spec:
             items:
               - key: ca.crt
                 path: ca.crt
+        - name: tmp
+          emptyDir: {}

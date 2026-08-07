@@ -15,13 +15,14 @@ const gateway: GatewayConnection = {
   oidcAudience: "openshell-cli",
   oidcClientId: "openshell-cli",
   oidcIssuer: "https://issuer.example.test/realms/openshell",
+  oidcScopes: "openid profile email openshell:all",
   status: "Ready",
 };
 
 describe("gateway connections", () => {
   it("builds the documented OpenShell connection command", () => {
     expect(buildGatewayAddCommand(gateway)).toBe(
-      "openshell gateway add --name gateway-1 --oidc-issuer https://issuer.example.test/realms/openshell --oidc-client-id openshell-cli --oidc-audience openshell-cli https://gateway.example.test:443",
+      "openshell gateway add --name gateway-1 --oidc-issuer https://issuer.example.test/realms/openshell --oidc-client-id openshell-cli --oidc-audience openshell-cli --oidc-scopes 'openid profile email openshell:all' https://gateway.example.test:443",
     );
   });
 

@@ -7,6 +7,7 @@ export interface GatewayConnection {
   oidcAudience?: string;
   oidcClientId?: string;
   oidcIssuer?: string;
+  oidcScopes?: string;
   status: string;
 }
 
@@ -27,7 +28,8 @@ export function buildGatewayAddCommand(
     !gateway.endpoint ||
     !gateway.oidcAudience ||
     !gateway.oidcClientId ||
-    !gateway.oidcIssuer
+    !gateway.oidcIssuer ||
+    !gateway.oidcScopes
   ) {
     return undefined;
   }
@@ -37,6 +39,7 @@ export function buildGatewayAddCommand(
     `--oidc-issuer ${shellArgument(gateway.oidcIssuer)}`,
     `--oidc-client-id ${shellArgument(gateway.oidcClientId)}`,
     `--oidc-audience ${shellArgument(gateway.oidcAudience)}`,
+    `--oidc-scopes ${shellArgument(gateway.oidcScopes)}`,
     shellArgument(gateway.endpoint),
   ].join(" ");
 }

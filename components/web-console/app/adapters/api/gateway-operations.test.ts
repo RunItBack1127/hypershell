@@ -15,8 +15,24 @@ const gatewayApi = {
   list: vi.fn(),
   update: vi.fn(),
 };
-const gatewayApiFactory = vi.fn(() => gatewayApi);
-const controlPlane = createGatewayControlPlaneAdapter(gatewayApiFactory);
+const gatewayReleaseApi = {
+  listAll: vi.fn(),
+};
+const gatewayApiFactory = vi.fn(() => ({
+  gatewayReleases: gatewayReleaseApi,
+  gateways: gatewayApi,
+}));
+const connectionDefaults = {
+  oidcAudience: "openshell-cli",
+  oidcClientId: "openshell-cli",
+  oidcIssuer: "https://issuer.example.test/realms/hypershell",
+  oidcScopes: "openid profile email openshell:all",
+};
+const loadConnectionDefaults = vi.fn();
+const controlPlane = createGatewayControlPlaneAdapter(
+  gatewayApiFactory,
+  loadConnectionDefaults,
+);
 const context = {
   correlationId: "11111111-1111-4111-8111-111111111111",
 };
@@ -67,6 +83,7 @@ function gatewayList(
 describe("gateway API operations adapter", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    loadConnectionDefaults.mockResolvedValue(connectionDefaults);
   });
 
   it("maps exactly one authoritative gateway page with search and sort", async () => {
@@ -79,7 +96,13 @@ describe("gateway API operations adapter", () => {
         signal: abortController.signal,
       }),
     ).resolves.toMatchObject({
-      items: [{ id: "gateway-1", name: "Team gateway" }],
+      items: [
+        {
+          id: "gateway-1",
+          name: "Team gateway",
+          ...connectionDefaults,
+        },
+      ],
       page: 2,
       size: 20,
       total: 21,
@@ -96,6 +119,7 @@ describe("gateway API operations adapter", () => {
       },
       { signal: abortController.signal },
     );
+    expect(loadConnectionDefaults).toHaveBeenCalledWith(abortController.signal);
   });
 
   it("rejects an incomplete upstream page instead of returning a partial list", async () => {
@@ -121,15 +145,72 @@ describe("gateway API operations adapter", () => {
     );
   });
 
-  it("provisions with reconciler-owned identifiers omitted by the form", async () => {
+  it("maps and sorts release choices without exposing SDK records", async () => {
+    const abortController = new AbortController();
+    gatewayReleaseApi.listAll.mockImplementation(async function* () {
+      await Promise.resolve();
+      yield {
+        canary_duration: "",
+        canary_percent: 0,
+        created_at: null,
+        fleet_id: "fleet-1",
+        href: "/api/hypershell/v1/gateway_releases/release-2",
+        id: "release-2",
+        image: "quay.io/openshell/gateway:2.0.0@sha256:2222",
+        kind: "GatewayRelease",
+        name: "Version 2",
+        rollout_strategy: "immediate",
+        status: "Ready",
+        updated_at: null,
+      };
+      yield {
+        canary_duration: "",
+        canary_percent: 0,
+        created_at: null,
+        fleet_id: "fleet-1",
+        href: "/api/hypershell/v1/gateway_releases/release-1",
+        id: "release-1",
+        image: "quay.io/openshell/gateway:1.0.0@sha256:1111",
+        kind: "GatewayRelease",
+        name: "Version 1",
+        rollout_strategy: "immediate",
+        status: "Ready",
+        updated_at: null,
+      };
+    });
+
+    await expect(
+      controlPlane.listGatewayReleases({
+        ...context,
+        signal: abortController.signal,
+      }),
+    ).resolves.toEqual([
+      {
+        id: "release-1",
+        image: "quay.io/openshell/gateway:1.0.0@sha256:1111",
+        name: "Version 1",
+      },
+      {
+        id: "release-2",
+        image: "quay.io/openshell/gateway:2.0.0@sha256:2222",
+        name: "Version 2",
+      },
+    ]);
+    expect(gatewayReleaseApi.listAll).toHaveBeenCalledWith(100, {
+      signal: abortController.signal,
+    });
+  });
+
+  it("provisions with the selected release and local reconciler-owned identifiers", async () => {
     gatewayApi.create.mockResolvedValue(
-      gateway({ database_id: "", release_id: "" }),
+      gateway({ database_id: "", release_id: "release-1" }),
     );
 
     await controlPlane.provisionGateway(
       {
         name: "team-gateway",
         namespace: "openshell",
+        releaseId: "release-1",
       },
       context,
     );
@@ -141,7 +222,7 @@ describe("gateway API operations adapter", () => {
         fleet_id: "",
         name: "team-gateway",
         namespace: "openshell",
-        release_id: "",
+        release_id: "release-1",
       },
       { signal: undefined },
     );
@@ -172,6 +253,20 @@ describe("gateway API operations adapter", () => {
     );
     expect(gatewayApi.delete).toHaveBeenCalledWith("gateway-1", {
       signal: undefined,
+    });
+  });
+
+  it("preserves unavailable connection values when runtime configuration is absent", async () => {
+    loadConnectionDefaults.mockResolvedValue(undefined);
+    gatewayApi.get.mockResolvedValue(gateway());
+
+    await expect(
+      controlPlane.getGateway("gateway-1", context),
+    ).resolves.toMatchObject({
+      oidcAudience: undefined,
+      oidcClientId: undefined,
+      oidcIssuer: undefined,
+      oidcScopes: undefined,
     });
   });
 

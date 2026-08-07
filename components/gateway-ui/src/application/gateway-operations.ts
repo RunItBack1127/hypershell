@@ -175,6 +175,10 @@ export function createGatewayOperations({
       execute("list", signal, (context) =>
         controlPlane.listGateways(request, context),
       ),
+    listGatewayReleases: (signal) =>
+      execute("list-releases", signal, (context) =>
+        controlPlane.listGatewayReleases(context),
+      ),
     provisionGateway: (input, signal) =>
       execute("provision", signal, (context) =>
         controlPlane.provisionGateway(input, context),

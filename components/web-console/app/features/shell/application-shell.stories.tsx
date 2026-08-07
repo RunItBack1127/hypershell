@@ -20,6 +20,7 @@ const previewGateway: GatewayConnection = {
   oidcAudience: "openshell-cli",
   oidcClientId: "openshell-cli",
   oidcIssuer: "https://issuer.example.test",
+  oidcScopes: "openid profile email openshell:all",
   status: "Ready",
 };
 

@@ -7,14 +7,31 @@ import { vi } from "vitest";
 import { GatewayUiProvider } from "../gateway-ui-provider";
 import { GatewayCreatePage } from "./gateway-create";
 
-const { createGatewayMock, navigateMock } = vi.hoisted(() => ({
-  createGatewayMock: vi.fn(),
-  navigateMock: vi.fn(),
-}));
+const { createGatewayMock, listGatewayReleasesMock, navigateMock } = vi.hoisted(
+  () => ({
+    createGatewayMock: vi.fn(),
+    listGatewayReleasesMock: vi.fn(),
+    navigateMock: vi.fn(),
+  }),
+);
+
+const releaseOptions = [
+  {
+    id: "release-1",
+    image: "ghcr.io/nvidia/openshell/gateway:0.0.92@sha256:1234",
+    name: "OpenShell 0.0.92",
+  },
+  {
+    id: "release-2",
+    image: "ghcr.io/nvidia/openshell/gateway:0.0.91@sha256:5678",
+    name: "OpenShell 0.0.91",
+  },
+];
 
 const gatewayOperations = {
   getGateway: vi.fn(),
   listGateways: vi.fn(),
+  listGatewayReleases: listGatewayReleasesMock,
   provisionGateway: createGatewayMock,
   removeGateway: vi.fn(),
   renameGateway: vi.fn(),
@@ -35,7 +52,7 @@ const createdGateway = {
   name: "team-gateway",
   namespace: "openshell",
   phase: "",
-  releaseId: "",
+  releaseId: "release-1",
   status: "",
 };
 
@@ -58,17 +75,29 @@ function renderPage() {
 describe("GatewayCreatePage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    listGatewayReleasesMock.mockReset();
+    listGatewayReleasesMock.mockResolvedValue(releaseOptions);
     navigateMock.mockResolvedValue(undefined);
   });
 
-  it("provisions through the API with empty reconciler-owned IDs", async () => {
+  it("searches releases by human-facing content and provisions with the selected ID", async () => {
     const user = userEvent.setup();
     createGatewayMock.mockResolvedValue(createdGateway);
     renderPage();
 
     expect(screen.queryByLabelText("Cluster")).toBeNull();
-    expect(screen.queryByLabelText("Gateway release")).toBeNull();
+    const releaseSelect = await screen.findByRole("combobox", {
+      name: "Gateway release",
+    });
     expect(screen.queryByLabelText("Managed database")).toBeNull();
+
+    await user.type(releaseSelect, "0.0.92");
+    expect(await screen.findByText("OpenShell 0.0.92")).toBeTruthy();
+    expect(
+      screen.getByText("ghcr.io/nvidia/openshell/gateway:0.0.92@sha256:1234"),
+    ).toBeTruthy();
+    expect(screen.queryByText("OpenShell 0.0.91")).toBeNull();
+    await user.click(screen.getByText("OpenShell 0.0.92"));
 
     await user.type(
       screen.getByRole("textbox", { name: "Gateway name" }),
@@ -80,6 +109,7 @@ describe("GatewayCreatePage", () => {
       expect(createGatewayMock).toHaveBeenCalledWith({
         name: "team-gateway",
         namespace: "openshell",
+        releaseId: "release-1",
       });
     });
     await waitFor(() => {
@@ -91,10 +121,12 @@ describe("GatewayCreatePage", () => {
     const user = userEvent.setup();
     renderPage();
 
+    await screen.findByRole("combobox", { name: "Gateway release" });
+
     await user.click(screen.getByRole("button", { name: "Provision gateway" }));
 
     expect(await screen.findAllByText("This field is required.")).toHaveLength(
-      1,
+      2,
     );
     expect(createGatewayMock).not.toHaveBeenCalled();
   });
@@ -109,6 +141,12 @@ describe("GatewayCreatePage", () => {
         }),
     );
     renderPage();
+
+    const releaseSelect = await screen.findByRole("combobox", {
+      name: "Gateway release",
+    });
+    await user.click(releaseSelect);
+    await user.click(screen.getByText("OpenShell 0.0.92"));
 
     await user.type(
       screen.getByRole("textbox", { name: "Gateway name" }),
@@ -128,5 +166,54 @@ describe("GatewayCreatePage", () => {
     await waitFor(() => {
       expect(navigateMock).toHaveBeenCalledWith("/gateways/gateway-1");
     });
+  });
+
+  it("supports keyboard selection and reports an unmatched search", async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    const releaseSelect = await screen.findByRole("combobox", {
+      name: "Gateway release",
+    });
+    await user.type(releaseSelect, "not-a-release");
+    expect(screen.getByText("No matching gateway releases")).toBeTruthy();
+    await user.keyboard("{ArrowDown}");
+
+    await user.clear(releaseSelect);
+    await user.keyboard("{ArrowUp}{Enter}");
+    expect((releaseSelect as HTMLInputElement).value).toBe("OpenShell 0.0.91");
+  });
+
+  it("blocks provisioning when no releases are available", async () => {
+    listGatewayReleasesMock.mockResolvedValueOnce([]);
+    renderPage();
+
+    expect(
+      await screen.findByText("No gateway releases are available"),
+    ).toBeTruthy();
+    expect(
+      screen
+        .getByRole("button", { name: "Provision gateway" })
+        .hasAttribute("disabled"),
+    ).toBe(true);
+  });
+
+  it("allows release loading to be retried", async () => {
+    const user = userEvent.setup();
+    listGatewayReleasesMock
+      .mockRejectedValueOnce(new Error("unavailable"))
+      .mockResolvedValueOnce(releaseOptions);
+    renderPage();
+
+    expect(
+      await screen.findByText("Gateway releases could not be loaded"),
+    ).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+    expect(
+      (
+        await screen.findByRole("combobox", { name: "Gateway release" })
+      ).hasAttribute("disabled"),
+    ).toBe(false);
+    expect(listGatewayReleasesMock).toHaveBeenCalledTimes(2);
   });
 });

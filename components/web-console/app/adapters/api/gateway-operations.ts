@@ -4,6 +4,7 @@ import type {
   GatewayInvocationContext,
   GatewayListRequest,
   GatewayRecord,
+  GatewayReleaseOption,
 } from "@openshift-online/hypershell-gateway-ui";
 import { GatewayOperationError } from "@openshift-online/hypershell-gateway-ui";
 import {
@@ -12,11 +13,21 @@ import {
   type SDKClient,
 } from "@openshift-online/hypershell-sdk";
 
+import type { GatewayConnectionDefaults } from "../config/gateway-connection-config";
+
 type GatewayApi = Pick<
   SDKClient["gateways"],
   "create" | "delete" | "get" | "list" | "update"
 >;
-type GatewayApiFactory = (correlationId: string) => GatewayApi;
+type GatewayReleaseApi = Pick<SDKClient["gatewayReleases"], "listAll">;
+interface GatewayApis {
+  gatewayReleases: GatewayReleaseApi;
+  gateways: GatewayApi;
+}
+type GatewayApiFactory = (correlationId: string) => GatewayApis;
+type GatewayConnectionDefaultsLoader = (
+  signal?: AbortSignal,
+) => Promise<GatewayConnectionDefaults | undefined>;
 
 const gatewaySortFields = {
   cluster: "cluster_id",
@@ -40,10 +51,13 @@ function gatewayApi(
   factory: GatewayApiFactory,
   context: GatewayInvocationContext,
 ): GatewayApi {
-  return factory(context.correlationId);
+  return factory(context.correlationId).gateways;
 }
 
-function toGatewayRecord(gateway: Gateway): GatewayRecord {
+function toGatewayRecord(
+  gateway: Gateway,
+  connectionDefaults?: GatewayConnectionDefaults,
+): GatewayRecord {
   return {
     clusterId: gateway.cluster_id,
     databaseId: gateway.database_id,
@@ -51,6 +65,10 @@ function toGatewayRecord(gateway: Gateway): GatewayRecord {
     id: gateway.id,
     name: gateway.name,
     namespace: gateway.namespace,
+    oidcAudience: connectionDefaults?.oidcAudience,
+    oidcClientId: connectionDefaults?.oidcClientId,
+    oidcIssuer: connectionDefaults?.oidcIssuer,
+    oidcScopes: connectionDefaults?.oidcScopes,
     phase: gateway.phase,
     releaseId: gateway.release_id,
     status: gateway.status,
@@ -89,29 +107,36 @@ async function mapFailure<T>(task: () => Promise<T>): Promise<T> {
 
 export function createGatewayControlPlaneAdapter(
   apiFactory: GatewayApiFactory,
+  loadConnectionDefaults: GatewayConnectionDefaultsLoader = () =>
+    Promise.resolve(undefined),
 ): GatewayControlPlane {
   return {
     async getGateway(gatewayId, context) {
-      return mapFailure(async () =>
-        toGatewayRecord(
-          await gatewayApi(apiFactory, context).get(gatewayId, {
+      return mapFailure(async () => {
+        const [gateway, connectionDefaults] = await Promise.all([
+          gatewayApi(apiFactory, context).get(gatewayId, {
             signal: context.signal,
           }),
-        ),
-      );
+          loadConnectionDefaults(context.signal),
+        ]);
+        return toGatewayRecord(gateway, connectionDefaults);
+      });
     },
     async listGateways(request, context) {
       return mapFailure(async () => {
         const search = gatewaySearch(request.search);
-        const result = await gatewayApi(apiFactory, context).list(
-          {
-            orderBy: `${gatewaySortFields[request.sortField]} ${request.sortDirection}`,
-            page: request.page,
-            ...(search === undefined ? {} : { search }),
-            size: request.size,
-          },
-          { signal: context.signal },
-        );
+        const [result, connectionDefaults] = await Promise.all([
+          gatewayApi(apiFactory, context).list(
+            {
+              orderBy: `${gatewaySortFields[request.sortField]} ${request.sortDirection}`,
+              page: request.page,
+              ...(search === undefined ? {} : { search }),
+              size: request.size,
+            },
+            { signal: context.signal },
+          ),
+          loadConnectionDefaults(context.signal),
+        ]);
         const pageOffset = (request.page - 1) * request.size;
         const expectedItemCount = Math.max(
           0,
@@ -125,28 +150,50 @@ export function createGatewayControlPlaneAdapter(
           throw new GatewayOperationError("unavailable");
         }
         return {
-          items: result.items.map(toGatewayRecord),
+          items: result.items.map((gateway) =>
+            toGatewayRecord(gateway, connectionDefaults),
+          ),
           page: result.page,
           size: request.size,
           total: result.total,
         };
       });
     },
+    async listGatewayReleases(context) {
+      return mapFailure(async () => {
+        const releases: GatewayReleaseOption[] = [];
+        for await (const release of apiFactory(
+          context.correlationId,
+        ).gatewayReleases.listAll(100, { signal: context.signal })) {
+          releases.push({
+            id: release.id,
+            image: release.image,
+            name: release.name,
+          });
+        }
+        return releases.sort((left, right) =>
+          left.name.localeCompare(right.name),
+        );
+      });
+    },
     async provisionGateway(input, context) {
-      return mapFailure(async () =>
-        toGatewayRecord(
-          await gatewayApi(apiFactory, context).create(
+      const { releaseId, ...gatewayInput } = input;
+      return mapFailure(async () => {
+        const [gateway, connectionDefaults] = await Promise.all([
+          gatewayApi(apiFactory, context).create(
             {
-              ...input,
+              ...gatewayInput,
               cluster_id: "",
               database_id: "",
               fleet_id: "",
-              release_id: "",
+              release_id: releaseId,
             },
             { signal: context.signal },
           ),
-        ),
-      );
+          loadConnectionDefaults(context.signal),
+        ]);
+        return toGatewayRecord(gateway, connectionDefaults);
+      });
     },
     async removeGateway(gatewayId, context) {
       await mapFailure(() =>
@@ -156,15 +203,17 @@ export function createGatewayControlPlaneAdapter(
       );
     },
     async renameGateway(gatewayId, name, context) {
-      return mapFailure(async () =>
-        toGatewayRecord(
-          await gatewayApi(apiFactory, context).update(
+      return mapFailure(async () => {
+        const [gateway, connectionDefaults] = await Promise.all([
+          gatewayApi(apiFactory, context).update(
             gatewayId,
             { name },
             { signal: context.signal },
           ),
-        ),
-      );
+          loadConnectionDefaults(context.signal),
+        ]);
+        return toGatewayRecord(gateway, connectionDefaults);
+      });
     },
   };
 }

@@ -66,6 +66,18 @@ class DependencyPinTest(unittest.TestCase):
             ),
         )
 
+    def test_allows_explicit_kind_renderer_image_placeholder(self):
+        self.assertEqual([], self.manifest_violations("API_IMAGE_PLACEHOLDER"))
+
+    def test_rejects_arbitrary_template_expression(self):
+        self.assertNotEqual([], self.manifest_violations("${API_IMAGE}"))
+
+    def test_rejects_unregistered_image_placeholder(self):
+        self.assertNotEqual([], self.manifest_violations("UNREVIEWED_IMAGE_PLACEHOLDER"))
+
+    def test_kind_manifests_are_in_policy_scope(self):
+        self.assertTrue(CHECKER._is_manifest("deploy/kind/api-server.yaml"))
+
 
 if __name__ == "__main__":
     unittest.main()

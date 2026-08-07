@@ -23,6 +23,7 @@ const previewGateway: GatewayConnection = {
   oidcAudience: "openshell-cli",
   oidcClientId: "openshell-cli",
   oidcIssuer: "https://issuer.example.test/realms/openshell",
+  oidcScopes: "openid profile email openshell:all",
   status: "Ready",
 };
 const previewGateways = [previewGateway] as const;
@@ -38,6 +39,7 @@ const { deleteGatewayMock, listGatewaysMock, navigateMock, renameGatewayMock } =
 const gatewayOperations = {
   getGateway: vi.fn(),
   listGateways: listGatewaysMock,
+  listGatewayReleases: vi.fn(),
   provisionGateway: vi.fn(),
   removeGateway: deleteGatewayMock,
   renameGateway: renameGatewayMock,
@@ -103,6 +105,7 @@ describe("gateway shell pages", () => {
           oidcAudience: "openshell-cli",
           oidcClientId: "openshell-cli",
           oidcIssuer: "https://issuer.example.test/realms/openshell",
+          oidcScopes: "openid profile email openshell:all",
           phase: "",
           releaseId: "release-1",
           status: "Ready",
@@ -370,6 +373,7 @@ describe("gateway shell pages", () => {
             oidcAudience: "openshell-cli",
             oidcClientId: "openshell-cli",
             oidcIssuer: "https://issuer.example.test",
+            oidcScopes: "openid profile email openshell:all",
             status: "Ready",
           },
           {
@@ -381,6 +385,7 @@ describe("gateway shell pages", () => {
             oidcAudience: "openshell-cli",
             oidcClientId: "openshell-cli",
             oidcIssuer: "https://issuer.example.test",
+            oidcScopes: "openid profile email openshell:all",
             status: "Pending",
           },
         ]}

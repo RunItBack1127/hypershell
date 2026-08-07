@@ -11,6 +11,7 @@ import {
 const gatewayOperations = {
   getGateway: vi.fn(),
   listGateways: vi.fn(),
+  listGatewayReleases: vi.fn(),
   provisionGateway: vi.fn(),
   removeGateway: vi.fn(),
   renameGateway: vi.fn(),

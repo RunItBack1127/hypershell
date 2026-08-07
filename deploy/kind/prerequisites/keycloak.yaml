@@ -12,19 +12,34 @@ spec:
     metadata:
       labels:
         app: keycloak
+      annotations:
+        hypershell.redhat.io/image-revision: KEYCLOAK_IMAGE_REVISION_PLACEHOLDER
+        hypershell.redhat.io/config-revision: KEYCLOAK_CONFIG_REVISION_PLACEHOLDER
     spec:
       securityContext:
         runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: keycloak
-          image: quay.io/keycloak/keycloak:26.0
-          imagePullPolicy: IfNotPresent
+          image: KEYCLOAK_IMAGE_PLACEHOLDER
+          imagePullPolicy: Never
           securityContext:
             allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
           args:
-            - start-dev
+            - start
+            - --optimized
+            - --http-enabled=true
+            - --hostname-strict=false
             - --import-realm
           env:
             - name: KC_BOOTSTRAP_ADMIN_USERNAME
@@ -33,27 +48,40 @@ spec:
               value: admin
             - name: KC_HTTP_PORT
               value: "8080"
-            - name: KC_HEALTH_ENABLED
-              value: "true"
+            - name: KC_HOSTNAME
+              value: "http://KEYCLOAK_HOSTNAME_PLACEHOLDER:KEYCLOAK_PORT_PLACEHOLDER"
           ports:
             - containerPort: 8080
               name: http
-            - containerPort: 9000
-              name: management
           readinessProbe:
             httpGet:
               path: /health/ready
               port: 9000
             initialDelaySeconds: 30
             periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: 9000
+            initialDelaySeconds: 60
+            periodSeconds: 10
           volumeMounts:
+            - name: keycloak-data
+              mountPath: /opt/keycloak/data
             - name: realm-config
-              mountPath: /opt/keycloak/data/import
+              mountPath: /opt/keycloak/data/import/hypershell-realm.json
+              subPath: hypershell-realm.json
               readOnly: true
+            - name: tmp
+              mountPath: /tmp
       volumes:
         - name: realm-config
           configMap:
             name: keycloak-realm
+        - name: keycloak-data
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service
@@ -65,7 +93,7 @@ spec:
     app: keycloak
   ports:
     - name: http
-      port: 8080
+      port: KEYCLOAK_PORT_PLACEHOLDER
       targetPort: 8080
 ---
 apiVersion: v1
@@ -79,17 +107,88 @@ data:
       "realm": "hypershell",
       "enabled": true,
       "registrationAllowed": false,
+      "clientScopes": [
+        {
+          "name": "openid",
+          "description": "OpenID Connect scope",
+          "protocol": "openid-connect",
+          "attributes": {
+            "include.in.token.scope": "true"
+          }
+        },
+        {
+          "name": "profile",
+          "description": "OpenID Connect profile scope",
+          "protocol": "openid-connect",
+          "attributes": {
+            "include.in.token.scope": "true"
+          },
+          "protocolMappers": [
+            {
+              "name": "preferred username",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-usermodel-attribute-mapper",
+              "consentRequired": false,
+              "config": {
+                "user.attribute": "username",
+                "claim.name": "preferred_username",
+                "jsonType.label": "String",
+                "id.token.claim": "true",
+                "access.token.claim": "true",
+                "userinfo.token.claim": "true"
+              }
+            }
+          ]
+        },
+        {
+          "name": "email",
+          "description": "OpenID Connect email scope",
+          "protocol": "openid-connect",
+          "attributes": {
+            "include.in.token.scope": "true"
+          },
+          "protocolMappers": [
+            {
+              "name": "email",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-usermodel-attribute-mapper",
+              "consentRequired": false,
+              "config": {
+                "user.attribute": "email",
+                "claim.name": "email",
+                "jsonType.label": "String",
+                "id.token.claim": "true",
+                "access.token.claim": "true",
+                "userinfo.token.claim": "true"
+              }
+            }
+          ]
+        },
+        {
+          "name": "openshell:all",
+          "description": "Full access to all OpenShell resources",
+          "protocol": "openid-connect",
+          "attributes": {
+            "include.in.token.scope": "true",
+            "display.on.consent.screen": "true"
+          }
+        }
+      ],
       "clients": [
         {
-          "clientId": "hypershell-frontend",
+          "clientId": "openshell-cli",
           "enabled": true,
           "publicClient": true,
           "standardFlowEnabled": true,
           "directAccessGrantsEnabled": true,
           "fullScopeAllowed": true,
-          "redirectUris": ["*"],
-          "webOrigins": ["*"],
+          "redirectUris": ["http://127.0.0.1:*", "http://localhost:*"],
+          "webOrigins": ["http://127.0.0.1:*", "http://localhost:*"],
+          "attributes": {
+            "pkce.code.challenge.method": "S256"
+          },
           "defaultClientScopes": ["openid", "email", "profile"],
+          "optionalClientScopes": ["openshell:all"],
           "protocolMappers": [
             {
               "name": "audience",
@@ -97,7 +196,7 @@ data:
               "protocolMapper": "oidc-audience-mapper",
               "consentRequired": false,
               "config": {
-                "included.client.audience": "hypershell-frontend",
+                "included.client.audience": "openshell-cli",
                 "id.token.claim": "false",
                 "access.token.claim": "true",
                 "introspection.token.claim": "true"
@@ -150,12 +249,22 @@ data:
         {
           "username": "admin",
           "enabled": true,
+          "firstName": "Local",
+          "lastName": "Administrator",
+          "email": "admin@hypershell.test",
+          "emailVerified": true,
+          "requiredActions": [],
           "credentials": [{ "type": "password", "value": "admin", "temporary": false }],
           "realmRoles": ["hypershell-admins", "hypershell-users"]
         },
         {
           "username": "developer",
           "enabled": true,
+          "firstName": "Local",
+          "lastName": "Developer",
+          "email": "developer@hypershell.test",
+          "emailVerified": true,
+          "requiredActions": [],
           "credentials": [{ "type": "password", "value": "developer", "temporary": false }],
           "realmRoles": ["hypershell-users"]
         }

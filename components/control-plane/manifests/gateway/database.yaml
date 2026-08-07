@@ -44,6 +44,32 @@ spec:
         hypershell.redhat.io/managed: "true"
     spec:
       terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: prepare-postgres-run-directory
+          image: DB_IMAGE_PLACEHOLDER
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-ec"]
+          args: ["mkdir -p /work/postgresql && chmod 3775 /work/postgresql"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            runAsNonRoot: true
+            runAsUser: 999
+            runAsGroup: 999
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: postgres-run
+              mountPath: /work
       containers:
         - name: postgresql
           image: DB_IMAGE_PLACEHOLDER
@@ -56,18 +82,23 @@ spec:
               drop:
               - ALL
             runAsNonRoot: true
+            runAsUser: 999
+            runAsGroup: 999
+            readOnlyRootFilesystem: true
           env:
-            - name: POSTGRESQL_USER
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+            - name: POSTGRES_USER
               valueFrom:
                 secretKeyRef:
                   name: openshell-gateway-db-credentials
                   key: POSTGRESQL_USER
-            - name: POSTGRESQL_PASSWORD
+            - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: openshell-gateway-db-credentials
                   key: POSTGRESQL_PASSWORD
-            - name: POSTGRESQL_DATABASE
+            - name: POSTGRES_DB
               valueFrom:
                 secretKeyRef:
                   name: openshell-gateway-db-credentials
@@ -92,7 +123,12 @@ spec:
             failureThreshold: 3
           volumeMounts:
             - name: db-data
-              mountPath: /var/lib/pgsql/data
+              mountPath: /var/lib/postgresql/data
+            - name: postgres-run
+              mountPath: /var/run/postgresql
+              subPath: postgresql
+            - name: tmp
+              mountPath: /tmp
           resources:
             requests:
               cpu: 100m
@@ -104,6 +140,10 @@ spec:
         - name: db-data
           persistentVolumeClaim:
             claimName: openshell-gateway-db-data
+        - name: postgres-run
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service

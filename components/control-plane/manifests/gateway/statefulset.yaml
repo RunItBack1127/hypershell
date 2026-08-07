@@ -41,7 +41,7 @@ spec:
             runAsNonRoot: true
             runAsUser: 1000
             readOnlyRootFilesystem: true
-          image: IMAGE_PLACEHOLDER
+          image: GATEWAY_IMAGE_PLACEHOLDER
           imagePullPolicy: IfNotPresent
           args:
             - --config

@@ -13,6 +13,7 @@ export type {
   GatewayPage as GatewayPageResult,
   GatewayProvisionInput,
   GatewayRecord,
+  GatewayReleaseOption,
   GatewaySortDirection,
   GatewaySortField,
   GatewayWorkflowRuntime,

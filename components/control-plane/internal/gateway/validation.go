@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 )
@@ -60,12 +61,23 @@ func ValidateGatewayConfig(config GatewayConfig) error {
 		return fmt.Errorf("invalid OIDC config: %w", err)
 	}
 
+	if config.Route.Enabled {
+		if err := ValidateDNSName(config.Route.Host); err != nil {
+			return fmt.Errorf("invalid route host: %w", err)
+		}
+	}
+
 	return nil
 }
 
 func ValidateOIDCConfig(oidc OIDCConfig) error {
 	if oidc.Issuer == "" {
 		return nil
+	}
+
+	issuer, err := url.Parse(oidc.Issuer)
+	if err != nil || (issuer.Scheme != "http" && issuer.Scheme != "https") || issuer.Host == "" {
+		return fmt.Errorf("issuer must be an absolute HTTP(S) URL")
 	}
 
 	if (oidc.AdminRole != "") != (oidc.UserRole != "") {

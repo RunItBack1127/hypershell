@@ -9,6 +9,21 @@ rules:
   - apiGroups: [""]
     resources: ["namespaces", "secrets", "configmaps", "services", "serviceaccounts", "persistentvolumeclaims"]
     verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get"]
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["sandboxes", "sandboxes/status"]
+    verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
   - apiGroups: ["apps"]
     resources: ["deployments", "statefulsets"]
     verbs: ["get", "list", "watch", "create", "update", "patch"]
@@ -37,7 +52,7 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: hypershell-controller
+  name: hypershell-controller-NAMESPACE_PLACEHOLDER
   labels:
     app.kubernetes.io/name: hypershell
     app.kubernetes.io/component: controller
@@ -48,4 +63,4 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: hypershell-controller
-    namespace: hypershell-system
+    namespace: NAMESPACE_PLACEHOLDER
