@@ -104,10 +104,17 @@ func ApplyManifestToNamespace(manifest *unstructured.Unstructured, namespace str
 	if dbStorage == "" {
 		dbStorage = "5Gi"
 	}
+	userKey, passKey, dbKey := postgresEnvKeys(dbImage)
+	dataPath := postgresDataPath(dbImage)
+
 	// Replace DB_IMAGE_PLACEHOLDER before IMAGE_PLACEHOLDER because
 	// the shorter string is a substring of the longer one.
 	manifestJSON = strings.ReplaceAll(manifestJSON, "DB_IMAGE_PLACEHOLDER", dbImage)
 	manifestJSON = strings.ReplaceAll(manifestJSON, "DB_STORAGE_PLACEHOLDER", dbStorage)
+	manifestJSON = strings.ReplaceAll(manifestJSON, "DB_USER_KEY_PLACEHOLDER", userKey)
+	manifestJSON = strings.ReplaceAll(manifestJSON, "DB_PASS_KEY_PLACEHOLDER", passKey)
+	manifestJSON = strings.ReplaceAll(manifestJSON, "DB_NAME_KEY_PLACEHOLDER", dbKey)
+	manifestJSON = strings.ReplaceAll(manifestJSON, "DB_DATA_PATH_PLACEHOLDER", dataPath)
 	manifestJSON = strings.ReplaceAll(manifestJSON, "IMAGE_PLACEHOLDER", image)
 
 	result := &unstructured.Unstructured{}
@@ -134,13 +141,18 @@ func ApplyDatabaseOverrides(obj *unstructured.Unstructured, dbConfig DatabaseCon
 		dbImage = "postgres:16"
 	}
 
-	if strings.Contains(manifestJSON, "DB_STORAGE_PLACEHOLDER") || strings.Contains(manifestJSON, "DB_IMAGE_PLACEHOLDER") {
-		manifestJSON = strings.ReplaceAll(manifestJSON, "DB_STORAGE_PLACEHOLDER", storageSize)
-		manifestJSON = strings.ReplaceAll(manifestJSON, "DB_IMAGE_PLACEHOLDER", dbImage)
+	userKey, passKey, dbKey := postgresEnvKeys(dbImage)
+	dataPath := postgresDataPath(dbImage)
 
-		if err := obj.UnmarshalJSON([]byte(manifestJSON)); err != nil {
-			return fmt.Errorf("unmarshal after database overrides: %w", err)
-		}
+	manifestJSON = strings.ReplaceAll(manifestJSON, "DB_STORAGE_PLACEHOLDER", storageSize)
+	manifestJSON = strings.ReplaceAll(manifestJSON, "DB_IMAGE_PLACEHOLDER", dbImage)
+	manifestJSON = strings.ReplaceAll(manifestJSON, "DB_USER_KEY_PLACEHOLDER", userKey)
+	manifestJSON = strings.ReplaceAll(manifestJSON, "DB_PASS_KEY_PLACEHOLDER", passKey)
+	manifestJSON = strings.ReplaceAll(manifestJSON, "DB_NAME_KEY_PLACEHOLDER", dbKey)
+	manifestJSON = strings.ReplaceAll(manifestJSON, "DB_DATA_PATH_PLACEHOLDER", dataPath)
+
+	if err := obj.UnmarshalJSON([]byte(manifestJSON)); err != nil {
+		return fmt.Errorf("unmarshal after database overrides: %w", err)
 	}
 
 	return nil

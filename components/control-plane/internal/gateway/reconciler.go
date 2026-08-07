@@ -45,7 +45,12 @@ func ReconcileGateway(
 		return fmt.Errorf("invalid gateway configuration: %w", err)
 	}
 
-	if err := reconcileDatabaseCredentials(ctx, clientset, nsConfig.Name); err != nil {
+	dbImage := nsConfig.Gateway.Database.Image
+	if dbImage == "" {
+		dbImage = "postgres:16"
+	}
+
+	if err := reconcileDatabaseCredentials(ctx, clientset, nsConfig.Name, dbImage); err != nil {
 		return fmt.Errorf("reconcile database credentials in %s: %w", nsConfig.Name, err)
 	}
 
@@ -612,7 +617,7 @@ func applyTrustedCAOverrides(obj *unstructured.Unstructured) {
 	_ = unstructured.SetNestedSlice(obj.Object, containers, "spec", "template", "spec", "containers")
 }
 
-func reconcileDatabaseCredentials(ctx context.Context, clientset *kubernetes.Clientset, namespace string) error {
+func reconcileDatabaseCredentials(ctx context.Context, clientset *kubernetes.Clientset, namespace string, dbImage string) error {
 	secretName := "openshell-gateway-db-credentials"
 	_, err := clientset.CoreV1().Secrets(namespace).Get(ctx, secretName, metav1.GetOptions{})
 	if err == nil {
@@ -635,6 +640,8 @@ func reconcileDatabaseCredentials(ctx context.Context, clientset *kubernetes.Cli
 	dbURL := fmt.Sprintf("postgresql://%s:%s@%s:5432/%s?sslmode=disable",
 		dbUser, url.QueryEscape(password), dbHost, dbName)
 
+	userKey, passKey, dbKey := postgresEnvKeys(dbImage)
+
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      secretName,
@@ -648,10 +655,10 @@ func reconcileDatabaseCredentials(ctx context.Context, clientset *kubernetes.Cli
 		},
 		Type: corev1.SecretTypeOpaque,
 		StringData: map[string]string{
-			"POSTGRESQL_USER":     dbUser,
-			"POSTGRESQL_PASSWORD": password,
-			"POSTGRESQL_DATABASE": dbName,
-			"url":                 dbURL,
+			userKey: dbUser,
+			passKey: password,
+			dbKey:   dbName,
+			"url":   dbURL,
 		},
 	}
 
@@ -661,6 +668,24 @@ func reconcileDatabaseCredentials(ctx context.Context, clientset *kubernetes.Cli
 
 	log.Printf("INFO created database credentials secret %s in %s (password length=%d)", secretName, namespace, len(password))
 	return nil
+}
+
+func isRHELPostgres(image string) bool {
+	return strings.Contains(image, "rhel")
+}
+
+func postgresEnvKeys(image string) (userKey, passKey, dbKey string) {
+	if isRHELPostgres(image) {
+		return "POSTGRESQL_USER", "POSTGRESQL_PASSWORD", "POSTGRESQL_DATABASE"
+	}
+	return "POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB"
+}
+
+func postgresDataPath(image string) string {
+	if isRHELPostgres(image) {
+		return "/var/lib/pgsql/data"
+	}
+	return "/var/lib/postgresql/data"
 }
 
 // reconcileCredentialKEK uses create-or-skip (not update-or-create) because
