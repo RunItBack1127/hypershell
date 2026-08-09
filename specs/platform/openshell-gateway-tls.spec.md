@@ -1,16 +1,15 @@
 # OpenShell Gateway TLS Specification
 
-**Date:** 2026-08-04
+**Date:** 2026-08-09
 **Status:** Draft
 **Parent:** `openshell-gateway.spec.md` — core gateway provisioning
 **Related:** `openshell-gateway-oidc.spec.md` — OIDC authentication; `openshell-gateway-routing.spec.md` — external connectivity
-**Context:** Adapted from Agent Control Plane for HyperShell gateway fleet management
 
 ---
 
 ## Purpose
 
-This specification defines TLS certificate management and mutual TLS (mTLS) behavior for OpenShell gateways deployed by the ACP control plane. It covers certificate generation strategies, SAN management, optional mTLS modes, cert rotation, and trusted CA bundle injection.
+This specification defines TLS certificate management and mutual TLS (mTLS) behavior for OpenShell gateways deployed by the HyperShell control plane. It covers certificate generation strategies, SAN management, optional mTLS modes, cert rotation, and trusted CA bundle injection.
 
 ---
 
@@ -35,7 +34,7 @@ When OIDC is enabled alongside `client_ca_path`, the gateway operates in **optio
 
 The GatewayReconciler SHALL **retain** `client_ca_path` in `gateway.toml` when OIDC is enabled. It SHALL NOT remove it.
 
-> **Implementation note (verified):** The code change in `components/ambient-control-plane/internal/gateway/manifests.go` removed the block that stripped `client_ca_path` when OIDC was configured. The corrected `ApplyConfigOverrides()` always preserves `client_ca_path` regardless of OIDC state.
+> **Implementation note (verified):** The code change in `components/control-plane/internal/gateway/manifests.go` removed the block that stripped `client_ca_path` when OIDC was configured. The corrected `ApplyConfigOverrides()` always preserves `client_ca_path` regardless of OIDC state.
 
 ---
 
@@ -60,7 +59,7 @@ When OIDC is enabled on a gateway, `client_ca_path` SHALL be retained in the `[o
 - THEN `gateway.toml` SHALL retain `client_ca_path` in the `[openshell.gateway.tls]` section
 - AND mTLS SHALL be required for all clients (full mTLS mode)
 
-#### Verified gateway.toml (ROSA deployment)
+#### Verified gateway.toml
 
 ```toml
 [openshell.gateway.tls]
@@ -72,11 +71,11 @@ client_ca_path = "/etc/openshell-tls/client-ca/ca.crt"
 allow_unauthenticated_users = false
 
 [openshell.gateway.oidc]
-issuer      = "https://keycloak-acp-api-01.apps.rosa.vteam-stage.7fpc.p3.openshiftapps.com/realms/ambient-code"
-audience    = "ambient-frontend"
+issuer      = "https://keycloak.example.com/realms/hypershell"
+audience    = "openshell-cli"
 roles_claim = "groups"
-admin_role  = "ambient-admins"
-user_role   = "ambient-users"
+admin_role  = "hypershell-admins"
+user_role   = "hypershell-users"
 ```
 
 ---
@@ -143,7 +142,7 @@ Gateways with OIDC enabled need to reach the identity provider's OIDC discovery 
 
 #### Scenario: Trusted CA ConfigMap present
 
-- GIVEN a ConfigMap named `gateway-trusted-ca` exists in the ACP namespace
+- GIVEN a ConfigMap named `gateway-trusted-ca` exists in the HyperShell namespace
 - AND the ConfigMap has a `ca-bundle.crt` key containing PEM-encoded CA certificates
 - WHEN the GatewayReconciler reconciles a gateway in a tenant namespace
 - THEN it SHALL copy the ConfigMap to the tenant namespace (create-or-update)
@@ -152,7 +151,7 @@ Gateways with OIDC enabled need to reach the identity provider's OIDC discovery 
 
 #### Scenario: Trusted CA ConfigMap absent
 
-- GIVEN no ConfigMap named `gateway-trusted-ca` exists in the ACP namespace
+- GIVEN no ConfigMap named `gateway-trusted-ca` exists in the HyperShell namespace
 - WHEN the GatewayReconciler reconciles a gateway
 - THEN it SHALL NOT add any CA volume or `SSL_CERT_FILE` env var
 - AND the gateway SHALL use its built-in trust store

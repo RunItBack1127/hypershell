@@ -49,7 +49,7 @@ func ReconcileGateway(
 
 	dbImage := nsConfig.Gateway.Database.Image
 	if dbImage == "" {
-		dbImage = "registry.access.redhat.com/hi/postgresql:18.4@sha256:9b1917bf15a3b3a6a99b94ab75db1bfde3f434990e881c69d527417d2c035a09"
+		dbImage = defaultDBImage()
 	}
 
 	if err := reconcileDatabaseCredentials(ctx, clientset, nsConfig.Name, dbImage); err != nil {
@@ -130,6 +130,12 @@ func DeleteGatewayResources(
 			schema.GroupVersionResource{Group: "gateway.networking.k8s.io", Version: "v1", Resource: "gateways"},
 			schema.GroupVersionResource{Group: "gateway.networking.k8s.io", Version: "v1", Resource: "grpcroutes"},
 			schema.GroupVersionResource{Group: "gateway.networking.k8s.io", Version: "v1alpha3", Resource: "backendtlspolicies"},
+		)
+	}
+
+	if opts.IsOpenShift {
+		namespacedResources = append(namespacedResources,
+			schema.GroupVersionResource{Group: "route.openshift.io", Version: "v1", Resource: "routes"},
 		)
 	}
 
@@ -274,6 +280,10 @@ func deployGateway(
 		"service.yaml",
 		"deployment.yaml",
 		"networkpolicy.yaml",
+	}
+
+	if opts.IsOpenShift {
+		order = append(order, "route.yaml", "networkpolicy-router.yaml")
 	}
 
 	for _, filename := range order {
@@ -432,6 +442,7 @@ func kindToResource(kind string) string {
 		"Gateway":               "gateways",
 		"GRPCRoute":             "grpcroutes",
 		"BackendTLSPolicy":      "backendtlspolicies",
+		"Route":                 "routes",
 	}
 
 	if resource, ok := mapping[kind]; ok {

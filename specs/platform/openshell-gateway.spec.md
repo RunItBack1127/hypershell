@@ -22,7 +22,7 @@ This specification covers core provisioning. Domain-specific concerns are define
 
 ## Purpose
 
-The control plane SHALL provision and reconcile OpenShell gateway deployments in project namespaces through a fully API-driven model. Gateway configuration is expressed as a first-class ACP resource (`kind: Gateway`), applied via `acpctl apply -k` alongside Project, Agent, Credential, and RoleBinding resources. The API server persists Gateway resources in PostgreSQL. The control plane discovers Gateway resources via the same gRPC watch stream used for all other resources and reconciles them into Kubernetes gateway deployments.
+The control plane SHALL provision and reconcile OpenShell gateway deployments in project namespaces through a fully API-driven model. Gateway configuration is expressed as a first-class HyperShell resource (`kind: Gateway`), applied via `hsctl apply -k` alongside Project, Agent, Credential, and RoleBinding resources. The API server persists Gateway resources in PostgreSQL. The control plane discovers Gateway resources via the same gRPC watch stream used for all other resources and reconciles them into Kubernetes gateway deployments.
 
 This replaces the previous ConfigMap-based `platform-config` approach. The ConfigMap, its watcher (`internal/gateway/config.go`), and the `initGatewayProvisioning()` startup path are eliminated.
 
@@ -39,7 +39,7 @@ This specification covers core gateway provisioning. OIDC, TLS, routing, and dat
 ### Flow
 
 ```
-acpctl apply -k overlays/tenant-a/
+hsctl apply -k overlays/tenant-a/
     │  renders kustomization.yaml (Project + Gateway + Agents + Credentials)
     │  POST/PATCH each resource to API server
     ▼
@@ -67,7 +67,7 @@ This enables dedicated gateway clusters — clusters with `role=gateway` that ho
 
 1. Deploying gateway K8s resources (StatefulSet, Service, RBAC, certgen Job) on the target cluster
 2. Creating an externally reachable endpoint (LoadBalancer Service or Ingress/Route) when the gateway serves workloads on a different cluster
-3. Storing the external endpoint URL in the Gateway's `annotations` (`ambient-code.io/gateway-external-url`) for cross-cluster discovery by the `GatewayClient`
+3. Storing the external endpoint URL in the Gateway's `annotations` (`hypershell.redhat.io/gateway-external-url`) for cross-cluster discovery by the `GatewayClient`
 
 ### Relationship to ApplicationReconciler
 
@@ -203,9 +203,9 @@ The `acpgw.` subdomain segment distinguishes Gateway API routes from traditional
 
 ### Requirement: Gateway as API Resource
 
-Gateway SHALL be a first-class ACP resource kind, persisted in PostgreSQL and exposed via the REST API under the project scope. The Gateway resource declares that a project namespace should have an OpenShell gateway deployed with specific configuration.
+Gateway SHALL be a first-class HyperShell resource kind, persisted in PostgreSQL and exposed via the REST API under the project scope. The Gateway resource declares that a project namespace should have an OpenShell gateway deployed with specific configuration.
 
-#### Scenario: Create a Gateway via acpctl apply
+#### Scenario: Create a Gateway via hsctl apply
 
 - GIVEN a kustomize overlay containing a `gateway.yaml`:
   ```yaml
@@ -220,7 +220,7 @@ Gateway SHALL be a first-class ACP resource kind, persisted in PostgreSQL and ex
     [openshell.gateway]
     bind_address = "0.0.0.0:8080"
   ```
-- WHEN a user runs `acpctl apply -k overlays/tenant-a/`
+- WHEN a user runs `hsctl apply -k overlays/tenant-a/`
 - THEN the CLI SHALL render the kustomization and POST the Gateway resource to the API server
 - AND the API server SHALL persist the Gateway in PostgreSQL
 - AND the API server SHALL emit a gRPC watch event for the new Gateway
@@ -230,7 +230,7 @@ Gateway SHALL be a first-class ACP resource kind, persisted in PostgreSQL and ex
 
 - GIVEN a Gateway already exists for `tenant-a` with image `v0.0.70`
 - AND a kustomize patch changes the image to `v0.0.71`
-- WHEN a user runs `acpctl apply -k overlays/tenant-a/`
+- WHEN a user runs `hsctl apply -k overlays/tenant-a/`
 - THEN the CLI SHALL PATCH the existing Gateway resource
 - AND the GatewayReconciler SHALL detect the change and update the gateway Deployment
 
@@ -246,21 +246,21 @@ Gateway SHALL be a first-class ACP resource kind, persisted in PostgreSQL and ex
 
 ### Requirement: Shared Kustomize Library
 
-The kustomize rendering engine SHALL be extracted from `acpctl apply/cmd.go` into a shared library package. This library SHALL be consumed by both the CLI (`acpctl apply`) and the ApplicationReconciler.
+The kustomize rendering engine SHALL be extracted from `hsctl apply/cmd.go` into a shared library package. This library SHALL be consumed by both the CLI (`hsctl apply`) and the ApplicationReconciler.
 
 #### Scenario: Library extraction
 
-- GIVEN the kustomize engine currently lives in `components/ambient-cli/cmd/acpctl/apply/cmd.go`
+- GIVEN the kustomize engine currently lives in `components/cli/cmd/hsctl/apply/cmd.go`
 - WHEN the shared library is created
-- THEN it SHALL be placed in a package accessible to both the CLI and the control plane (e.g., `components/ambient-sdk/go-sdk/kustomize/`)
+- THEN it SHALL be placed in a package accessible to both the CLI and the control plane (e.g., `components/sdk/go-sdk/kustomize/`)
 - AND it SHALL expose functions for: loading a kustomization directory, resolving bases, merging resources, applying strategic-merge patches, and producing a flat manifest stream
-- AND the existing `acpctl apply` command SHALL be refactored to use the shared library
+- AND the existing `hsctl apply` command SHALL be refactored to use the shared library
 - AND the ApplicationReconciler SHALL be updated to use the shared library for rendering
 
 #### Scenario: Supported kinds
 
 - GIVEN the shared kustomize library renders manifests
-- THEN it SHALL support the following ACP resource kinds:
+- THEN it SHALL support the following HyperShell resource kinds:
   - `Project`
   - `Agent`
   - `Credential`
@@ -288,7 +288,7 @@ The control plane SHALL include a GatewayReconciler in `internal/reconciler/` th
 - WHEN the reconciler processes the event
 - THEN it SHALL validate the Gateway configuration (image reference, DNS names, TOML config)
 - AND it SHALL apply gateway K8s manifests to the namespace: StatefulSet, Service, ServiceAccount, RBAC, certgen Job, ConfigMap, NetworkPolicy
-- AND all resources SHALL carry the label `ambient-code.io/managed-by=ambient-control-plane`
+- AND all resources SHALL carry the label `hypershell.redhat.io/managed-by=hypershell-control-plane`
 - AND the reconciler SHALL use update-or-create semantics (SSA or equivalent)
 
 #### Scenario: Gateway MODIFIED event
@@ -330,7 +330,7 @@ The GatewayReconciler SHALL load gateway resource manifests from the container f
 
 #### Scenario: Load gateway manifests from filesystem
 
-- GIVEN the ACP container includes gateway manifests at `/manifests/gateway/`
+- GIVEN the HyperShell container includes gateway manifests at `/manifests/gateway/`
 - WHEN the GatewayReconciler loads manifests
 - THEN it SHALL read all YAML files from the manifests directory
 - AND it SHALL parse each file into Kubernetes resource objects
@@ -352,7 +352,7 @@ The GatewayReconciler SHALL support two certificate generation strategies: the d
 
 **Why cert-manager over pkiInitJob:** The pkiInitJob generates certificates once as a Kubernetes Job. If certificates expire, a manual re-run is required. cert-manager automates certificate lifecycle — issuance, renewal before expiry, and secret rotation — without operator intervention. cert-manager also integrates with external CAs (ACME, Vault, etc.) for production deployments.
 
-**Cluster prerequisite:** cert-manager (v1.20+ recommended) must be installed cluster-wide by an administrator before gateways can use it. This is analogous to the agent-sandbox controller — a cluster-level prerequisite, not something ACP installs per-gateway. In test environments (Kind, CRC), cert-manager SHALL be installed during `make kind-up` and `make crc-up` at the same time as the agent-sandbox controller.
+**Cluster prerequisite:** cert-manager (v1.20+ recommended) must be installed cluster-wide by an administrator before gateways can use it. This is analogous to the agent-sandbox controller — a cluster-level prerequisite, not something HyperShell installs per-gateway. In test environments (Kind, CRC), cert-manager SHALL be installed during `make kind-up` and `make crc-up` at the same time as the agent-sandbox controller.
 
 #### Scenario: cert-manager installed during test environment setup
 
@@ -418,11 +418,11 @@ The GatewayReconciler SHALL support two certificate generation strategies: the d
 
 Gateways with OIDC enabled need to reach the identity provider's OIDC discovery endpoint over HTTPS. In environments where the IdP is exposed through an ingress controller with a non-public CA certificate (e.g., OpenShift CRC, private PKI), the gateway pod's default trust store will not include the required CA and OIDC initialization will fail.
 
-The control plane SHALL support an optional `gateway-trusted-ca` ConfigMap in the ACP namespace. When present, it is copied to each tenant namespace and mounted into the gateway StatefulSet so that the gateway process trusts the additional CA certificates.
+The control plane SHALL support an optional `gateway-trusted-ca` ConfigMap in the HyperShell namespace. When present, it is copied to each tenant namespace and mounted into the gateway StatefulSet so that the gateway process trusts the additional CA certificates.
 
-#### Scenario: Trusted CA ConfigMap present in ACP namespace
+#### Scenario: Trusted CA ConfigMap present in HyperShell namespace
 
-- GIVEN a ConfigMap named `gateway-trusted-ca` exists in the ACP namespace (e.g., `ambient-code`)
+- GIVEN a ConfigMap named `gateway-trusted-ca` exists in the HyperShell namespace (e.g., `hypershell`)
 - AND the ConfigMap has a `ca-bundle.crt` key containing one or more PEM-encoded CA certificates
 - WHEN the GatewayReconciler reconciles a gateway in a tenant namespace
 - THEN it SHALL copy the `gateway-trusted-ca` ConfigMap to the tenant namespace (create-or-update pattern)
@@ -432,7 +432,7 @@ The control plane SHALL support an optional `gateway-trusted-ca` ConfigMap in th
 
 #### Scenario: Trusted CA ConfigMap absent
 
-- GIVEN no ConfigMap named `gateway-trusted-ca` exists in the ACP namespace
+- GIVEN no ConfigMap named `gateway-trusted-ca` exists in the HyperShell namespace
 - WHEN the GatewayReconciler reconciles a gateway
 - THEN it SHALL NOT add any CA volume or `SSL_CERT_FILE` env var to the gateway StatefulSet
 - AND the gateway SHALL use its built-in trust store (default behavior)
@@ -451,7 +451,7 @@ The control plane SHALL support an optional `gateway-trusted-ca` ConfigMap in th
 - WHEN a developer runs the CRC setup automation
 - THEN the setup script SHALL extract the CRC ingress CA from the `router-ca` Secret in `openshift-ingress-operator` namespace
 - AND it SHALL combine the ingress CA with the system CA bundle (from an OpenShift-injected ConfigMap with `config.openshift.io/inject-trusted-cabundle` annotation)
-- AND it SHALL create the `gateway-trusted-ca` ConfigMap in the ACP namespace with the combined bundle
+- AND it SHALL create the `gateway-trusted-ca` ConfigMap in the HyperShell namespace with the combined bundle
 - AND subsequent gateway reconciliation SHALL automatically inject the CA into gateway pods
 
 **Design rationale:** The OIDC issuer URL must be identical inside and outside the cluster (OpenShell requirement — see [Gateway Auth: OIDC](https://docs.nvidia.com/openshell/reference/gateway-auth#oidc)). On CRC, the external Keycloak Route uses HTTPS with the CRC ingress controller's self-signed CA. The gateway must reach this same URL, so it needs the ingress CA in its trust store. Using an in-cluster HTTP URL is not viable because the issuer returned in OIDC discovery would not match. This approach generalizes to any environment where the IdP uses a private CA.
@@ -508,7 +508,7 @@ Gateway resources SHALL be expressible in the existing `examples/` kustomize ove
     - project.yaml
     - gateway.yaml
   ```
-- WHEN a user runs `acpctl apply -k examples/overlays/tenant-a/`
+- WHEN a user runs `hsctl apply -k examples/overlays/tenant-a/`
 - THEN the Project, Gateway, Agents (from base), and Credentials SHALL all be applied in order
 - AND the ProjectReconciler SHALL create the namespace
 - AND the GatewayReconciler SHALL deploy the gateway into that namespace
@@ -640,7 +640,7 @@ All gateway resources SHALL carry the following labels:
 - `app.kubernetes.io/name=openshell`
 - `app.kubernetes.io/component=gateway`
 - `app.kubernetes.io/managed-by=agent-control-plane`
-- `ambient-code.io/managed=true`
+- `hypershell.redhat.io/managed=true`
 
 The gateway StatefulSet SHALL specify:
 - **SecurityContext:** `runAsNonRoot: true`, `allowPrivilegeEscalation: false`, capabilities `drop: [ALL]`, `seccompProfile.type: RuntimeDefault`
@@ -670,7 +670,7 @@ When the control plane detects that it is running on an OpenShift cluster (the `
 
 **Key difference from vanilla Kubernetes:** OpenShift enforces the `restricted` PodSecurity standard by default. The OpenShell Helm chart's hardcoded `fsGroup` and `runAsUser` values conflict with OpenShift's SCC admission controller, which assigns UIDs and GIDs from the namespace's allocated ranges. Additionally, sandbox pods require the `privileged` SCC to function correctly.
 
-**TLS is NOT disabled.** The NVIDIA docs show `--set server.disableTls=true` for evaluation scenarios. ACP does NOT use this setting because BackendTLSPolicy re-encrypts traffic from the networking Gateway to the pod, which requires the gateway to serve TLS. The gateway's self-signed certificate (generated by the certgen Job or cert-manager) is used for the backend TLS segment.
+**TLS is NOT disabled.** The NVIDIA docs show `--set server.disableTls=true` for evaluation scenarios. HyperShell does NOT use this setting because BackendTLSPolicy re-encrypts traffic from the networking Gateway to the pod, which requires the gateway to serve TLS. The gateway's self-signed certificate (generated by the certgen Job or cert-manager) is used for the backend TLS segment.
 
 #### Scenario: SCC binding for sandbox service account
 
@@ -727,7 +727,7 @@ When a Gateway is deployed on a cluster different from where sessions run, the G
 - WHEN the GatewayReconciler reconciles the Gateway
 - THEN it SHALL deploy gateway K8s resources on the target cluster using the `ClusterClientPool`
 - AND it SHALL create a `LoadBalancer` Service (or Ingress/Route, depending on cluster capabilities) exposing the gateway's gRPC port externally
-- AND it SHALL store the external endpoint URL in the Gateway's `annotations` as `ambient-code.io/gateway-external-url`
+- AND it SHALL store the external endpoint URL in the Gateway's `annotations` as `hypershell.redhat.io/gateway-external-url`
 - AND the annotation SHALL be written to the API server (PostgreSQL), not just to the Kubernetes resource
 
 #### Scenario: Gateway on local cluster (backward compatible)
@@ -736,7 +736,7 @@ When a Gateway is deployed on a cluster different from where sessions run, the G
 - WHEN the GatewayReconciler reconciles the Gateway
 - THEN it SHALL deploy gateway K8s resources on the local cluster
 - AND it SHALL NOT create an external Service (intra-cluster DNS is sufficient)
-- AND the `ambient-code.io/gateway-external-url` annotation SHALL NOT be set
+- AND the `hypershell.redhat.io/gateway-external-url` annotation SHALL NOT be set
 
 #### Scenario: Namespace provisioning on remote cluster
 
@@ -744,7 +744,7 @@ When a Gateway is deployed on a cluster different from where sessions run, the G
 - AND the project namespace does not yet exist on that cluster
 - WHEN the GatewayReconciler processes the Gateway event
 - THEN it SHALL create the namespace on the remote cluster using the `ClusterClientPool`
-- AND it SHALL apply the same managed labels as the local ProjectReconciler (`ambient-code.io/managed=true`, etc.)
+- AND it SHALL apply the same managed labels as the local ProjectReconciler (`hypershell.redhat.io/managed=true`, etc.)
 
 ---
 
@@ -802,13 +802,13 @@ The Gateway API resource SHALL accept an optional `oidc` object containing OIDC 
   server_dns_names:
     - openshell-gateway.tenant-a.svc.cluster.local
   oidc:
-    issuer: https://keycloak.example.com/realms/ambient-code
+    issuer: https://keycloak.example.com/realms/hypershell
     audience: openshell-cli
     roles_claim: realm_access.roles
     admin_role: openshell-admin
     user_role: openshell-user
   ```
-- WHEN the user runs `acpctl apply -k`
+- WHEN the user runs `hsctl apply -k`
 - THEN the API server SHALL persist the Gateway with OIDC configuration
 - AND the GatewayReconciler SHALL generate a `gateway.toml` containing the `[openshell.gateway.oidc]` section
 
@@ -880,7 +880,7 @@ When a Gateway has OIDC enabled (non-empty `oidc.issuer`), the GatewayReconciler
   allow_unauthenticated_users = false
 
   [openshell.gateway.oidc]
-  issuer       = "https://keycloak.example.com/realms/ambient-code"
+  issuer       = "https://keycloak.example.com/realms/hypershell"
   audience     = "openshell-cli"
   jwks_ttl     = 3600
   roles_claim  = "realm_access.roles"
@@ -1205,18 +1205,18 @@ The Gateway API response SHALL include the route address so that CLI and SDK con
 
 ### Requirement: CLI Route Address Display
 
-The `acpctl get gateway` command SHALL display the route address when available.
+The `hsctl get gateway` command SHALL display the route address when available.
 
-The `acpctl gateway setup-cli` command operates in two modes:
+The `hsctl gateway setup-cli` command operates in two modes:
 
-1. **Default (API-only):** Queries the ACP API server for the gateway's `routeAddress` and runs the `openshell gateway add` command to register the gateway locally. It does NOT interact with the Kubernetes cluster directly. If no `routeAddress` is available, it errors. Use `--print` to output the command instead of executing it.
+1. **Default (API-only):** Queries the HyperShell API server for the gateway's `routeAddress` and runs the `openshell gateway add` command to register the gateway locally. It does NOT interact with the Kubernetes cluster directly. If no `routeAddress` is available, it errors. Use `--print` to output the command instead of executing it.
 
 2. **`--kubectl` mode:** When `--kubectl` is passed and no `routeAddress` is available, the CLI falls back to direct cluster access — it locates the gateway via `kubectl`, manages a port-forward, extracts TLS/mTLS certificates, and sets up the openshell CLI using the local forwarded address.
 
 #### Scenario: Gateway table includes route address
 
 - GIVEN a Gateway with a populated `routeAddress`
-- WHEN a user runs `acpctl get gateways`
+- WHEN a user runs `hsctl get gateways`
 - THEN the table output SHALL include an `ADDRESS` column alongside the existing columns (NAME, VERSION, AGE)
 - AND the `ADDRESS` column SHALL display the route address for gateways with a route
 - AND the `ADDRESS` column SHALL display `"Not ready..."` for gateways with a route but no address yet
@@ -1225,7 +1225,7 @@ The `acpctl gateway setup-cli` command operates in two modes:
 #### Scenario: Single gateway connection info includes route address
 
 - GIVEN a Gateway with a populated `routeAddress`
-- WHEN a user runs `acpctl get gateway <name>`
+- WHEN a user runs `hsctl get gateway <name>`
 - THEN the connection info section SHALL display the route address as the primary external endpoint:
   ```
   Connection Info:
@@ -1234,15 +1234,15 @@ The `acpctl gateway setup-cli` command operates in two modes:
     Server SANs:  <comma-separated ServerDnsNames>
 
   Setup openshell CLI:
-    acpctl gateway setup-cli <name>
+    hsctl gateway setup-cli <name>
   ```
 - AND the "Setup openshell CLI" hint SHALL only be shown when a route address is available
 
 #### Scenario: setup-cli registers gateway via route address
 
 - GIVEN a Gateway with a populated `routeAddress`
-- WHEN a user runs `acpctl gateway setup-cli <name>`
-- THEN the CLI SHALL query the ACP API server to retrieve the gateway resource
+- WHEN a user runs `hsctl gateway setup-cli <name>`
+- THEN the CLI SHALL query the HyperShell API server to retrieve the gateway resource
 - AND it SHALL read the `routeAddress` field from the API response
 - AND it SHALL execute `openshell gateway add` to register the gateway locally:
   ```
@@ -1257,13 +1257,13 @@ The `acpctl gateway setup-cli` command operates in two modes:
 #### Scenario: setup-cli with --print flag
 
 - GIVEN a Gateway with a populated `routeAddress`
-- WHEN a user runs `acpctl gateway setup-cli <name> --print`
+- WHEN a user runs `hsctl gateway setup-cli <name> --print`
 - THEN the CLI SHALL print the `openshell gateway add` command to stdout instead of executing it
 
 #### Scenario: setup-cli errors when no route and no --kubectl
 
 - GIVEN a Gateway without a populated `routeAddress`
-- WHEN a user runs `acpctl gateway setup-cli <name>` without `--kubectl`
+- WHEN a user runs `hsctl gateway setup-cli <name>` without `--kubectl`
 - THEN the CLI SHALL exit with an error indicating that the gateway has no external route address
 - AND the error message SHALL suggest configuring a Route on the gateway, or using `--kubectl`
 
@@ -1271,7 +1271,7 @@ The `acpctl gateway setup-cli` command operates in two modes:
 
 - GIVEN a Gateway without a populated `routeAddress`
 - AND the user has `kubectl` access to the cluster
-- WHEN the user runs `acpctl gateway setup-cli <name> --kubectl`
+- WHEN the user runs `hsctl gateway setup-cli <name> --kubectl`
 - THEN the CLI SHALL use `kubectl` to locate the gateway Service and start a port-forward
 - AND it SHALL extract TLS/mTLS certificates from the namespace
 - AND it SHALL execute `openshell gateway add` with the local forwarded address
@@ -1279,7 +1279,7 @@ The `acpctl gateway setup-cli` command operates in two modes:
 #### Scenario: setup-cli with --kubectl prefers route address when available
 
 - GIVEN a Gateway with a populated `routeAddress`
-- WHEN the user runs `acpctl gateway setup-cli <name> --kubectl`
+- WHEN the user runs `hsctl gateway setup-cli <name> --kubectl`
 - THEN the CLI SHALL use the `routeAddress` and SHALL NOT start a port-forward
 
 ---
@@ -1379,7 +1379,7 @@ The control plane ServiceAccount SHALL have permissions to manage Gateway API re
 
 ### Requirement: Cluster Prerequisites via Make Target
 
-The `make crc-up` target SHALL install Gateway API prerequisites on the OpenShift cluster before deploying the ACP stack.
+The `make crc-up` target SHALL install Gateway API prerequisites on the OpenShift cluster before deploying the HyperShell stack.
 
 #### Scenario: Gateway API setup in crc-up
 
@@ -1391,7 +1391,7 @@ The `make crc-up` target SHALL install Gateway API prerequisites on the OpenShif
   3. Create the networking Gateway `acpgw` in the `openshift-ingress` namespace with an HTTPS listener on `*.acpgw.<base-domain>` referencing the TLS Secret
   4. If the Gateway's LoadBalancer is pending (CRC), patch the default IngressController to allow wildcard routes (`routeAdmission.wildcardPolicy: WildcardsAllowed`) and create a passthrough Route that bridges the default router to the Gateway API pod
   5. Wait for the Gateway's status to include `Accepted: True`
-  6. Continue with the existing ACP deployment steps
+  6. Continue with the existing HyperShell deployment steps
 
 #### Scenario: Gateway already exists
 
@@ -1538,7 +1538,7 @@ When `database.type` is `postgres`, the GatewayReconciler SHALL provision the fo
   - `app.kubernetes.io/name: openshell`
   - `app.kubernetes.io/component: database`
   - `app.kubernetes.io/managed-by: agent-control-plane`
-  - `ambient-code.io/managed: true`
+  - `hypershell.redhat.io/managed: true`
 
 #### Scenario: PostgreSQL resources already exist (idempotency)
 
@@ -1644,7 +1644,7 @@ The GatewayReconciler SHALL provision database resources before the gateway work
 - AND the main gateway container SHALL NOT start until the init container succeeds
 - AND the GatewayReconciler SHALL NOT block — it relies on the init container and Kubernetes restart behavior
 
-The init container pattern (used by ACP's own API server) prevents the gateway from entering a crash-loop with error logs during initial database provisioning. The pod simply waits in `Init` state until the database is ready.
+The init container pattern (used by HyperShell's own API server) prevents the gateway from entering a crash-loop with error logs during initial database provisioning. The pod simply waits in `Init` state until the database is ready.
 
 ---
 
@@ -1707,7 +1707,7 @@ The control plane container SHALL include manifest templates for the PostgreSQL 
 
 #### Scenario: Database manifest template
 
-- GIVEN the ACP container includes gateway manifests at `/manifests/gateway/`
+- GIVEN the HyperShell container includes gateway manifests at `/manifests/gateway/`
 - THEN a `db-deployment.yaml` manifest SHALL exist containing:
   - PostgreSQL Deployment (`openshell-gateway-db`) with emptyDir mounts for `/var/run/postgresql` and `/tmp`
   - PVC (`openshell-gateway-db-data`) with `STORAGE_SIZE_PLACEHOLDER`
@@ -1715,11 +1715,11 @@ The control plane container SHALL include manifest templates for the PostgreSQL 
   - NetworkPolicy (`openshell-gateway-db`)
 - AND the manifest SHALL use `NAMESPACE_PLACEHOLDER` for namespace substitution
 - AND the manifest SHALL use `DB_IMAGE_PLACEHOLDER` for the PostgreSQL container image
-- AND the manifest SHALL follow the same structure as `components/manifests/base/platform/ambient-api-server-db.yml`
+- AND the manifest SHALL follow the same structure as `components/manifests/base/platform/hypershell-api-server-db.yml`
 
 #### Scenario: Gateway Deployment manifest template
 
-- GIVEN the ACP container includes gateway manifests at `/manifests/gateway/`
+- GIVEN the HyperShell container includes gateway manifests at `/manifests/gateway/`
 - THEN a `deployment.yaml` manifest SHALL exist containing:
   - A Deployment (`openshell-gateway`) with the same pod spec as `statefulset.yaml`
   - No VolumeClaimTemplates
@@ -1801,7 +1801,7 @@ The Kind cluster Keycloak realm SHALL be configured to support OIDC testing with
 
 #### Scenario: Keycloak client for OpenShell
 
-- GIVEN the Kind cluster Keycloak realm `ambient-code`
+- GIVEN the Kind cluster Keycloak realm `hypershell`
 - THEN it SHALL include a public client named `openshell-cli`:
   - `publicClient: true` (CLI-based auth flow)
   - `standardFlowEnabled: true` (authorization code flow)
@@ -1810,7 +1810,7 @@ The Kind cluster Keycloak realm SHALL be configured to support OIDC testing with
 
 #### Scenario: OpenShell realm roles
 
-- GIVEN the Kind cluster Keycloak realm `ambient-code`
+- GIVEN the Kind cluster Keycloak realm `hypershell`
 - THEN it SHALL define two realm roles:
   - `openshell-admin` — admin-level access to OpenShell gateways
   - `openshell-user` — standard user access to OpenShell gateways
@@ -1830,7 +1830,7 @@ The Kind cluster Keycloak realm SHALL be configured to support OIDC testing with
   kind: Gateway
   name: openshell-gateway
   oidc:
-    issuer: http://keycloak-service:8080/realms/ambient-code
+    issuer: http://keycloak-service:8080/realms/hypershell
     audience: openshell-cli
     roles_claim: realm_access.roles
     admin_role: openshell-admin
@@ -1848,14 +1848,14 @@ The Kind cluster Keycloak realm SHALL be configured to support OIDC testing with
 
 #### Scenario: Full connectivity through GRPCRoute
 
-- GIVEN the ACP stack is deployed on OpenShift Local with `make crc-up`
+- GIVEN the HyperShell stack is deployed on OpenShift Local with `make crc-up`
 - AND the networking Gateway `acpgw` is installed in `openshift-ingress`
 - AND a gateway is provisioned for a tenant with `route: {}`
 - WHEN the GatewayReconciler reconciles the gateway
 - THEN a GRPCRoute SHALL be created in the tenant namespace
 - AND a BackendTLSPolicy SHALL be created targeting the gateway Service
-- AND `acpctl get gateway openshell-gateway` SHALL show the route address under `*.acpgw.apps-crc.testing`
-- AND `acpctl gateway setup-cli openshell-gateway --print` SHALL output the `openshell gateway add` command with the route address
+- AND `hsctl get gateway openshell-gateway` SHALL show the route address under `*.acpgw.apps-crc.testing`
+- AND `hsctl gateway setup-cli openshell-gateway --print` SHALL output the `openshell gateway add` command with the route address
 - AND `openshell sandbox list` SHALL succeed through the GRPCRoute (gRPC over HTTP/2)
 
 ---
@@ -1959,7 +1959,7 @@ database:
 
 This specification supersedes the "Gateway provisioning" constraint in `openshell-sandbox-provisioning.spec.md` (Iteration 1), which stated:
 
-> "Gateway provisioning — the OpenShell gateway is assumed to already be deployed in each project namespace; ACP will not create it. A future iteration should have the control plane provision and reconcile gateway lifecycle per project namespace..."
+> "Gateway provisioning — the OpenShell gateway is assumed to already be deployed in each project namespace; HyperShell will not create it. A future iteration should have the control plane provision and reconcile gateway lifecycle per project namespace..."
 
 This specification IS that future iteration, implemented through the API-driven Gateway resource model rather than the previously designed ConfigMap-based approach.
 
@@ -1979,7 +1979,7 @@ This specification IS that future iteration, implemented through the API-driven 
 | Component | Purpose |
 |---|---|
 | `internal/reconciler/gateway_reconciler.go` | Watches Gateway gRPC events, reconciles K8s gateway resources |
-| Shared kustomize library (e.g., `ambient-sdk/go-sdk/kustomize/`) | Extracted from `acpctl apply`; consumed by CLI and ApplicationReconciler |
+| Shared kustomize library (e.g., `sdk/go-sdk/kustomize/`) | Extracted from `hsctl apply`; consumed by CLI and ApplicationReconciler |
 | `kind: Gateway` API resource | PostgreSQL-backed, REST API, gRPC watch events |
 | `examples/overlays/*/gateway.yaml` | Per-tenant Gateway declarations in kustomize overlays |
 | `examples/base/gateway.yaml` | Base Gateway configuration for overlay inheritance |
@@ -2040,7 +2040,7 @@ When `OPENSHELL_USE_GATEWAY=false` (the default), all behavior is identical to t
 | `openshell/gateway_client.go` | No changes — continues to use gateways for sandbox creation |
 | `pod_sync.go` | No changes |
 | `ApplicationReconciler` | Updated to use shared kustomize library; now supports `kind: Gateway` in rendered manifests |
-| `acpctl apply` | Refactored to use shared kustomize library; now supports `kind: Gateway` |
+| `hsctl apply` | Refactored to use shared kustomize library; now supports `kind: Gateway` |
 | `gateway_reconciler.go` | Replace Route CRUD with GRPCRoute + BackendTLSPolicy CRUD; add base domain detection; add DB provisioning |
 | RBAC ClusterRole | Replace `route.openshift.io` rules with `gateway.networking.k8s.io` rules; add PVC verbs; add `delete` on Deployments/StatefulSets/NetworkPolicies |
 | `Makefile` | Add Gateway prerequisite setup to `crc-up` |
@@ -2059,7 +2059,7 @@ When `OPENSHELL_USE_GATEWAY=false` (the default), all behavior is identical to t
 
 ## RBAC Requirements (Consolidated)
 
-The ACP ServiceAccount SHALL have sufficient permissions to:
+The HyperShell ServiceAccount SHALL have sufficient permissions to:
 - Watch Gateway resources via gRPC (existing API server watch mechanism)
 - Create, update, patch, get, and delete StatefulSets, Deployments, Services, ServiceAccounts, Roles, RoleBindings, ConfigMaps, Jobs, NetworkPolicies, and PersistentVolumeClaims in project namespaces
 
@@ -2094,18 +2094,18 @@ The ACP ServiceAccount SHALL have sufficient permissions to:
 ## Template Packaging
 
 Gateway manifests SHALL be:
-- Stored in the ACP codebase at `components/ambient-control-plane/manifests/gateway/`
+- Stored in the HyperShell codebase at `components/control-plane/manifests/gateway/`
 - Generated once during development using `helm template` (NOT Helm at runtime)
-- Packaged into the ACP container image at build time
+- Packaged into the HyperShell container image at build time
 - Read from the container filesystem at `/manifests/gateway/` at runtime
 
 ---
 
 ## Upstream Helm Chart Provenance
 
-ACP does NOT install the OpenShell gateway via Helm at runtime. The gateway manifests at `components/ambient-control-plane/manifests/gateway/` were generated once using `helm template` from the upstream chart, then maintained as static files. Similarly, cert-manager resources and OpenShift adjustments are applied programmatically by the GatewayReconciler, not via Helm.
+HyperShell does NOT install the OpenShell gateway via Helm at runtime. The gateway manifests at `components/control-plane/manifests/gateway/` were generated once using `helm template` from the upstream chart, then maintained as static files. Similarly, cert-manager resources and OpenShift adjustments are applied programmatically by the GatewayReconciler, not via Helm.
 
-This section documents which upstream Helm chart values each ACP behavior is equivalent to, so that future configuration changes can be traced back to the upstream chart source.
+This section documents which upstream Helm chart values each HyperShell behavior is equivalent to, so that future configuration changes can be traced back to the upstream chart source.
 
 ### OpenShell Gateway Helm Chart
 
@@ -2121,9 +2121,9 @@ helm template openshell-gateway oci://ghcr.io/nvidia/openshell/helm-chart \
   --set "pkiInitJob.serverDnsNames={openshell-gateway.NAMESPACE_PLACEHOLDER.svc.cluster.local}"
 ```
 
-The following table maps each Helm chart value to the ACP behavior that implements it. When updating gateway configurations, consult the upstream chart's `values.yaml` and the NVIDIA docs linked above, then update the corresponding ACP implementation.
+The following table maps each Helm chart value to the HyperShell behavior that implements it. When updating gateway configurations, consult the upstream chart's `values.yaml` and the NVIDIA docs linked above, then update the corresponding HyperShell implementation.
 
-| Helm `--set` value | ACP equivalent | Implementation location |
+| Helm `--set` value | HyperShell equivalent | Implementation location |
 |---|---|---|
 | `pkiInitJob.serverDnsNames={...}` | `serverDnsNames` field on the Gateway API resource; substituted into `certgen-job.yaml` args and cert-manager Certificate SANs at reconcile time | `internal/gateway/reconciler.go` (certgen args), `internal/reconciler/gateway_reconciler.go` (cert-manager SANs) |
 | `certManager.enabled=true` | Auto-detected: GatewayReconciler checks for `cert-manager.io` API group at startup via `detectCertManager()`. When present, creates Issuer/Certificate resources inline | `internal/reconciler/gateway_reconciler.go` — `detectCertManager()`, `reconcileCertManagerResources()` |
@@ -2134,14 +2134,14 @@ The following table maps each Helm chart value to the ACP behavior that implemen
 | `server.externalDbSecret` | `database.type: postgres` provisions a Secret with `url` key; the gateway workload switches to Deployment and receives `OPENSHELL_DB_URL` from the Secret | `internal/reconciler/gateway_reconciler.go` — `reconcileDatabaseResources()`, `reconcileGatewayWorkload()` |
 | `workload.kind=deployment` | Automatic when `database.type: postgres` — the reconciler deploys a Deployment instead of StatefulSet | `internal/reconciler/gateway_reconciler.go` |
 | `server.oidc.*` | `oidc` field on Gateway resource; injected into `gateway.toml` ConfigMap by `ApplyConfigOverrides` | `internal/gateway/manifests.go` — `ApplyConfigOverrides()` |
-| `replicaCount` | ACP uses 1 replica (StatefulSet/Deployment default) | N/A |
+| `replicaCount` | HyperShell uses 1 replica (StatefulSet/Deployment default) | N/A |
 
 ### cert-manager Installation
 
 - **Chart:** `oci://quay.io/jetstack/charts/cert-manager` (Helm install) or release YAML (kubectl apply)
 - **Docs:** <https://docs.nvidia.com/openshell/kubernetes/managing-certificates>
 
-ACP test environments install cert-manager via `kubectl apply` (not Helm) for simplicity:
+HyperShell test environments install cert-manager via `kubectl apply` (not Helm) for simplicity:
 
 ```bash
 CERT_MANAGER_VERSION="${CERT_MANAGER_VERSION:-v1.17.1}"
@@ -2161,22 +2161,22 @@ helm upgrade --install cert-manager oci://quay.io/jetstack/charts/cert-manager \
 
 The `kubectl apply` approach is preferred in test environments because it is simpler (no Helm binary required) and the release YAML bundles CRDs. Production environments MAY use the Helm chart for more control over upgrades and values.
 
-The NVIDIA docs recommend cert-manager v1.20+. ACP test environments currently pin `v1.17.1` (the version available when this feature was implemented). The version is configurable via the `CERT_MANAGER_VERSION` environment variable.
+The NVIDIA docs recommend cert-manager v1.20+. HyperShell test environments currently pin `v1.17.1` (the version available when this feature was implemented). The version is configurable via the `CERT_MANAGER_VERSION` environment variable.
 
 ### OpenShift-Specific Adjustments
 
 - **Docs:** <https://docs.nvidia.com/openshell/kubernetes/openshift>
 
-The upstream NVIDIA docs prescribe the following for OpenShift, which ACP implements programmatically:
+The upstream NVIDIA docs prescribe the following for OpenShift, which HyperShell implements programmatically:
 
-| NVIDIA doc instruction | ACP equivalent |
+| NVIDIA doc instruction | HyperShell equivalent |
 |---|---|
 | `oc adm policy add-scc-to-user privileged -z openshell-sandbox -n <ns>` | `reconcileOpenShiftSCC()` creates a RoleBinding granting `system:openshift:scc:privileged` ClusterRole to the `openshell-gateway-sandbox` ServiceAccount |
 | `--set podSecurityContext.fsGroup=null` | `applyOpenShiftOverrides()` clears `fsGroup` via `unstructured.RemoveNestedField()` |
 | `--set securityContext.runAsUser=null` | `applyOpenShiftOverrides()` clears `runAsUser` via `unstructured.RemoveNestedField()` |
 | `--set server.disableTls=true` | **NOT used** — BackendTLSPolicy re-encrypts to the pod |
 
-The NVIDIA docs note that the OpenShift install path is experimental and recommends `server.disableTls=true` for evaluation. ACP diverges from this recommendation by keeping TLS enabled, because BackendTLSPolicy re-encrypts traffic from the networking Gateway to the pod, requiring the gateway to terminate TLS on the backend segment.
+The NVIDIA docs note that the OpenShift install path is experimental and recommends `server.disableTls=true` for evaluation. HyperShell diverges from this recommendation by keeping TLS enabled, because BackendTLSPolicy re-encrypts traffic from the networking Gateway to the pod, requiring the gateway to terminate TLS on the backend segment.
 
 ---
 
@@ -2200,4 +2200,4 @@ The NVIDIA docs note that the OpenShift install path is experimental and recomme
 - [control-plane.spec.md](./control-plane.spec.md) — Control plane architecture
 - [data-model.spec.md](./data-model.spec.md) — Gateway kind definition
 - [security/gateway-rbac-policy.spec.md](../security/gateway-rbac-policy.spec.md) — Gateway RBAC policy
-- [ambient-api-server-db.yml](../../components/manifests/base/platform/ambient-api-server-db.yml) — Existing PostgreSQL deployment pattern
+- [hypershell-api-server-db.yml](../../components/manifests/base/platform/hypershell-api-server-db.yml) — Existing PostgreSQL deployment pattern

@@ -1,0 +1,128 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keycloak
+  namespace: hypershell
+  labels:
+    app: keycloak
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: keycloak
+  template:
+    metadata:
+      labels:
+        app: keycloak
+    spec:
+      securityContext:
+        runAsNonRoot: true
+      containers:
+        - name: keycloak
+          image: quay.io/keycloak/keycloak:26.6.3
+          args:
+            - start
+            - --import-realm
+            - --optimized=false
+          env:
+            - name: KC_HOSTNAME
+              value: "REPLACE_WITH_KEYCLOAK_HOSTNAME"
+            - name: KC_PROXY_HEADERS
+              value: "xforwarded"
+            - name: KC_HOSTNAME_BACKCHANNEL_DYNAMIC
+              value: "true"
+            - name: KC_HTTP_ENABLED
+              value: "true"
+            - name: KEYCLOAK_ADMIN
+              value: admin
+            - name: KEYCLOAK_ADMIN_PASSWORD
+              value: admin
+          ports:
+            - containerPort: 8080
+              name: http
+              protocol: TCP
+          volumeMounts:
+            - name: realm-config
+              mountPath: /opt/keycloak/data/import
+              readOnly: true
+          resources:
+            requests:
+              cpu: 200m
+              memory: 768Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          readinessProbe:
+            httpGet:
+              path: /realms/hypershell
+              port: 8080
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            failureThreshold: 10
+          livenessProbe:
+            httpGet:
+              path: /realms/hypershell
+              port: 8080
+            initialDelaySeconds: 120
+            periodSeconds: 30
+            failureThreshold: 5
+      volumes:
+        - name: realm-config
+          configMap:
+            name: keycloak-realm-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak-service
+  namespace: hypershell
+  labels:
+    app: keycloak
+spec:
+  type: ClusterIP
+  selector:
+    app: keycloak
+  ports:
+    - port: 8080
+      targetPort: 8080
+      protocol: TCP
+      name: http
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: keycloak
+  namespace: hypershell
+  labels:
+    app: keycloak
+spec:
+  to:
+    kind: Service
+    name: keycloak-service
+    weight: 100
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: sso-credentials
+  namespace: hypershell
+  labels:
+    app: hypershell-sso
+type: Opaque
+stringData:
+  SSO_ISSUER_URL: "http://keycloak-service:8080/realms/hypershell"
+  SSO_FRONTEND_ISSUER_URL: "REPLACE_WITH_KEYCLOAK_FRONTEND_ISSUER_URL"
+  SSO_CLIENT_ID: "hypershell-console"
+  SSO_CLIENT_SECRET: "dev-secret-do-not-use-in-prod"
+  SSO_AUDIENCE: "hypershell-console"
+  SSO_REDIRECT_URI: "REPLACE_WITH_SSO_REDIRECT_URI"

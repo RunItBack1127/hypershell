@@ -7,3 +7,12 @@ resources:
   - api-server.yaml
   - controller.yaml
   - route.yaml
+  - keycloak.yaml
+
+configMapGenerator:
+- name: keycloak-realm-config
+  namespace: hypershell
+  files:
+  - hypershell-realm.json=../keycloak/hypershell-realm.json
+  options:
+    disableNameSuffixHash: true

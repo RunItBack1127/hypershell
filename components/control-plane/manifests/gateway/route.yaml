@@ -19,5 +19,4 @@ spec:
   port:
     targetPort: grpc
   tls:
-    termination: reencrypt
-    insecureEdgeTerminationPolicy: None
+    termination: passthrough

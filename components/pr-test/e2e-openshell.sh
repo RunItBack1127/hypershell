@@ -2,32 +2,43 @@
 # e2e-openshell.sh — end-to-end test of the OpenShell gateway provisioned by HyperShell.
 #
 # Proves the full path: HyperShell API → control plane → gateway provisioning
-# → openshell CLI → sandbox pod creation + interaction.
+# → Keycloak OIDC authentication → openshell CLI → sandbox pod creation + interaction.
 #
-# This script creates a gateway via the HyperShell API (if it doesn't exist),
-# waits for the controller to provision it, then validates connectivity and
-# sandbox lifecycle.
+# This script creates a fleet, cluster, release, database, and gateway via the
+# HyperShell API (if they don't exist), waits for the controller to provision
+# the gateway, then validates OIDC authentication, connectivity, and sandbox lifecycle.
 #
 # Usage:
 #   bash e2e-openshell.sh
 #
 # Environment variables:
 #   OC                   oc/kubectl binary (default: oc)
-#   HYPERSHELL_NAMESPACE API server namespace (default: hypershell-api)
+#   HYPERSHELL_NAMESPACE API server + keycloak namespace (default: hypershell)
 #   GATEWAY_NAMESPACE    target namespace for the gateway (default: openshell-e2e)
-#   GATEWAY_NAME         gateway name (default: e2e-gw)
+#   GATEWAY_NAME         gateway name (default: openshell-gateway)
+#   KC_REALM             keycloak realm name (default: hypershell)
+#   KC_CLIENT_ID         OIDC client for CLI auth (default: openshell-cli)
+#   KC_USERNAME          test user (default: admin)
+#   KC_PASSWORD          test password (default: admin)
 #   SANDBOX_TIMEOUT      seconds to wait for sandbox (default: 120)
 #   PROVISION_TIMEOUT    seconds to wait for gateway provisioning (default: 180)
 #   SKIP_CLEANUP         set to 1 to keep resources after test
 #   LAUNCH_TUI           set to 1 to launch interactive TUI at the end (default: 0)
 #   PAUSE                seconds between commands (default: 1)
+#   GATEWAY_IMAGE        gateway container image override
+#   SUPERVISOR_IMAGE     supervisor container image override
+#   DB_IMAGE             database container image override
 set -euo pipefail
 
 CLI="${OC:-oc}"
 OPENSHELL="${OPENSHELL_BIN:-openshell}"
-HS_NAMESPACE="${HYPERSHELL_NAMESPACE:-hypershell-api}"
+HS_NAMESPACE="${HYPERSHELL_NAMESPACE:-hypershell}"
 GW_NAMESPACE="${GATEWAY_NAMESPACE:-openshell-e2e}"
-GW_NAME="${GATEWAY_NAME:-e2e-gw}"
+GW_NAME="${GATEWAY_NAME:-openshell-gateway}"
+KC_REALM="${KC_REALM:-hypershell}"
+KC_CLIENT_ID="${KC_CLIENT_ID:-openshell-cli}"
+KC_USERNAME="${KC_USERNAME:-admin}"
+KC_PASSWORD="${KC_PASSWORD:-admin}"
 SANDBOX_TIMEOUT="${SANDBOX_TIMEOUT:-120}"
 PROVISION_TIMEOUT="${PROVISION_TIMEOUT:-180}"
 SKIP_CLEANUP="${SKIP_CLEANUP:-}"
@@ -40,6 +51,9 @@ TESTS=()
 PF_PID=""
 SANDBOX_NAME=""
 GW_ID=""
+FLEET_ID=""
+OIDC_JWT=""
+AUTH_MODE="none"
 
 bold()   { printf '\033[1m%s\033[0m\n' "$*"; }
 green()  { printf '\033[32m%s\033[0m\n' "$*"; }
@@ -90,33 +104,81 @@ fi
 
 CLUSTER_DOMAIN=$($CLI get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}' 2>/dev/null || true)
 if [[ -z "$CLUSTER_DOMAIN" ]]; then
-  CLUSTER_DOMAIN="apps.rosa.vteam-stage.7fpc.p3.openshiftapps.com"
+  CLUSTER_DOMAIN="cluster.local"
 fi
-GW_EXTERNAL_DNS="openshell-gateway-${GW_NAMESPACE}.${CLUSTER_DOMAIN}"
+
+KC_HOST=$($CLI get route keycloak -n "$HS_NAMESPACE" -o jsonpath='{.spec.host}' 2>/dev/null || true)
 
 echo ""
 bold "HyperShell OpenShell Gateway End-to-End Test"
 sep
 echo ""
-printf '  %s\n' "1. Gateway provisioning via HyperShell API"
-printf '  %s\n' "2. Gateway infrastructure verification"
-printf '  %s\n' "3. Route discovery + openshell CLI registration"
-printf '  %s\n' "4. Gateway connectivity"
-printf '  %s\n' "5. Sandbox lifecycle (create → ready)"
-printf '  %s\n' "6. Sandbox interaction"
+printf '  %s\n' "1. Keycloak OIDC authentication"
+printf '  %s\n' "2. Gateway provisioning via HyperShell API"
+printf '  %s\n' "3. Gateway infrastructure verification"
+printf '  %s\n' "4. Route discovery + openshell CLI registration"
+printf '  %s\n' "5. Gateway connectivity"
+printf '  %s\n' "6. Sandbox lifecycle (create → ready)"
+printf '  %s\n' "7. Sandbox interaction"
 echo ""
 dim  "  HyperShell API:    https://${API_HOST}"
 dim  "  Gateway namespace: ${GW_NAMESPACE}"
 dim  "  Gateway name:      ${GW_NAME}"
-dim  "  External DNS:      ${GW_EXTERNAL_DNS}"
+dim  "  Keycloak:          ${KC_HOST:-not found}"
 dim  "  Sandbox timeout:   ${SANDBOX_TIMEOUT}s"
 echo ""
 sep
 
-# ── 1. gateway provisioning ────────────────────────────────────────────────
+# ── 1. Keycloak OIDC authentication ─────────────────────────────────────
 
 echo ""
-bold "1. Gateway Provisioning via HyperShell API"
+bold "1. Keycloak OIDC Authentication"
+echo ""
+
+if [[ -n "$KC_HOST" ]]; then
+  show_cmd "curl -sk https://${KC_HOST}/realms/${KC_REALM}/protocol/openid-connect/token -d grant_type=password -d username=${KC_USERNAME}"
+  TOKEN_RESPONSE=$(curl -sk -X POST \
+    "https://${KC_HOST}/realms/${KC_REALM}/protocol/openid-connect/token" \
+    -d "grant_type=password" \
+    -d "client_id=${KC_CLIENT_ID}" \
+    -d "username=${KC_USERNAME}" \
+    -d "password=${KC_PASSWORD}" \
+    --connect-timeout 10 --max-time 30 2>&1 || true)
+
+  OIDC_JWT=$(echo "$TOKEN_RESPONSE" | python3 -c "import json,sys; print(json.load(sys.stdin).get('access_token',''))" 2>/dev/null || true)
+
+  if [[ -n "$OIDC_JWT" ]]; then
+    AUTH_MODE="oidc"
+    OIDC_ISSUER=$(echo "$OIDC_JWT" | cut -d. -f2 | python3 -c "
+import base64,json,sys
+p=sys.stdin.read().strip()
+p+='='*(-len(p)%4)
+payload=json.loads(base64.urlsafe_b64decode(p))
+print(payload.get('iss','unknown'))
+" 2>/dev/null || echo "unknown")
+    USER_ROLES=$(echo "$OIDC_JWT" | cut -d. -f2 | python3 -c "
+import base64,json,sys
+p=sys.stdin.read().strip()
+p+='='*(-len(p)%4)
+payload=json.loads(base64.urlsafe_b64decode(p))
+print(', '.join(payload.get('realm_access',{}).get('roles',[])))
+" 2>/dev/null || echo "unknown")
+    pass "OIDC token for ${KC_USERNAME} (roles: ${USER_ROLES})"
+    dim "    issuer: ${OIDC_ISSUER}"
+  else
+    ERROR=$(echo "$TOKEN_RESPONSE" | python3 -c "import json,sys; print(json.load(sys.stdin).get('error_description','unknown'))" 2>/dev/null || echo "unknown")
+    dim "  Token exchange failed: ${ERROR}"
+    dim "  Falling back to no-auth mode"
+  fi
+else
+  dim "  Keycloak not found in ${HS_NAMESPACE}, using no-auth mode"
+fi
+sep
+
+# ── 2. gateway provisioning ────────────────────────────────────────────
+
+echo ""
+bold "2. Gateway Provisioning via HyperShell API"
 echo ""
 
 show_cmd "curl -sk https://${API_HOST}/api/hypershell/v1/gateways?search=name%3D${GW_NAME}"
@@ -143,17 +205,95 @@ for gw in data.get('items', []):
 " 2>/dev/null || true)
   pass "Gateway already exists: ${GW_NAME} (${GW_ID}, phase=${GW_PHASE})"
 else
+  dim "  Creating prerequisite resources..."
+
+  FLEET_RESP=$(curl -sk "https://${API_HOST}/api/hypershell/v1/fleets" 2>/dev/null || true)
+  FLEET_ID=$(echo "$FLEET_RESP" | python3 -c "
+import json,sys
+data = json.load(sys.stdin)
+items = data.get('items', [])
+if items:
+    print(items[0]['id'])
+" 2>/dev/null || true)
+
+  if [[ -z "$FLEET_ID" ]]; then
+    show_cmd "curl -sk -X POST https://${API_HOST}/api/hypershell/v1/fleets -d '{name: e2e-fleet}'"
+    FLEET_RESP=$(curl -sk -X POST "https://${API_HOST}/api/hypershell/v1/fleets" \
+      -H "Content-Type: application/json" \
+      -d '{"name": "e2e-fleet", "description": "E2E test fleet"}' 2>/dev/null || true)
+    FLEET_ID=$(echo "$FLEET_RESP" | python3 -c "import json,sys; print(json.load(sys.stdin).get('id',''))" 2>/dev/null || true)
+    if [[ -n "$FLEET_ID" ]]; then
+      pass "Fleet created: e2e-fleet (${FLEET_ID})"
+    else
+      fail_test "Failed to create fleet"
+      dim "    ${FLEET_RESP:0:300}"
+      exit 1
+    fi
+  else
+    pass "Fleet exists: ${FLEET_ID}"
+  fi
+
+  CLUSTER_RESP=$(curl -sk -X POST "https://${API_HOST}/api/hypershell/v1/managed_clusters" \
+    -H "Content-Type: application/json" \
+    -d "{\"name\": \"e2e-cluster\", \"fleet_id\": \"${FLEET_ID}\", \"provider\": \"openshift\", \"kubeconfig_secret\": \"controller-kubeconfig\"}" 2>/dev/null || true)
+  CLUSTER_ID=$(echo "$CLUSTER_RESP" | python3 -c "import json,sys; print(json.load(sys.stdin).get('id',''))" 2>/dev/null || true)
+
+  GW_IMAGE_VAL="${GATEWAY_IMAGE:-}"
+  RELEASE_IMAGE="${GW_IMAGE_VAL:-ghcr.io/nvidia/openshell/gateway:0.0.101}"
+  RELEASE_RESP=$(curl -sk -X POST "https://${API_HOST}/api/hypershell/v1/gateway_releases" \
+    -H "Content-Type: application/json" \
+    -d "{\"name\": \"e2e-release\", \"fleet_id\": \"${FLEET_ID}\", \"image\": \"${RELEASE_IMAGE}\"}" 2>/dev/null || true)
+  RELEASE_ID=$(echo "$RELEASE_RESP" | python3 -c "import json,sys; print(json.load(sys.stdin).get('id',''))" 2>/dev/null || true)
+
+  DB_RESP=$(curl -sk -X POST "https://${API_HOST}/api/hypershell/v1/managed_databases" \
+    -H "Content-Type: application/json" \
+    -d "{\"name\": \"e2e-db\", \"fleet_id\": \"${FLEET_ID}\", \"provider\": \"embedded\", \"engine\": \"postgresql\"}" 2>/dev/null || true)
+  DB_ID=$(echo "$DB_RESP" | python3 -c "import json,sys; print(json.load(sys.stdin).get('id',''))" 2>/dev/null || true)
+
+  if [[ -z "$CLUSTER_ID" || -z "$RELEASE_ID" || -z "$DB_ID" ]]; then
+    fail_test "Failed to create prerequisite resources"
+    dim "    cluster=${CLUSTER_ID:-FAIL} release=${RELEASE_ID:-FAIL} db=${DB_ID:-FAIL}"
+    exit 1
+  fi
+  pass "Prerequisites: cluster=${CLUSTER_ID} release=${RELEASE_ID} db=${DB_ID}"
+
+  OIDC_FIELD=""
+  if [[ "$AUTH_MODE" == "oidc" && -n "$OIDC_ISSUER" ]]; then
+    OIDC_FIELD=", \"oidc\": \"{\\\"issuer\\\":\\\"${OIDC_ISSUER}\\\",\\\"audience\\\":\\\"${KC_CLIENT_ID}\\\",\\\"roles_claim\\\":\\\"realm_access.roles\\\",\\\"admin_role\\\":\\\"openshell-admin\\\",\\\"user_role\\\":\\\"openshell-user\\\"}\""
+  fi
+
+  DB_CONFIG_FIELD=""
+  if [[ -n "${DB_IMAGE:-}" ]]; then
+    DB_CONFIG_FIELD=", \"database_config\": \"{\\\"image\\\":\\\"${DB_IMAGE}\\\",\\\"storage_size\\\":\\\"5Gi\\\"}\""
+  fi
+
+  GW_IMAGE_FIELD=""
+  if [[ -n "${GATEWAY_IMAGE:-}" ]]; then
+    GW_IMAGE_FIELD=", \"image\": \"${GATEWAY_IMAGE}\""
+  fi
+
+  SUP_IMAGE_FIELD=""
+  if [[ -n "${SUPERVISOR_IMAGE:-}" ]]; then
+    SUP_IMAGE_FIELD=", \"supervisor_image\": \"${SUPERVISOR_IMAGE}\""
+  fi
+
+  DNS_NAMES="[\"openshell-gateway.${GW_NAMESPACE}.svc.cluster.local\"]"
+
   show_cmd "curl -sk -X POST https://${API_HOST}/api/hypershell/v1/gateways -d '{name: ${GW_NAME}, namespace: ${GW_NAMESPACE}, ...}'"
   CREATE_RESPONSE=$(curl -sk -X POST "https://${API_HOST}/api/hypershell/v1/gateways" \
     -H "Content-Type: application/json" \
     -d "{
       \"name\": \"${GW_NAME}\",
-      \"fleet_id\": \"e2e-fleet\",
-      \"cluster_id\": \"e2e-cluster\",
-      \"release_id\": \"e2e-release\",
-      \"database_id\": \"e2e-db\",
+      \"fleet_id\": \"${FLEET_ID}\",
+      \"cluster_id\": \"${CLUSTER_ID}\",
+      \"release_id\": \"${RELEASE_ID}\",
+      \"database_id\": \"${DB_ID}\",
       \"namespace\": \"${GW_NAMESPACE}\",
-      \"external_dns\": \"${GW_EXTERNAL_DNS}\"
+      \"server_dns_names\": ${DNS_NAMES}
+      ${GW_IMAGE_FIELD}
+      ${SUP_IMAGE_FIELD}
+      ${OIDC_FIELD}
+      ${DB_CONFIG_FIELD}
     }" 2>/dev/null || true)
 
   GW_ID=$(echo "$CREATE_RESPONSE" | python3 -c "import json,sys; print(json.load(sys.stdin).get('id',''))" 2>/dev/null || true)
@@ -187,10 +327,10 @@ else
 fi
 sep
 
-# ── 2. gateway infrastructure ──────────────────────────────────────────────
+# ── 3. gateway infrastructure ──────────────────────────────────────────
 
 echo ""
-bold "2. Gateway Infrastructure"
+bold "3. Gateway Infrastructure"
 echo ""
 
 show_cmd "$CLI get deployment openshell-gateway -n $GW_NAMESPACE"
@@ -238,12 +378,20 @@ if [[ "${CERTGEN_STATUS:-0}" -ge 1 ]]; then
 else
   dim "  - Certgen job status: ${CERTGEN_STATUS:-unknown}"
 fi
+
+if $CLI get route openshell-gateway -n "$GW_NAMESPACE" &>/dev/null; then
+  ROUTE_HOST=$($CLI get route openshell-gateway -n "$GW_NAMESPACE" -o jsonpath='{.spec.host}' 2>/dev/null || true)
+  ROUTE_TERM=$($CLI get route openshell-gateway -n "$GW_NAMESPACE" -o jsonpath='{.spec.tls.termination}' 2>/dev/null || true)
+  pass "OpenShift Route: ${ROUTE_HOST} (${ROUTE_TERM})"
+else
+  dim "  - No OpenShift Route found"
+fi
 sep
 
-# ── 3. route discovery + CLI registration ─────────────────────────────────
+# ── 4. route discovery + CLI registration ─────────────────────────────
 
 echo ""
-bold "3. Route Discovery + CLI Registration"
+bold "4. Route Discovery + CLI Registration"
 echo ""
 
 GW_LOCAL_NAME="${GW_NAMESPACE}-openshell"
@@ -292,9 +440,45 @@ show_cmd "${OPENSHELL} gateway remove ${GW_LOCAL_NAME}"
 "${OPENSHELL}" gateway remove "${GW_LOCAL_NAME}" 2>/dev/null || true
 mkdir -p "${GW_CONFIG_DIR}"
 
-show_cmd "# write gateway metadata (no-auth mode)"
-python3 -c "
-import json, os
+if [[ "$AUTH_MODE" == "oidc" ]]; then
+  show_cmd "# write gateway metadata (OIDC mode)"
+  python3 -c "
+import json
+meta = {
+    'name': '${GW_LOCAL_NAME}',
+    'gateway_endpoint': '${GW_ENDPOINT}',
+    'is_remote': True,
+    'gateway_port': 0,
+    'auth_mode': 'oidc',
+    'oidc_issuer': '${OIDC_ISSUER}',
+    'oidc_client_id': '${KC_CLIENT_ID}',
+    'oidc_audience': '${KC_CLIENT_ID}'
+}
+with open('${GW_CONFIG_DIR}/metadata.json', 'w') as f:
+    json.dump(meta, f, indent=2)
+"
+  python3 -c "
+import json
+token_data = {
+    'access_token': '${OIDC_JWT}',
+    'issuer': '${OIDC_ISSUER}',
+    'client_id': '${KC_CLIENT_ID}'
+}
+with open('${GW_CONFIG_DIR}/oidc_token.json', 'w') as f:
+    json.dump(token_data, f, indent=2)
+import os
+os.chmod('${GW_CONFIG_DIR}/oidc_token.json', 0o600)
+os.chmod('${GW_CONFIG_DIR}/metadata.json', 0o600)
+"
+  if [[ -f "${GW_CONFIG_DIR}/metadata.json" ]]; then
+    pass "openshell CLI registered (OIDC mode, user=${KC_USERNAME})"
+  else
+    fail_test "Failed to write gateway config"
+  fi
+else
+  show_cmd "# write gateway metadata (no-auth mode)"
+  python3 -c "
+import json
 meta = {
     'name': '${GW_LOCAL_NAME}',
     'gateway_endpoint': '${GW_ENDPOINT}',
@@ -305,18 +489,18 @@ meta = {
 with open('${GW_CONFIG_DIR}/metadata.json', 'w') as f:
     json.dump(meta, f, indent=2)
 "
-
-if [[ -f "${GW_CONFIG_DIR}/metadata.json" ]]; then
-  pass "openshell CLI registered (no-auth mode)"
-else
-  fail_test "Failed to write gateway config"
+  if [[ -f "${GW_CONFIG_DIR}/metadata.json" ]]; then
+    pass "openshell CLI registered (no-auth mode)"
+  else
+    fail_test "Failed to write gateway config"
+  fi
 fi
 sep
 
-# ── 4. gateway connectivity ───────────────────────────────────────────────
+# ── 5. gateway connectivity ───────────────────────────────────────────
 
 echo ""
-bold "4. Gateway Connectivity"
+bold "5. Gateway Connectivity"
 echo ""
 
 show_cmd "OPENSHELL_GATEWAY_INSECURE=true ${OPENSHELL} -g ${GW_LOCAL_NAME} status"
@@ -348,10 +532,10 @@ else
 fi
 sep
 
-# ── 5. sandbox lifecycle ──────────────────────────────────────────────────
+# ── 6. sandbox lifecycle ──────────────────────────────────────────────
 
 echo ""
-bold "5. Sandbox Lifecycle"
+bold "6. Sandbox Lifecycle"
 echo ""
 
 RUN_ID=$(date +%s | tail -c5)
@@ -401,10 +585,10 @@ else
 fi
 sep
 
-# ── 6. sandbox interaction ────────────────────────────────────────────────
+# ── 7. sandbox interaction ────────────────────────────────────────────
 
 echo ""
-bold "6. Sandbox Interaction"
+bold "7. Sandbox Interaction"
 echo ""
 
 GW_FLAG="-g ${GW_LOCAL_NAME}"
@@ -448,7 +632,7 @@ else
   fi
 fi
 
-# ── cleanup ───────────────────────────────────────────────────────────────
+# ── cleanup ───────────────────────────────────────────────────────────
 
 if [[ "$SKIP_CLEANUP" != "1" && "$LAUNCH_TUI" != "1" && -n "$SANDBOX_NAME" ]]; then
   echo ""
@@ -459,11 +643,11 @@ if [[ "$SKIP_CLEANUP" != "1" && "$LAUNCH_TUI" != "1" && -n "$SANDBOX_NAME" ]]; t
 fi
 sep
 
-# ── results ───────────────────────────────────────────────────────────────
+# ── results ───────────────────────────────────────────────────────────
 
 echo ""
 bold "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-bold "Results: $PASS passed, $FAIL failed"
+bold "Results: $PASS passed, $FAIL failed (auth=${AUTH_MODE})"
 echo ""
 for t in "${TESTS[@]}"; do
   if [[ "$t" == PASS:* ]]; then
