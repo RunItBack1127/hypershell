@@ -54,7 +54,7 @@ Kubernetes (Deployment, Service, RBAC, certgen Job, NetworkPolicy)
 
 ### Gateway Namespace Ownership
 
-The API server assigns the Gateway namespace as `openshell-<gateway-id-hex>` before persistence and event publication, where the suffix is the lowercase hexadecimal encoding of the Gateway KSUID bytes. Clients do not select or update it. The GatewayReconciler creates that namespace if it is absent and then uses the persisted value for all resources. Gateway renames do not change namespace.
+The API server assigns the Gateway namespace as `openshell-<id-hex-8>` before persistence and event publication, where the suffix is the lowercase hexadecimal encoding of 8 bytes from the Gateway KSUID's random payload. This produces a 26-character namespace (e.g., `openshell-a1b2c3d4e5f67890`) that fits comfortably within Kubernetes DNS label limits even when used as a component in longer derived names. Clients do not select or update it. The GatewayReconciler creates that namespace if it is absent and then uses the persisted value for all resources. Gateway renames do not change namespace.
 
 ### Relationship to PlatformReconciler
 
@@ -89,12 +89,12 @@ The following resources must exist on the cluster before the GatewayReconciler c
 
 For each gateway with `route` configuration, the control plane creates Gateway API resources across two namespaces:
 
-1. **Gateway** — A dedicated Gateway resource per openshell gateway, created in `openshift-ingress` (so the ingress operator auto-creates a DNSRecord pointing the hostname to the Gateway's ELB):
+1. **Gateway** -- A dedicated Gateway resource per openshell gateway, created in `openshift-ingress` (so the ingress operator auto-creates a DNSRecord pointing the hostname to the Gateway's ELB):
    ```yaml
    apiVersion: gateway.networking.k8s.io/v1
    kind: Gateway
    metadata:
-     name: openshell-gw-<tenant-namespace>
+     name: gw-<tenant-namespace>
      namespace: openshift-ingress
      labels:
        app.kubernetes.io/name: openshell
@@ -105,7 +105,7 @@ For each gateway with `route` configuration, the control plane creates Gateway A
      gatewayClassName: <GATEWAY_API_GATEWAY_CLASS>   # default: openshift-default
      listeners:
      - name: grpc
-       hostname: "openshell-gateway-<tenant-namespace>.<base-domain>"
+       hostname: "gw-<tenant-namespace>.<base-domain>"
        port: 443
        protocol: HTTPS
        tls:
@@ -122,7 +122,7 @@ For each gateway with `route` configuration, the control plane creates Gateway A
    ```
    The `<base-domain>` is read from `ingresses.config.openshift.io/cluster` `.spec.domain` (e.g., `apps-crc.testing`). Each tenant gets its own Gateway with a hostname scoped to the tenant namespace. The `grpc-gateway-certs` Secret must exist in `openshift-ingress` (see "Gateway Ingress TLS Certificate" below).
 
-2. **GRPCRoute** — In the tenant namespace, with a cross-namespace parentRef to the Gateway in `openshift-ingress`:
+2. **GRPCRoute** -- In the tenant namespace, with a cross-namespace parentRef to the Gateway in `openshift-ingress`:
    ```yaml
    apiVersion: gateway.networking.k8s.io/v1
    kind: GRPCRoute
@@ -131,10 +131,10 @@ For each gateway with `route` configuration, the control plane creates Gateway A
      namespace: <tenant-namespace>
    spec:
      parentRefs:
-     - name: openshell-gw-<tenant-namespace>
+     - name: gw-<tenant-namespace>
        namespace: openshift-ingress
      hostnames:
-     - openshell-gateway-<tenant-namespace>.<base-domain>
+     - gw-<tenant-namespace>.<base-domain>
      rules:
      - backendRefs:
        - name: openshell-gateway
@@ -178,11 +178,11 @@ For each gateway with `route` configuration, the control plane creates Gateway A
 The per-tenant Gateway listener terminates external TLS using the cluster's wildcard certificate for `*.<base-domain>`. This certificate is stored as a Secret named `grpc-gateway-certs` in the `openshift-ingress` namespace, where all Gateway resources are created.
 
 - **Location:** Secret `grpc-gateway-certs` in the `openshift-ingress` namespace
-- The Secret is a cluster prerequisite — it must be created before any gateway can be exposed externally (see README)
+- The Secret is a cluster prerequisite -- it must be created before any gateway can be exposed externally (see README)
 - All per-tenant Gateways in `openshift-ingress` reference the same Secret
-- The wildcard private key is NOT copied into tenant namespaces — it stays in `openshift-ingress`
+- The wildcard private key is NOT copied into tenant namespaces -- it stays in `openshift-ingress`
 
-This avoids per-tenant certificate issuance for the ingress listener - the `openshell-gateway-<tenant-namespace>.<base-domain>` hostname is covered by the wildcard certificate.
+This avoids per-tenant certificate issuance for the ingress listener - the `gw-<tenant-namespace>.<base-domain>` hostname is covered by the wildcard certificate.
 
 > **Security improvement:** Unlike the previous approach that copied the wildcard private key into each tenant namespace, the key now stays in `openshift-ingress` (an admin-only namespace). Tenant namespace principals cannot extract the wildcard key.
 
@@ -190,19 +190,19 @@ This avoids per-tenant certificate issuance for the ingress listener - the `open
 
 The Gateway API approach uses HTTPS on the listener and BackendTLSPolicy for re-encryption:
 
-1. **Client to Gateway.** The per-tenant Gateway listener uses HTTPS (port 443) with a TLS certificate for `openshell-gateway-<tenant-namespace>.<base-domain>`. Clients connect via `https://` and HTTP/2 is negotiated through ALPN during the TLS handshake.
+1. **Client to Gateway.** The per-tenant Gateway listener uses HTTPS (port 443) with a TLS certificate for `gw-<tenant-namespace>.<base-domain>`. Clients connect via `https://` and HTTP/2 is negotiated through ALPN during the TLS handshake.
 2. **Gateway to Pod.** BackendTLSPolicy instructs the Gateway to establish a TLS connection to the backend pod, verifying the pod's certificate against the CA in the `openshell-backend-ca` ConfigMap. The pod's TLS remains enabled (no `disableTls` needed). BackendTLSPolicy requires OpenShift 4.22+.
 3. **Fallback.** If BackendTLSPolicy is not supported by the cluster's gateway controller, the control plane SHALL skip BackendTLSPolicy creation and log a warning. The gateway pod's TLS configuration would need to be disabled manually in this case.
 
 ### Route Hostname Convention
 
-Gateway and GRPCRoute hostnames follow the pattern: `openshell-gateway-<tenant-namespace>.<base-domain>`
+Gateway and GRPCRoute hostnames follow the pattern: `gw-<tenant-namespace>.<base-domain>`
 
 Examples:
-- `openshell-gateway-tenant-a.apps-crc.testing`
-- `openshell-gateway-tenant-b.apps.cluster.example.com`
+- `gw-openshell-a1b2c3d4e5f67890.apps-crc.testing`
+- `gw-openshell-b9c8d7e6f5a43210.apps.cluster.example.com`
 
-The `openshell-gateway-` prefix produces a hostname that is a subdomain of `<base-domain>`. This means the cluster's existing wildcard certificate for `*.<base-domain>` covers all per-tenant Gateway listeners without requiring a new CA certificate or per-tenant certificate issuance for the ingress TLS termination.
+The `gw-` prefix produces a hostname that is a subdomain of `<base-domain>`. With the shortened 26-character namespace, the first DNS label (e.g., `gw-openshell-a1b2c3d4e5f67890` at 29 chars) is well within the 63-character DNS label limit, eliminating the need for truncation and hash suffixes. The cluster's existing wildcard certificate for `*.<base-domain>` covers all per-tenant Gateway listeners without requiring per-tenant certificate issuance.
 
 ---
 
