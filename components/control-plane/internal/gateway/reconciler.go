@@ -178,7 +178,6 @@ func DeleteGatewayResources(
 }
 
 func deleteGatewayAPIResources(ctx context.Context, dynamicClient dynamic.Interface, clientset *kubernetes.Clientset, namespace string, opts ReconcileOpts) error {
-	// Delete per-tenant Gateway resource.
 	gwGVR := schema.GroupVersionResource{
 		Group:    "gateway.networking.k8s.io",
 		Version:  "v1",
@@ -210,18 +209,19 @@ func deleteGatewayAPIResources(ctx context.Context, dynamicClient dynamic.Interf
 		log.Printf("WARN failed to delete backend CA ConfigMap: %v", err)
 	}
 
-	// Delete copied wildcard cert Secret.
 	if err := clientset.CoreV1().Secrets(namespace).Delete(ctx, "grpc-gateway-certs", metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
 		log.Printf("WARN failed to delete wildcard cert secret: %v", err)
 	}
 
-	netpolGVR := schema.GroupVersionResource{
-		Group:    "networking.k8s.io",
-		Version:  "v1",
-		Resource: "networkpolicies",
-	}
-	if err := dynamicClient.Resource(netpolGVR).Namespace(namespace).Delete(ctx, "openshell-gateway-allow-router", metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
-		log.Printf("WARN failed to delete router NetworkPolicy: %v", err)
+	if !opts.IsOpenShift {
+		netpolGVR := schema.GroupVersionResource{
+			Group:    "networking.k8s.io",
+			Version:  "v1",
+			Resource: "networkpolicies",
+		}
+		if err := dynamicClient.Resource(netpolGVR).Namespace(namespace).Delete(ctx, "openshell-gateway-allow-router", metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
+			log.Printf("WARN failed to delete router NetworkPolicy: %v", err)
+		}
 	}
 
 	// Clear routeAddress on the API-server Gateway resource.
@@ -271,6 +271,25 @@ func deployGateway(
 	opts ReconcileOpts,
 	hasTrustedCA bool,
 ) error {
+	if opts.IsOpenShift {
+		routeHost, err := reconcileRouteAndDiscoverHost(ctx, dynamicClient, nsConfig, manifests, images)
+		if err != nil {
+			log.Printf("WARN failed to pre-create route in %s: %v", nsConfig.Name, err)
+		} else if routeHost != "" {
+			hasHost := false
+			for _, dns := range nsConfig.Gateway.ServerDnsNames {
+				if dns == routeHost {
+					hasHost = true
+					break
+				}
+			}
+			if !hasHost {
+				nsConfig.Gateway.ServerDnsNames = append(nsConfig.Gateway.ServerDnsNames, routeHost)
+				log.Printf("INFO added route hostname %s to server DNS names", routeHost)
+			}
+		}
+	}
+
 	order := []string{
 		"rbac.yaml",
 		"serviceaccount.yaml",
@@ -338,6 +357,48 @@ func deployGateway(
 	}
 
 	return nil
+}
+
+func reconcileRouteAndDiscoverHost(
+	ctx context.Context,
+	dynamicClient dynamic.Interface,
+	nsConfig NamespaceConfig,
+	manifests map[string][]*unstructured.Unstructured,
+	images ImageDefaults,
+) (string, error) {
+	resources, ok := manifests["route.yaml"]
+	if !ok || len(resources) == 0 {
+		return "", nil
+	}
+
+	for _, manifest := range resources {
+		raw := manifest.DeepCopy()
+		obj, err := ApplyManifestToNamespace(raw, nsConfig.Name, nsConfig.Gateway, images)
+		if err != nil {
+			return "", fmt.Errorf("apply substitutions for route.yaml: %w", err)
+		}
+		if err := reconcileResource(ctx, dynamicClient, obj); err != nil {
+			return "", fmt.Errorf("reconcile route: %w", err)
+		}
+	}
+
+	routeGVR := schema.GroupVersionResource{
+		Group:    "route.openshift.io",
+		Version:  "v1",
+		Resource: "routes",
+	}
+	route, err := dynamicClient.Resource(routeGVR).Namespace(nsConfig.Name).Get(ctx, "openshell-gateway", metav1.GetOptions{})
+	if err != nil {
+		return "", fmt.Errorf("get route openshell-gateway: %w", err)
+	}
+
+	host, _, _ := unstructured.NestedString(route.Object, "spec", "host")
+	if host == "" {
+		statusHost, _, _ := unstructured.NestedString(route.Object, "status", "ingress", "host")
+		host = statusHost
+	}
+
+	return host, nil
 }
 
 func waitForDeploymentReady(ctx context.Context, clientset *kubernetes.Clientset, namespace, name string, timeout time.Duration) error {

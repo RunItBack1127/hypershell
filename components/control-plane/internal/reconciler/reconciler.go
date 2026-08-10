@@ -11,9 +11,12 @@ import (
 	"github.com/openshift-online/hypershell/components/control-plane/internal/gateway"
 	"github.com/openshift-online/hypershell/components/control-plane/internal/watcher"
 	"google.golang.org/grpc"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/clientcmd"
 )
 
 type FleetReconciler struct {
@@ -124,9 +127,19 @@ func (r *GatewayReleaseReconciler) Handle(ctx context.Context, event watcher.Eve
 	return nil
 }
 
+type clusterClients struct {
+	dynamicClient dynamic.Interface
+	clientset     *kubernetes.Clientset
+	isOpenShift   bool
+	hasCertManager bool
+	hasGatewayAPI  bool
+}
+
 type GatewayReconciler struct {
 	mu                    sync.Mutex
 	active                map[string]struct{}
+	namespaces            map[string]string
+	clusterCache          map[string]*clusterClients
 	dynamicClient         dynamic.Interface
 	clientset             *kubernetes.Clientset
 	grpcConn              *grpc.ClientConn
@@ -157,6 +170,8 @@ func NewGatewayReconciler(
 
 	return &GatewayReconciler{
 		active:                make(map[string]struct{}),
+		namespaces:            make(map[string]string),
+		clusterCache:          make(map[string]*clusterClients),
 		dynamicClient:         dynamicClient,
 		clientset:             clientset,
 		grpcConn:              grpcConn,
@@ -167,6 +182,99 @@ func NewGatewayReconciler(
 		manifestsDir:          manifestsDir,
 		controlPlaneNamespace: controlPlaneNamespace,
 	}, nil
+}
+
+func (r *GatewayReconciler) resolveClusterClients(ctx context.Context, clusterID string) (*clusterClients, error) {
+	if clusterID == "" {
+		return &clusterClients{
+			dynamicClient:  r.dynamicClient,
+			clientset:      r.clientset,
+			isOpenShift:    r.isOpenShift,
+			hasCertManager: r.hasCertManager,
+			hasGatewayAPI:  r.hasGatewayAPI,
+		}, nil
+	}
+
+	r.mu.Lock()
+	cached, ok := r.clusterCache[clusterID]
+	r.mu.Unlock()
+	if ok {
+		return cached, nil
+	}
+
+	clusterClient := pb.NewManagedClusterServiceClient(r.grpcConn)
+	resp, err := clusterClient.GetManagedCluster(ctx, &pb.GetManagedClusterRequest{Id: clusterID})
+	if err != nil {
+		return nil, fmt.Errorf("get managed cluster %s: %w", clusterID, err)
+	}
+
+	secretName := resp.GetManagedCluster().GetKubeconfigSecret()
+	if secretName == "" {
+		log.Printf("INFO cluster %s has no kubeconfig_secret, using local clients", clusterID)
+		return &clusterClients{
+			dynamicClient:  r.dynamicClient,
+			clientset:      r.clientset,
+			isOpenShift:    r.isOpenShift,
+			hasCertManager: r.hasCertManager,
+			hasGatewayAPI:  r.hasGatewayAPI,
+		}, nil
+	}
+
+	secret, err := r.clientset.CoreV1().Secrets(r.controlPlaneNamespace).Get(ctx, secretName, metav1.GetOptions{})
+	if err != nil {
+		if k8serrors.IsNotFound(err) {
+			log.Printf("INFO kubeconfig secret %s/%s not found for cluster %s, falling back to local clients", r.controlPlaneNamespace, secretName, clusterID)
+			cc := &clusterClients{
+				dynamicClient:  r.dynamicClient,
+				clientset:      r.clientset,
+				isOpenShift:    r.isOpenShift,
+				hasCertManager: r.hasCertManager,
+				hasGatewayAPI:  r.hasGatewayAPI,
+			}
+			r.mu.Lock()
+			r.clusterCache[clusterID] = cc
+			r.mu.Unlock()
+			return cc, nil
+		}
+		return nil, fmt.Errorf("get kubeconfig secret %s/%s: %w", r.controlPlaneNamespace, secretName, err)
+	}
+
+	kubeconfigBytes, ok := secret.Data["kubeconfig"]
+	if !ok {
+		return nil, fmt.Errorf("kubeconfig secret %s missing 'kubeconfig' key", secretName)
+	}
+
+	restConfig, err := clientcmd.RESTConfigFromKubeConfig(kubeconfigBytes)
+	if err != nil {
+		return nil, fmt.Errorf("parse kubeconfig from secret %s: %w", secretName, err)
+	}
+
+	remoteClientset, err := kubernetes.NewForConfig(restConfig)
+	if err != nil {
+		return nil, fmt.Errorf("create remote clientset for cluster %s: %w", clusterID, err)
+	}
+
+	remoteDynamic, err := dynamic.NewForConfig(restConfig)
+	if err != nil {
+		return nil, fmt.Errorf("create remote dynamic client for cluster %s: %w", clusterID, err)
+	}
+
+	cc := &clusterClients{
+		dynamicClient:  remoteDynamic,
+		clientset:      remoteClientset,
+		isOpenShift:    gateway.DetectOpenShift(remoteClientset),
+		hasCertManager: gateway.DetectCertManager(remoteClientset),
+		hasGatewayAPI:  gateway.DetectGatewayAPI(remoteClientset),
+	}
+
+	log.Printf("INFO remote cluster %s: openshift=%v certmanager=%v gatewayapi=%v",
+		clusterID, cc.isOpenShift, cc.hasCertManager, cc.hasGatewayAPI)
+
+	r.mu.Lock()
+	r.clusterCache[clusterID] = cc
+	r.mu.Unlock()
+
+	return cc, nil
 }
 
 func (r *GatewayReconciler) Handle(ctx context.Context, event watcher.Event[*pb.Gateway]) error {
@@ -209,12 +317,17 @@ func (r *GatewayReconciler) Handle(ctx context.Context, event watcher.Event[*pb.
 		return nil
 	}
 
-	log.Printf("INFO reconciling Gateway %s name=%s namespace=%s (event=%d)",
-		event.ResourceID, gw.Name, gw.Namespace, event.Type)
+	log.Printf("INFO reconciling Gateway %s name=%s namespace=%s cluster=%s (event=%d)",
+		event.ResourceID, gw.Name, gw.Namespace, gw.ClusterId, event.Type)
 
 	if gw.Phase != nil && (*gw.Phase == "Running" || *gw.Phase == "Provisioning") {
 		log.Printf("DEBUG gateway %s phase=%s, skipping reconciliation", event.ResourceID, *gw.Phase)
 		return nil
+	}
+
+	cc, err := r.resolveClusterClients(ctx, gw.ClusterId)
+	if err != nil {
+		return fmt.Errorf("resolve cluster clients for gateway %s (cluster=%s): %w", gw.Name, gw.ClusterId, err)
 	}
 
 	namespace := gw.Namespace
@@ -280,9 +393,9 @@ func (r *GatewayReconciler) Handle(ctx context.Context, event watcher.Event[*pb.
 	}
 
 	opts := gateway.ReconcileOpts{
-		IsOpenShift:           r.isOpenShift,
-		HasCertManager:        r.hasCertManager,
-		HasGatewayAPI:         r.hasGatewayAPI,
+		IsOpenShift:           cc.isOpenShift,
+		HasCertManager:        cc.hasCertManager,
+		HasGatewayAPI:         cc.hasGatewayAPI,
 		ControlPlaneNamespace: r.controlPlaneNamespace,
 		GatewayID:             event.ResourceID,
 		UpdateRouteAddress:    r.makeRouteAddressUpdater(event.ResourceID),
@@ -290,7 +403,7 @@ func (r *GatewayReconciler) Handle(ctx context.Context, event watcher.Event[*pb.
 
 	r.updateGatewayPhase(ctx, event.ResourceID, "Provisioning")
 
-	if err := gateway.ReconcileGateway(ctx, r.dynamicClient, r.clientset, nsConfig, r.manifests, opts); err != nil {
+	if err := gateway.ReconcileGateway(ctx, cc.dynamicClient, cc.clientset, nsConfig, r.manifests, opts); err != nil {
 		r.updateGatewayPhase(ctx, event.ResourceID, "Failed")
 		return fmt.Errorf("reconcile gateway %s: %w", gw.Name, err)
 	}

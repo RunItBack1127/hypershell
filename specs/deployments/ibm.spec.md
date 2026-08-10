@@ -269,11 +269,201 @@ bash components/pr-test/e2e-openshell.sh
 4. **Sandbox image pull**: Both gateway SA and sandbox SA need `system:image-puller` role on the image source namespace.
 5. **Keycloak issuer mismatch**: Gateway OIDC issuer must exactly match the `iss` claim in tokens. Set `KC_HOSTNAME` to the internal URL the gateway uses.
 
+## Multi-Cluster: IBM Hub → ROSA Managed Cluster
+
+### Architecture
+
+IBM Cloud ROKS is the **hub** — the primary HyperShell control plane. ROSA (vteam-stage) is a **remote managed cluster** that receives gateway deployments from the IBM controller.
+
+```
+┌───────────────────────────────────────────────────────┐
+│  IBM Cloud ROKS (Hub)                                 │
+│  hypershell namespace                                 │
+│  ┌────────────┐  ┌────────────┐  ┌──────────────┐    │
+│  │ API Server │  │ Controller │  │ PostgreSQL   │    │
+│  └────────────┘  └──────┬─────┘  └──────────────┘    │
+│                         │                             │
+│  ┌──────────────────────┼──────────────────────────┐  │
+│  │ ManagedCluster       │                          │  │
+│  │ rosa-vteam-stage     │ kubeconfig_secret:       │  │
+│  │                      │ rosa-kubeconfig          │  │
+│  └──────────────────────┼──────────────────────────┘  │
+│                         │                             │
+│                    outbound TCP 443                    │
+│                    via Public Gateway                  │
+└─────────────────────────┼─────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────┐
+│  ROSA vteam-stage (Managed Cluster)                     │
+│  openshell-rosa namespace                               │
+│  ┌──────────────┐  ┌──────────────────┐                 │
+│  │ Gateway Pod  │  │ Gateway DB Pod   │                 │
+│  │ (Running)    │  │ (Running)        │                 │
+│  └──────────────┘  └──────────────────┘                 │
+│  Route: openshell-gateway-openshell-rosa.apps.rosa...   │
+└─────────────────────────────────────────────────────────┘
+```
+
+### VPC Egress Configuration
+
+IBM Cloud VPCs block all outbound internet traffic by default. Two changes were needed:
+
+1. **Public Gateway**: NAT gateway for outbound traffic from the VPC subnet.
+
+```bash
+ibmcloud is public-gateway-create hypershell-pgw hypershell-vpc us-east-1
+ibmcloud is subnet-update hypershell-subnet-1 --pgw <pgw-id>
+```
+
+| Field | Value |
+|-------|-------|
+| Public Gateway ID | `r014-79423ed2-9f96-4a82-969c-b9773cdf4319` |
+| Floating IP | `150.239.113.217` |
+
+2. **Security Group Rule**: The worker node security group (`kube-d9rnlrqw0qpuae8r1tkg`) only allows outbound to IBM-internal CIDRs. An explicit rule is needed for outbound TCP 443 to the internet.
+
+```bash
+ibmcloud is security-group-rule-add kube-d9rnlrqw0qpuae8r1tkg outbound tcp \
+  --remote 0.0.0.0/0 --port-min 443 --port-max 443
+```
+
+**Critical lesson**: The public gateway alone is insufficient. The VPC security group must also have an outbound rule allowing the traffic. Without both, `curl` from pods times out with exit code 28.
+
+### ROSA Service Account
+
+The controller connects to ROSA using the `acp-provisioner` service account in the `ambient-code` namespace. This SA has a long-lived token from secret `acp-provisioner-token`.
+
+ClusterRole `acp-provisioner` permissions: namespaces, secrets, serviceaccounts, services, configmaps, pods, PVCs, deployments, statefulsets, jobs, roles, rolebindings, routes, networkpolicies, sandbox CRDs, tokenreviews.
+
+The kubeconfig was regenerated with a fresh CA cert (ROSA rotates certs periodically):
+
+```bash
+oc get secret acp-provisioner-token -n ambient-code -o jsonpath='{.data.ca\.crt}' | base64 -d > /tmp/ca.crt
+# Build kubeconfig with fresh CA and SA token
+```
+
+Stored as a K8s Secret in the hub namespace:
+
+```bash
+oc create secret generic rosa-kubeconfig \
+  --from-file=kubeconfig=/tmp/vteam-stage-fresh.kubeconfig \
+  -n hypershell
+```
+
+### Image Mirroring to ROSA
+
+Although ROSA can pull from external registries, the gateway images were mirrored from IBM to ROSA's internal registry for consistency:
+
+```bash
+IBM_REG=$(oc get route default-route -n openshift-image-registry -o jsonpath='{.spec.host}')
+ROSA_REG="default-route-openshift-image-registry.apps.rosa.vteam-stage.7fpc.p3.openshiftapps.com"
+
+IMAGES=(
+  "hypershell/openshell-gateway:0.0.101"
+  "hypershell/openshell-supervisor:0.0.101"
+  "hypershell/openshell-sandbox-base:latest"
+  "hypershell/postgres:16"
+)
+
+for img in "${IMAGES[@]}"; do
+  podman pull "$IBM_REG/$img" --tls-verify=false
+  podman tag "$IBM_REG/$img" "$ROSA_REG/$img"
+  podman push "$ROSA_REG/$img" --tls-verify=false
+done
+```
+
+Image pull access for dynamically-created namespaces:
+
+```bash
+oc policy add-role-to-group system:image-puller system:authenticated -n hypershell
+```
+
+### Registering ROSA as ManagedCluster
+
+```bash
+curl -sk -X POST "https://$API_HOST/api/hypershell/v1/managed_clusters" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "rosa-vteam-stage",
+    "fleet_id": "3HfB9OjuEMgAOFItvhREnod8Kna",
+    "provider": "rosa",
+    "region": "us-east-1",
+    "kubeconfig_secret": "rosa-kubeconfig",
+    "api_server_url": "https://api.vteam-stage.7fpc.p3.openshiftapps.com:443"
+  }'
+```
+
+| Field | Value |
+|-------|-------|
+| ManagedCluster ID | `3HhnggQKv9ejXefylkzLjppgbFH` |
+| Name | `rosa-vteam-stage` |
+| Kubeconfig Secret | `rosa-kubeconfig` |
+
+### Controller Multi-Cluster Support
+
+The controller was extended with `resolveClusterClients()` in `reconciler.go`:
+
+1. Gateway `cluster_id` is checked during `Handle()`
+2. If non-empty, the ManagedCluster is looked up via gRPC to get `kubeconfig_secret`
+3. The kubeconfig is loaded from a K8s Secret in the controller's namespace
+4. Remote `dynamic.Interface` + `kubernetes.Clientset` are created and cached
+5. Remote cluster capabilities (OpenShift, cert-manager, Gateway API) are auto-detected
+6. All reconciliation operations use the remote clients
+
+For gateways with no `cluster_id` or with `kubeconfig_secret=""`, the local in-cluster clients are used (backward compatible).
+
+### Creating a Remote Gateway
+
+```bash
+curl -sk -X POST "https://$API_HOST/api/hypershell/v1/gateways" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "rosa-gateway",
+    "fleet_id": "3HfB9OjuEMgAOFItvhREnod8Kna",
+    "cluster_id": "3HhnggQKv9ejXefylkzLjppgbFH",
+    "release_id": "<release_id>",
+    "database_id": "<db_id>",
+    "namespace": "openshell-rosa",
+    "image": "image-registry.openshift-image-registry.svc:5000/hypershell/openshell-gateway:0.0.101",
+    "supervisor_image": "image-registry.openshift-image-registry.svc:5000/hypershell/openshell-supervisor:0.0.101",
+    "database_config": "{\"image\":\"image-registry.openshift-image-registry.svc:5000/hypershell/postgres:16\",\"storage_size\":\"5Gi\"}"
+  }'
+```
+
+### Multi-Cluster E2E Test
+
+```bash
+REMOTE_KUBECONFIG=/tmp/vteam-stage-fresh.kubeconfig \
+HYPERSHELL_NAMESPACE=hypershell \
+GATEWAY_NAMESPACE=openshell-multicluster \
+GATEWAY_IMAGE=image-registry.openshift-image-registry.svc:5000/hypershell/openshell-gateway:0.0.101 \
+SUPERVISOR_IMAGE=image-registry.openshift-image-registry.svc:5000/hypershell/openshell-supervisor:0.0.101 \
+DB_IMAGE=image-registry.openshift-image-registry.svc:5000/hypershell/postgres:16 \
+SKIP_CLEANUP=1 \
+PAUSE=0 \
+bash components/pr-test/e2e-openshell-multicluster.sh
+```
+
+### Multi-Cluster Lessons Learned
+
+1. **VPC egress requires both public gateway AND security group rule**: Creating a public gateway and attaching it to the subnet is necessary but not sufficient. The worker node security group must also allow outbound TCP 443 to `0.0.0.0/0`.
+2. **Kubeconfig CA cert rotation**: ROSA rotates certificates periodically. The stored kubeconfig's CA cert becomes stale, causing `x509: certificate signed by unknown authority`. Regenerate from the SA secret's `ca.crt` field.
+3. **Gateway API RBAC on ROSA**: The `acp-provisioner` SA doesn't have RBAC for `grpcroutes` or `backendtlspolicies`. The controller logs warnings but continues — this is non-blocking since OpenShift Routes are used instead.
+4. **Image registry namespace**: When creating the `hypershell` namespace on ROSA for image streams, use `oc new-project` (not `oc create namespace`) to get the ImageStream controller integration.
+5. **Cross-namespace image pull**: For dynamically-created gateway namespaces to pull from the `hypershell` ImageStream namespace, grant `system:image-puller` to `system:authenticated` on the image source namespace.
+6. **IBM Cloud CLI session expiry**: `ibmcloud login --sso` sessions expire frequently. Re-login with `ibmcloud login -a https://cloud.ibm.com -u passcode` and re-target: `ibmcloud target -c dca8e7b41db847da9e58bf43e92a7ccf -g Default`.
+7. **TLS SAN injection for OpenShift Routes**: Passthrough TLS routes forward traffic directly to the pod, so the server TLS certificate must include the Route hostname as a SAN. The certgen job runs once and is never updated, so the Route must be created before the certgen job. Fixed by adding `reconcileRouteAndDiscoverHost()` which creates the Route early, reads back the auto-assigned hostname, and appends it to `ServerDnsNames` before the certgen job runs.
+8. **NetworkPolicy deletion race with Gateway API cleanup**: When a cluster has Gateway API CRDs installed but the gateway doesn't use Gateway API routing, `deleteGatewayAPIResources()` was deleting `openshell-gateway-allow-router` — the same NetworkPolicy created by the OpenShift Route path. Fixed by skipping the NetworkPolicy deletion in `deleteGatewayAPIResources()` when `IsOpenShift` is true.
+9. **mTLS blocks CLI for non-OIDC gateways**: The gateway config sets `client_ca_path` by default, which with no OIDC yields `require_client_auth=true`. The openshell CLI (v0.0.55-0.0.98) cannot present client certificates for remote gateways. Fixed by having `ApplyConfigOverrides()` remove `client_ca_path` and set `allow_unauthenticated_users=true` when no OIDC is configured. Production gateways should always use OIDC (optional mTLS mode).
+10. **Namespace termination race**: Deleting a gateway while its namespace is in `Terminating` state causes the controller to create resources into a dying namespace. All resources get wiped. Create a new gateway in a fresh namespace instead of reusing.
+
 ## Teardown
 
 ```bash
 ibmcloud oc cluster rm --cluster hypershell-cluster -f --force-delete-storage
 ibmcloud resource service-instance-delete hypershell-cos -f
 ibmcloud is subnet-delete hypershell-subnet-1 -f
+ibmcloud is public-gateway-delete hypershell-pgw -f
 ibmcloud is vpc-delete hypershell-vpc -f
 ```

@@ -200,7 +200,7 @@ func injectPGDATA(obj *unstructured.Unstructured, mountPath string) {
 func ApplyConfigOverrides(obj *unstructured.Unstructured, config GatewayConfig) error {
 	kind := obj.GetKind()
 
-	if kind == "ConfigMap" && obj.GetName() == "openshell-gateway-config" && len(config.ServerDnsNames) > 0 {
+	if kind == "ConfigMap" && obj.GetName() == "openshell-gateway-config" {
 		data, found, err := unstructured.NestedMap(obj.Object, "data")
 		if err != nil || !found {
 			return fmt.Errorf("configmap data not found")
@@ -211,22 +211,27 @@ func ApplyConfigOverrides(obj *unstructured.Unstructured, config GatewayConfig) 
 			return fmt.Errorf("gateway.toml not found in configmap")
 		}
 
-		serverSans := "["
-		for i, dns := range config.ServerDnsNames {
-			if i > 0 {
-				serverSans += ", "
+		if len(config.ServerDnsNames) > 0 {
+			serverSans := "["
+			for i, dns := range config.ServerDnsNames {
+				if i > 0 {
+					serverSans += ", "
+				}
+				serverSans += fmt.Sprintf("\"%s\"", dns)
 			}
-			serverSans += fmt.Sprintf("\"%s\"", dns)
+			serverSans += "]"
+
+			lines := strings.Split(toml, "\n")
+			for i, line := range lines {
+				if strings.Contains(line, "server_sans =") {
+					lines[i] = fmt.Sprintf("    server_sans = %s", serverSans)
+					break
+				}
+			}
+			toml = strings.Join(lines, "\n")
 		}
-		serverSans += "]"
 
 		lines := strings.Split(toml, "\n")
-		for i, line := range lines {
-			if strings.Contains(line, "server_sans =") {
-				lines[i] = fmt.Sprintf("    server_sans = %s", serverSans)
-				break
-			}
-		}
 
 		if config.OIDC.Issuer != "" {
 			for i, line := range lines {
@@ -262,6 +267,20 @@ func ApplyConfigOverrides(obj *unstructured.Unstructured, config GatewayConfig) 
 			}
 
 			lines = append(lines, oidcSection)
+		} else {
+			for i, line := range lines {
+				if strings.Contains(line, "client_ca_path") {
+					lines[i] = "    # client_ca_path removed: no OIDC configured, CLI cannot do mTLS"
+					log.Printf("INFO removed client_ca_path from gateway.toml (no OIDC, mTLS would block CLI)")
+					break
+				}
+			}
+			for i, line := range lines {
+				if strings.Contains(line, "allow_unauthenticated_users") {
+					lines[i] = "    allow_unauthenticated_users = true"
+					break
+				}
+			}
 		}
 
 		data["gateway.toml"] = strings.Join(lines, "\n")
