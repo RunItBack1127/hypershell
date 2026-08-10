@@ -75,7 +75,7 @@ func LoadGatewayManifests(manifestsDir string) (map[string][]*unstructured.Unstr
 	return manifests, nil
 }
 
-func ApplyManifestToNamespace(manifest *unstructured.Unstructured, namespace string, config GatewayConfig, defaultImage string) (*unstructured.Unstructured, error) {
+func ApplyManifestToNamespace(manifest *unstructured.Unstructured, namespace string, config GatewayConfig, images ImageDefaults) (*unstructured.Unstructured, error) {
 	obj := manifest.DeepCopy()
 
 	jsonBytes, err := obj.MarshalJSON()
@@ -86,10 +86,35 @@ func ApplyManifestToNamespace(manifest *unstructured.Unstructured, namespace str
 	manifestJSON := string(jsonBytes)
 	manifestJSON = strings.ReplaceAll(manifestJSON, "NAMESPACE_PLACEHOLDER", namespace)
 
-	image := defaultImage
+	supervisorImage := images.DefaultSupervisorImage()
+	if config.SupervisorImage != "" {
+		supervisorImage = config.SupervisorImage
+	}
+	manifestJSON = strings.ReplaceAll(manifestJSON, "SUPERVISOR_IMAGE_PLACEHOLDER", supervisorImage)
+
+	image := images.DefaultGatewayImage()
 	if config.Image != "" {
 		image = config.Image
 	}
+	dbImage := config.Database.Image
+	if dbImage == "" {
+		dbImage = "postgres:16"
+	}
+	dbStorage := config.Database.StorageSize
+	if dbStorage == "" {
+		dbStorage = "5Gi"
+	}
+	userKey, passKey, dbKey := postgresEnvKeys(dbImage)
+	dataPath := postgresDataPath(dbImage)
+
+	// Replace DB_IMAGE_PLACEHOLDER before IMAGE_PLACEHOLDER because
+	// the shorter string is a substring of the longer one.
+	manifestJSON = strings.ReplaceAll(manifestJSON, "DB_IMAGE_PLACEHOLDER", dbImage)
+	manifestJSON = strings.ReplaceAll(manifestJSON, "DB_STORAGE_PLACEHOLDER", dbStorage)
+	manifestJSON = strings.ReplaceAll(manifestJSON, "DB_USER_KEY_PLACEHOLDER", userKey)
+	manifestJSON = strings.ReplaceAll(manifestJSON, "DB_PASS_KEY_PLACEHOLDER", passKey)
+	manifestJSON = strings.ReplaceAll(manifestJSON, "DB_NAME_KEY_PLACEHOLDER", dbKey)
+	manifestJSON = strings.ReplaceAll(manifestJSON, "DB_DATA_PATH_PLACEHOLDER", dataPath)
 	manifestJSON = strings.ReplaceAll(manifestJSON, "IMAGE_PLACEHOLDER", image)
 
 	result := &unstructured.Unstructured{}
@@ -103,7 +128,7 @@ func ApplyManifestToNamespace(manifest *unstructured.Unstructured, namespace str
 func ApplyDatabaseOverrides(obj *unstructured.Unstructured, dbConfig DatabaseConfig) error {
 	jsonBytes, err := obj.MarshalJSON()
 	if err != nil {
-		return nil
+		return fmt.Errorf("marshal for database overrides: %w", err)
 	}
 	manifestJSON := string(jsonBytes)
 
@@ -113,19 +138,54 @@ func ApplyDatabaseOverrides(obj *unstructured.Unstructured, dbConfig DatabaseCon
 	}
 	dbImage := dbConfig.Image
 	if dbImage == "" {
-		dbImage = "registry.redhat.io/rhel9/postgresql-16:latest"
+		dbImage = "postgres:16"
 	}
 
-	if strings.Contains(manifestJSON, "DB_STORAGE_PLACEHOLDER") || strings.Contains(manifestJSON, "DB_IMAGE_PLACEHOLDER") {
-		manifestJSON = strings.ReplaceAll(manifestJSON, "DB_STORAGE_PLACEHOLDER", storageSize)
-		manifestJSON = strings.ReplaceAll(manifestJSON, "DB_IMAGE_PLACEHOLDER", dbImage)
+	userKey, passKey, dbKey := postgresEnvKeys(dbImage)
+	dataPath := postgresDataPath(dbImage)
 
-		if err := obj.UnmarshalJSON([]byte(manifestJSON)); err != nil {
-			return fmt.Errorf("unmarshal after database overrides: %w", err)
-		}
+	manifestJSON = strings.ReplaceAll(manifestJSON, "DB_STORAGE_PLACEHOLDER", storageSize)
+	manifestJSON = strings.ReplaceAll(manifestJSON, "DB_IMAGE_PLACEHOLDER", dbImage)
+	manifestJSON = strings.ReplaceAll(manifestJSON, "DB_USER_KEY_PLACEHOLDER", userKey)
+	manifestJSON = strings.ReplaceAll(manifestJSON, "DB_PASS_KEY_PLACEHOLDER", passKey)
+	manifestJSON = strings.ReplaceAll(manifestJSON, "DB_NAME_KEY_PLACEHOLDER", dbKey)
+	manifestJSON = strings.ReplaceAll(manifestJSON, "DB_DATA_PATH_PLACEHOLDER", dataPath)
+
+	if err := obj.UnmarshalJSON([]byte(manifestJSON)); err != nil {
+		return fmt.Errorf("unmarshal after database overrides: %w", err)
+	}
+
+	if obj.GetKind() == "Deployment" && !isRHELPostgres(dbImage) {
+		injectPGDATA(obj, dataPath)
 	}
 
 	return nil
+}
+
+func injectPGDATA(obj *unstructured.Unstructured, mountPath string) {
+	containers, found, _ := unstructured.NestedSlice(obj.Object, "spec", "template", "spec", "containers")
+	if !found {
+		return
+	}
+
+	pgdataValue := mountPath + "/pgdata"
+
+	for i, c := range containers {
+		container, ok := c.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		envList, _, _ := unstructured.NestedSlice(container, "env")
+		envList = append(envList, map[string]interface{}{
+			"name":  "PGDATA",
+			"value": pgdataValue,
+		})
+		container["env"] = envList
+		containers[i] = container
+	}
+
+	_ = unstructured.SetNestedSlice(obj.Object, containers, "spec", "template", "spec", "containers")
 }
 
 func ApplyConfigOverrides(obj *unstructured.Unstructured, config GatewayConfig) error {

@@ -4,31 +4,141 @@ GO_TOOLCHAIN=go1.26.4
 GOLANGCI_LINT_VERSION=v2.12.2
 GOLANGCI_LINT_PACKAGE=github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
 DEPENDENCY_MIN_AGE_DAYS=14
-PNPM_VERSION=11.15.1
+PNPM_MIN_VERSION=11.15.1
 PNPM?=pnpm
-WEB_CONSOLE_IMAGE?=localhost/hypershell-web-console:dev
+
+# --- Image registry and tags ---
+IMAGE_REGISTRY?=quay.io/redhat-services-prod/hcm-eng-prod-tenant/hypershell-main
+IMAGE_TAG?=latest
+
+# Build version (embedded in api-server binary via ldflags)
+git_sha:=$(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+git_dirty:=$(shell git diff --quiet 2>/dev/null || echo -modified)
+build_version:=$(git_sha)$(git_dirty)
+build_time:=$(shell date -u '+%Y-%m-%d %H:%M:%S UTC')
+
+# Computed baseline references (registry images used in Kind manifests)
+api_server_ref=$(IMAGE_REGISTRY)/hypershell-api-server-main:$(IMAGE_TAG)
+control_plane_ref=$(IMAGE_REGISTRY)/hypershell-control-plane-main:$(IMAGE_TAG)
+web_console_ref=$(IMAGE_REGISTRY)/hypershell-web-console-main:$(IMAGE_TAG)
+
+# Local dev image names
+api_server_local=hypershell:dev
+control_plane_local=hypershell-controller:dev
+web_console_local=hypershell-web-console:dev
+
+# --- Kind cluster configuration ---
+KIND_CLUSTER_NAME?=hypershell-dev
+KIND_NAMESPACE?=hypershell-system
+KIND_HOT_RELOAD?=true
+KIND_HOST_MOUNT_PATH?=$(shell git rev-parse --show-toplevel 2>/dev/null || pwd)
+KIND_KEYCLOAK_URL?=
+LOCAL_IMAGES?=
+KIND_PULL_SECRET?=
+
+# Prerequisite versions
+GATEWAY_API_VERSION?=v1.5.1
+CLOUD_PROVIDER_KIND_VERSION?=v0.11.1
+CERT_MANAGER_VERSION?=v1.21.1
+
+# Kind config
+KIND_CONFIG=deploy/kind/kind-config.yaml
+KIND_DNS_PORT?=5553
+
+# Service hostnames (routed through the networking Gateway)
+API_HOSTNAME=api.hypershell.localhost
+CONSOLE_HOSTNAME=console.hypershell.localhost
+HEALTH_HOSTNAME=health.hypershell.localhost
+KEYCLOAK_HOSTNAME=keycloak.hypershell.localhost
+
+# ============================================================================
+# Help
+# ============================================================================
+
+.PHONY: help
+help:
+	@echo ""
+	@echo "  HyperShell Makefile"
+	@echo "  ==================="
+	@echo ""
+	@echo "  Local Development (Kind)"
+	@echo "    All targets operate on KIND_NAMESPACE (default: hypershell-system)."
+	@echo ""
+	@echo "    kind-up                  Create cluster + deploy all components"
+	@echo "    kind-down                Remove namespace and its resources"
+	@echo "    kind-teardown            Destroy Kind cluster, stop cloud-provider-kind"
+	@echo "    kind-status              Show cluster info, pods, services, swap state"
+	@echo "    kind-api-server-up       Build + swap API server from working tree"
+	@echo "    kind-api-server-down     Revert API server to baseline image"
+	@echo "    kind-control-plane-up    Build + swap control plane from working tree"
+	@echo "    kind-control-plane-down  Revert control plane to baseline image"
+	@echo "    kind-web-console-up      Hot reload (default) or build + swap web console (KIND_HOT_RELOAD=false)"
+	@echo "    kind-web-console-down    Revert web console to baseline image"
+	@echo ""
+	@echo "  Build"
+	@echo "    build-all                Build all container images"
+	@echo "    build-api-server         Build API server container image"
+	@echo "    build-controller         Build control plane container image"
+	@echo "    build-web-console        Build web console container image"
+	@echo ""
+	@echo "  Test & Lint"
+	@echo "    test-all                 Run all test suites"
+	@echo "    lint                     Run all linters (Go + JS/TS)"
+	@echo "    lint-api-server          Lint API server (gofmt, go vet, golangci-lint)"
+	@echo "    lint-control-plane       Lint control plane (gofmt, go vet, golangci-lint)"
+	@echo "    lint-sdk-typescript      Lint TypeScript SDK"
+	@echo "    lint-gateway-ui          Lint gateway UI package"
+	@echo "    lint-web-console         Lint web console (app + BFF)"
+	@echo ""
+	@echo "  Policy"
+	@echo "    check                    Run all policy checks"
+	@echo "    check-forbidden-terms    Check for forbidden terms in source"
+	@echo "    check-dependency-pins    Verify dependency version pins"
+	@echo "    check-dependency-age     Verify dependency minimum age"
+	@echo "    check-ci-components      Verify CI component registration"
+	@echo ""
+	@echo "  Hooks"
+	@echo "    hooks-install            Install Git hooks (lefthook)"
+	@echo "    hooks-run                Run hook checks manually"
+	@echo ""
+
+# ============================================================================
+# Build targets
+# ============================================================================
 
 .PHONY: build-all
 build-all:
-	cd components/api-server && $(MAKE) image
-	cd components/api-server && $(MAKE) image-controller
-	$(CONTAINER_ENGINE) build -t $(WEB_CONSOLE_IMAGE) -f components/web-console/Dockerfile .
+	@scripts/kind/build-images.sh
 
 .PHONY: verify-pnpm
 verify-pnpm:
-	test "$$($(PNPM) --version)" = "$(PNPM_VERSION)"
+	@current=$$($(PNPM) --version); \
+	printf '%s\n%s\n' "$(PNPM_MIN_VERSION)" "$$current" | sort -V -C || \
+	  { echo "pnpm $$current < minimum $(PNPM_MIN_VERSION)"; exit 1; }
 
 .PHONY: install-js
 install-js: verify-pnpm
 	$(PNPM) install --frozen-lockfile
 
-.PHONY: web-console-dev
-web-console-dev: install-js
-	$(PNPM) dev
+.PHONY: build-api-server
+build-api-server:
+	$(CONTAINER_ENGINE) build -t $(api_server_local) \
+		--build-arg GIT_VERSION=$(build_version) --build-arg BUILD_TIME="$(build_time)" \
+		components/api-server
 
-.PHONY: web-console-image
-web-console-image:
-	$(CONTAINER_ENGINE) build -t $(WEB_CONSOLE_IMAGE) -f components/web-console/Dockerfile .
+.PHONY: build-controller
+build-controller:
+	$(CONTAINER_ENGINE) build -t $(control_plane_local) \
+		-f components/control-plane/Dockerfile .
+
+.PHONY: build-web-console
+build-web-console:
+	$(CONTAINER_ENGINE) build -t $(web_console_local) \
+		-f components/web-console/Dockerfile .
+
+# ============================================================================
+# Policy checks
+# ============================================================================
 
 .PHONY: check-forbidden-terms
 check-forbidden-terms:
@@ -57,6 +167,10 @@ check-dependency-age: test-dependency-age-policy
 .PHONY: check
 check: check-forbidden-terms check-dependency-pins check-ci-components check-dependency-age
 
+# ============================================================================
+# Git hooks
+# ============================================================================
+
 .PHONY: hooks-install
 hooks-install:
 	$(LEFTHOOK_CMD) install
@@ -64,6 +178,10 @@ hooks-install:
 .PHONY: hooks-run
 hooks-run:
 	$(LEFTHOOK_CMD) run check
+
+# ============================================================================
+# Lint targets
+# ============================================================================
 
 .PHONY: lint-api-server
 lint-api-server:
@@ -105,6 +223,10 @@ lint-web-console: install-js
 .PHONY: lint
 lint: check install-js lint-api-server lint-control-plane lint-sdk-typescript lint-gateway-ui lint-web-console
 
+# ============================================================================
+# Test targets
+# ============================================================================
+
 .PHONY: test-all
 test-all: install-js
 	cd components/api-server && $(MAKE) test
@@ -113,18 +235,58 @@ test-all: install-js
 	$(PNPM) --filter @openshift-online/hypershell-web-console test:run
 	$(PNPM) --filter @openshift-online/hypershell-web-console-bff test:run
 
+# ============================================================================
+# Kind cluster lifecycle — shell logic lives in scripts/kind/
+# ============================================================================
+
+export CONTAINER_ENGINE KIND_CLUSTER_NAME KIND_NAMESPACE
+export KIND_HOT_RELOAD KIND_HOST_MOUNT_PATH KIND_KEYCLOAK_URL LOCAL_IMAGES
+export KIND_PULL_SECRET
+export GATEWAY_API_VERSION CLOUD_PROVIDER_KIND_VERSION CERT_MANAGER_VERSION
+export IMAGE_REGISTRY IMAGE_TAG KIND_CONFIG
+export api_server_ref control_plane_ref web_console_ref
+export api_server_local control_plane_local web_console_local
+export build_version build_time
+export API_HOSTNAME CONSOLE_HOSTNAME HEALTH_HOSTNAME KEYCLOAK_HOSTNAME
+export KIND_DNS_PORT
+
 .PHONY: kind-up
-kind-up: build-all
-	cd components/api-server && $(MAKE) kind-up
+kind-up:
+	@scripts/kind/up.sh
 
 .PHONY: kind-down
 kind-down:
-	cd components/api-server && $(MAKE) kind-down
+	@scripts/kind/down.sh
 
-.PHONY: kind-rebuild
-kind-rebuild:
-	cd components/api-server && $(MAKE) kind-rebuild
+.PHONY: kind-teardown
+kind-teardown:
+	@scripts/kind/teardown.sh
 
 .PHONY: kind-status
 kind-status:
-	cd components/api-server && $(MAKE) kind-status
+	@scripts/kind/status.sh
+
+.PHONY: kind-api-server-up
+kind-api-server-up:
+	@scripts/kind/swap-component.sh up api-server
+
+.PHONY: kind-api-server-down
+kind-api-server-down:
+	@scripts/kind/swap-component.sh down api-server
+
+.PHONY: kind-control-plane-up
+kind-control-plane-up:
+	@scripts/kind/swap-component.sh up control-plane
+
+.PHONY: kind-control-plane-down
+kind-control-plane-down:
+	@scripts/kind/swap-component.sh down control-plane
+
+.PHONY: kind-web-console-up
+kind-web-console-up:
+	@scripts/kind/swap-component.sh up web-console
+
+.PHONY: kind-web-console-down
+kind-web-console-down:
+	@scripts/kind/swap-component.sh down web-console
+

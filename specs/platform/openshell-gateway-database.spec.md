@@ -21,10 +21,30 @@ The Gateway API resource SHALL include a `database` object. PostgreSQL is the so
 | Field | Type | Required | Default | Description |
 |---|---|---|---|---|
 | `database.storageSize` | string | No | `5Gi` | PVC size for PostgreSQL data |
-| `database.image` | string | No | `registry.redhat.io/rhel9/postgresql-16:latest` | PostgreSQL container image (Red Hat hardened) |
+| `database.image` | string | No | `postgres:16` | PostgreSQL container image. RHEL image (`registry.redhat.io/rhel9/postgresql-16:latest`) recommended on ROSA/OpenShift. Env vars and data path adapt automatically based on image detection. |
 | `database.externalSecretRef` | string | No | — | Name of Secret with `url` key. Skips DB provisioning. Reserved (Phase 2) |
 
-> **Image policy:** HyperShell uses Red Hat hardened PostgreSQL images from `registry.redhat.io`. Docker Hub images are rate-limited on ROSA/OpenShift. The RHEL image is pre-authenticated via the cluster's pull secret and matches the API server's database deployment pattern. PostgreSQL 16 is the current stable choice; PostgreSQL 18 will be evaluated as the ecosystem matures.
+> **Image policy:** The default database image is `postgres:16`. On ROSA/OpenShift, operators SHOULD override this to `registry.redhat.io/rhel9/postgresql-16:latest` (pre-authenticated via the cluster pull secret, avoids Docker Hub rate limits). The reconciler dynamically adapts env vars and data paths based on image detection (see below).
+
+---
+
+### Requirement: PostgreSQL Image Detection
+
+The GatewayReconciler SHALL dynamically detect the PostgreSQL image variant and adapt environment variable names, secret keys, and data mount paths accordingly. Detection uses a simple heuristic: if the resolved image string contains `"rhel"`, RHEL conventions apply; otherwise upstream conventions apply.
+
+| Convention | RHEL image (`registry.redhat.io/rhel9/postgresql-16`) | Upstream image (`postgres:16`) |
+|---|---|---|
+| User env var / secret key | `POSTGRESQL_USER` | `POSTGRES_USER` |
+| Password env var / secret key | `POSTGRESQL_PASSWORD` | `POSTGRES_PASSWORD` |
+| Database env var / secret key | `POSTGRESQL_DATABASE` | `POSTGRES_DB` |
+| Data mount path | `/var/lib/pgsql/data` | `/var/lib/postgresql/data` |
+| `PGDATA` env var | Not set (RHEL image handles subdirectory internally) | `<mount_path>/pgdata` (required: upstream `postgres` refuses to init in a directory containing `lost+found`) |
+
+This detection SHALL be applied in both the credential Secret provisioning and the Deployment manifest construction, ensuring the env vars in the Deployment match the keys in the Secret and the data volume mount matches the image's expected data directory.
+
+For upstream images, the reconciler SHALL inject a `PGDATA` environment variable set to `<mount_path>/pgdata` to avoid the `initdb: error: directory exists but is not empty` failure caused by the `lost+found` directory present on ext4-formatted PVC mount points.
+
+> **Reference implementation:** The upstream OpenShell control plane uses this same `strings.Contains(pgImage, "rhel")` heuristic for image variant detection.
 
 ---
 
@@ -33,9 +53,9 @@ The Gateway API resource SHALL include a `database` object. PostgreSQL is the so
 The GatewayReconciler SHALL provision:
 
 1. **Secret** (`openshell-gateway-db-credentials`)
-   - `POSTGRESQL_USER` = `openshell`
-   - `POSTGRESQL_PASSWORD` = 32-byte cryptographically random hex string (`crypto/rand`)
-   - `POSTGRESQL_DATABASE` = `openshell`
+   - User key (detected) = `openshell`
+   - Password key (detected) = 32-byte cryptographically random hex string (`crypto/rand`)
+   - Database key (detected) = `openshell`
    - `url` = `postgresql://openshell:<password>@openshell-gateway-db:5432/openshell?sslmode=disable`
    - Created ONCE (create-or-skip for Secret to avoid password churn)
 
@@ -44,9 +64,9 @@ The GatewayReconciler SHALL provision:
    - AccessMode: `ReadWriteOnce`
 
 3. **Deployment** (`openshell-gateway-db`)
-   - Image: `database.image` (default RHEL postgresql-16)
-   - Env from Secret: `POSTGRESQL_USER`, `POSTGRESQL_PASSWORD`, `POSTGRESQL_DATABASE`
-   - Volume mount: PVC at `/var/lib/pgsql/data`
+   - Image: `database.image` (default `postgres:16`)
+   - Env from Secret: user, password, and database keys (detected per image variant)
+   - Volume mount: PVC at detected data path
    - SecurityContext: `runAsNonRoot: true`, `allowPrivilegeEscalation: false`, capabilities `drop: [ALL]`, `seccompProfile.type: RuntimeDefault`, `readOnlyRootFilesystem: false` (postgres needs writable data dir)
    - Readiness probe: TCP on port 5432
 
@@ -94,13 +114,12 @@ The gateway workload SHALL always be deployed as a Deployment (not a StatefulSet
 - WHEN the GatewayReconciler reconciles
 - THEN it SHALL create a Deployment (not StatefulSet) for the gateway
 - AND the gateway container's `--db-url` argument SHALL reference the credentials Secret via env var
-- AND an init container SHALL run `pg_isready` to wait for the database before starting the gateway
 
 ---
 
 ### Requirement: Database Resource Provisioning Order
 
-Database resources (Secret, PVC, Deployment, Service, NetworkPolicy) SHALL be applied BEFORE the gateway workload. The gateway's init container (`pg_isready`) depends on the database Service being available.
+Database resources (Secret, PVC, Deployment, Service, NetworkPolicy) SHALL be applied BEFORE the gateway workload. After reconciling `database.yaml`, the control plane SHALL wait for the `openshell-gateway-db` Deployment to reach ready state (2-minute timeout) before proceeding to deploy the gateway.
 
 ---
 
@@ -169,8 +188,8 @@ serverDnsNames:
 | Symptom | Root Cause | Fix |
 |---|---|---|
 | `hsctl apply` missing database resources | `kustomize.Resource` missing `Database` field | Ensure SDK `Resource` struct includes `Database map[string]any` |
-| Docker Hub `toomanyrequests` for postgres | Default image was `postgres:16` | Use `registry.redhat.io/rhel9/postgresql-16:latest` |
-| Gateway pod CrashLoopBackOff after provisioning | init container `pg_isready` fails | Check DB Deployment is Running, Service exists |
+| Docker Hub `toomanyrequests` for postgres | Default image is `postgres:16` | Override `database.image` to `registry.redhat.io/rhel9/postgresql-16:latest` |
+| Gateway pod not created after provisioning | `waitForDeploymentReady` timed out for DB | Check DB Deployment events and pod logs |
 | Database password changes on re-reconciliation | Secret uses update instead of create-or-skip | Fix to create-or-skip semantics |
 
 ---

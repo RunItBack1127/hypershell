@@ -71,8 +71,9 @@ spec:
           image: IMAGE_PLACEHOLDER
           imagePullPolicy: IfNotPresent
           securityContext:
-            allowPrivilegeEscalation: false
+            runAsNonRoot: true
             readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
             seccompProfile:
               type: RuntimeDefault
             capabilities:

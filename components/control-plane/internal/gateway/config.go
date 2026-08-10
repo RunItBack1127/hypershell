@@ -1,17 +1,37 @@
 package gateway
 
+// ImageDefaults resolves the default container images for gateway deployments.
+// TODO: Replace StaticImageDefaults with a database-backed implementation that
+// reads from a versions table + gatewayVersion join table, so defaults can be
+// updated dynamically without downtime and vary by region/group/fleet.
+type ImageDefaults interface {
+	DefaultGatewayImage() string
+	DefaultSupervisorImage() string
+}
+
+type StaticImageDefaults struct{}
+
+func (StaticImageDefaults) DefaultGatewayImage() string {
+	return "ghcr.io/nvidia/openshell/gateway:0.0.101"
+}
+
+func (StaticImageDefaults) DefaultSupervisorImage() string {
+	return "ghcr.io/nvidia/openshell/supervisor:0.0.101"
+}
+
 type NamespaceConfig struct {
 	Name    string        `yaml:"name"`
 	Gateway GatewayConfig `yaml:"gateway"`
 }
 
 type GatewayConfig struct {
-	Image          string         `yaml:"image"`
-	ServerDnsNames []string       `yaml:"serverDnsNames"`
-	ExternalDns    string         `yaml:"externalDns"`
-	Database       DatabaseConfig `yaml:"database"`
-	OIDC           OIDCConfig     `yaml:"oidc"`
-	Route          RouteConfig    `yaml:"route"`
+	Image           string         `yaml:"image"`
+	SupervisorImage string         `yaml:"supervisorImage"`
+	ServerDnsNames  []string       `yaml:"serverDnsNames"`
+	ExternalDns     string         `yaml:"externalDns"`
+	Database        DatabaseConfig `yaml:"database"`
+	OIDC            OIDCConfig     `yaml:"oidc"`
+	Route           RouteConfig    `yaml:"route"`
 }
 
 type RouteConfig struct {
@@ -40,4 +60,5 @@ type ReconcileOpts struct {
 	HasCertManager        bool
 	HasGatewayAPI         bool
 	ControlPlaneNamespace string
+	Images                ImageDefaults
 }
