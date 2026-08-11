@@ -2,6 +2,7 @@ export interface GatewayConnection {
   clusterId?: string;
   clusterName: string;
   consoleUrl?: string;
+  createdAt?: string;
   endpoint?: string;
   id: string;
   name: string;
@@ -24,26 +25,30 @@ function shellArgument(value: string) {
 export function buildGatewayAddCommand(
   gateway: GatewayConnection,
 ): string | undefined {
-  if (
-    !gateway.endpoint ||
-    !gateway.oidcAudience ||
-    !gateway.oidcClientId ||
-    !gateway.oidcIssuer
-  ) {
+  if (!gateway.endpoint) {
     return undefined;
   }
-  return [
+
+  const parts = [
     "openshell gateway add",
     `--name ${shellArgument(gateway.name)}`,
-    `--oidc-issuer ${shellArgument(gateway.oidcIssuer)}`,
-    `--oidc-client-id ${shellArgument(gateway.oidcClientId)}`,
-    `--oidc-audience ${shellArgument(gateway.oidcAudience)}`,
-    shellArgument(gateway.endpoint),
-  ].join(" ");
+  ];
+
+  if (gateway.oidcIssuer && gateway.oidcClientId && gateway.oidcAudience) {
+    parts.push(
+      `--oidc-issuer ${shellArgument(gateway.oidcIssuer)}`,
+      `--oidc-client-id ${shellArgument(gateway.oidcClientId)}`,
+      `--oidc-audience ${shellArgument(gateway.oidcAudience)}`,
+    );
+  }
+
+  parts.push(shellArgument(gateway.endpoint));
+
+  return parts.join(" ");
 }
 
 export type GatewayStatusAppearance =
-  { color: "grey" } | { status: "danger" | "info" | "success" | "warning" };
+  "danger" | "pending" | "progress" | "success" | "unknown" | "warning";
 
 export function gatewayStatusAppearance(
   status: string,
@@ -54,19 +59,20 @@ export function gatewayStatusAppearance(
     case "ready":
     case "running":
     case "succeeded":
-      return { status: "success" };
+      return "success";
     case "degraded":
     case "warning":
-      return { status: "warning" };
+      return "warning";
     case "pending":
+      return "pending";
     case "provisioning":
     case "reconciling":
     case "updating":
-      return { status: "info" };
+      return "progress";
     case "error":
     case "failed":
-      return { status: "danger" };
+      return "danger";
     default:
-      return { color: "grey" };
+      return "unknown";
   }
 }

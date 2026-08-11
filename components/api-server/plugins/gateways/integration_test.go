@@ -65,7 +65,7 @@ func TestGatewayPost(t *testing.T) {
 	Expect(*gatewayOutput.Id).NotTo(BeEmpty(), "Expected ID assigned on creation")
 	Expect(*gatewayOutput.Kind).To(Equal("Gateway"))
 	Expect(*gatewayOutput.Href).To(Equal(fmt.Sprintf("/api/hypershell/v1/gateways/%s", *gatewayOutput.Id)))
-	Expect(gatewayOutput.Namespace).To(MatchRegexp(`^openshell-[0-9a-f]{40}$`))
+	Expect(gatewayOutput.Namespace).To(MatchRegexp(`^openshell-[0-9a-f]{16}$`))
 
 	jwtToken := ctx.Value(openapi.ContextAccessToken)
 	restyResp, err := resty.R().
@@ -98,7 +98,49 @@ func TestGatewayPostAllowsEmptyReconcilerOwnedIDs(t *testing.T) {
 	Expect(gatewayOutput.ClusterId).To(BeEmpty())
 	Expect(gatewayOutput.ReleaseId).To(BeEmpty())
 	Expect(gatewayOutput.DatabaseId).To(BeEmpty())
-	Expect(gatewayOutput.Namespace).To(MatchRegexp(`^openshell-[0-9a-f]{40}$`))
+	Expect(gatewayOutput.Namespace).To(MatchRegexp(`^openshell-[0-9a-f]{16}$`))
+}
+
+func TestGatewayPostWithoutRouteRemainsUnrouted(t *testing.T) {
+	h, client := test.RegisterIntegration(t)
+
+	account := h.NewRandAccount()
+	ctx := h.NewAuthenticatedContext(account)
+
+	gatewayInput := openapi.GatewayCreateRequest{
+		Name:       "route-default-test",
+		FleetId:    "",
+		ClusterId:  "",
+		ReleaseId:  "",
+		DatabaseId: "",
+	}
+
+	gatewayOutput, resp, err := client.DefaultAPI.CreateGateway(ctx).GatewayCreateRequest(gatewayInput).Execute()
+	Expect(err).NotTo(HaveOccurred())
+	Expect(resp.StatusCode).To(Equal(http.StatusCreated))
+	Expect(gatewayOutput.GetRoute()).To(BeEmpty())
+}
+
+func TestGatewayPostPreservesExplicitRoute(t *testing.T) {
+	h, client := test.RegisterIntegration(t)
+
+	account := h.NewRandAccount()
+	ctx := h.NewAuthenticatedContext(account)
+
+	customRoute := `{"enabled":true,"host":"custom.example.com"}`
+	gatewayInput := openapi.GatewayCreateRequest{
+		Name:       "route-explicit-test",
+		FleetId:    "",
+		ClusterId:  "",
+		ReleaseId:  "",
+		DatabaseId: "",
+		Route:      openapi.PtrString(customRoute),
+	}
+
+	gatewayOutput, resp, err := client.DefaultAPI.CreateGateway(ctx).GatewayCreateRequest(gatewayInput).Execute()
+	Expect(err).NotTo(HaveOccurred())
+	Expect(resp.StatusCode).To(Equal(http.StatusCreated))
+	Expect(gatewayOutput.GetRoute()).To(Equal(customRoute))
 }
 
 func TestGatewayPatch(t *testing.T) {

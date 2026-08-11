@@ -26,19 +26,29 @@ error()   { printf "${RED}ERROR: %s${NC}\n" "$*" >&2; }
 : "${KIND_CLUSTER_NAME:=hypershell-dev}"
 : "${KIND_NAMESPACE:=hypershell-system}"
 : "${CONTAINER_ENGINE:=$(command -v podman 2>/dev/null || echo docker)}"
+REPO_ROOT="$(cd "${SCRIPT_DIR:-$(dirname "${BASH_SOURCE[0]}")}/../.." && pwd)"
+
+# Prefer locally-built binaries from make kind-prereqs
+if [[ -d "${REPO_ROOT}/bin" ]]; then
+  export PATH="${REPO_ROOT}/bin:${PATH}"
+fi
 if [[ "$(basename "${CONTAINER_ENGINE}")" == "podman" ]]; then
   export KIND_EXPERIMENTAL_PROVIDER=podman
 fi
 : "${GATEWAY_IMAGE:=quay.io/redhat-services-prod/hcm-eng-prod-tenant/hypershell-main/hypershell-api-server-main:latest}"
 : "${KEYCLOAK_HOSTNAME:=keycloak.hypershell.localhost}"
+: "${KEYCLOAK_OIDC_ISSUER:=http://${KEYCLOAK_HOSTNAME}:8080/realms/hypershell}"
+: "${KEYCLOAK_OIDC_CLIENT_ID:=hypershell-frontend}"
+: "${KEYCLOAK_OIDC_AUDIENCE:=hypershell-frontend}"
 : "${KIND_DNS_PORT:=5553}"
+: "${KIND_DB_IMAGE:=registry.access.redhat.com/hi/postgresql:18.4@sha256:9b1917bf15a3b3a6a99b94ab75db1bfde3f434990e881c69d527417d2c035a09}"
 DNS_CONTAINER_NAME="${KIND_CLUSTER_NAME}-dns"
-REPO_ROOT="$(cd "${SCRIPT_DIR:-$(dirname "${BASH_SOURCE[0]}")}/../.." && pwd)"
 
 # --- Cluster helpers ---
 
 cluster_exists() {
-  kind get clusters 2>/dev/null | grep -q "^${KIND_CLUSTER_NAME}$"
+  kind get clusters 2>/dev/null | grep -q "^${KIND_CLUSTER_NAME}$" ||
+    ${CONTAINER_ENGINE} inspect "${KIND_CLUSTER_NAME}-control-plane" >/dev/null 2>&1
 }
 
 require_cluster() {
@@ -165,6 +175,93 @@ cleanup_resolver() {
   esac
 }
 
+# --- Cluster CoreDNS patch (in-cluster *.hypershell.localhost resolution) ---
+
+patch_cluster_coredns() {
+  local gw_ip="$1"
+  local existing
+  existing=$(kube get configmap coredns -n kube-system -o jsonpath='{.data.Corefile}' 2>/dev/null || true)
+  if echo "${existing}" | grep -q "hypershell.localhost"; then
+    info "Cluster CoreDNS already patched for hypershell.localhost"
+    return
+  fi
+  info "Patching cluster CoreDNS to resolve *.hypershell.localhost -> ${gw_ip}..."
+  local hosts_block
+  hosts_block="hypershell.localhost:53 {
+    hosts {
+      ${gw_ip} keycloak.hypershell.localhost
+      ${gw_ip} api.hypershell.localhost
+      ${gw_ip} console.hypershell.localhost
+      ${gw_ip} health.hypershell.localhost
+      fallthrough
+    }
+  }"
+  local patched
+  patched="${hosts_block}
+${existing}"
+  kube create configmap coredns -n kube-system \
+    --from-literal="Corefile=${patched}" \
+    --dry-run=client -o yaml | kube apply -f -
+  kube rollout restart deployment/coredns -n kube-system
+  kube rollout status deployment/coredns -n kube-system --timeout=60s
+  success "Cluster CoreDNS patched"
+}
+
+# --- kubectl port-forward (no-sudo fallback) ---
+
+KUBECTL_PF_DIR="/tmp/hypershell-kind-${KIND_CLUSTER_NAME}-pf"
+
+kubectl_port_forwards_running() {
+  [[ -d "${KUBECTL_PF_DIR}" ]] || return 1
+  for pf in "${KUBECTL_PF_DIR}"/*.pid; do
+    [[ -f "${pf}" ]] || continue
+    kill -0 "$(cat "${pf}")" 2>/dev/null && return 0
+  done
+  return 1
+}
+
+start_kubectl_port_forwards() {
+  stop_kubectl_port_forwards
+  mkdir -p "${KUBECTL_PF_DIR}"
+
+  info "Starting kubectl port-forwards..."
+
+  local ctx
+  ctx="$(kctx)"
+
+  nohup kubectl --context "${ctx}" port-forward svc/hypershell-api-server \
+    -n "${KIND_NAMESPACE}" 8000:8000 >"${KUBECTL_PF_DIR}/api-server.log" 2>&1 &
+  echo $! > "${KUBECTL_PF_DIR}/api-server.pid"
+
+  nohup kubectl --context "${ctx}" port-forward svc/hypershell-web-console \
+    -n "${KIND_NAMESPACE}" 3000:3000 >"${KUBECTL_PF_DIR}/web-console.log" 2>&1 &
+  echo $! > "${KUBECTL_PF_DIR}/web-console.pid"
+
+  nohup kubectl --context "${ctx}" port-forward svc/keycloak-service \
+    -n keycloak 8080:8080 >"${KUBECTL_PF_DIR}/keycloak.log" 2>&1 &
+  echo $! > "${KUBECTL_PF_DIR}/keycloak.pid"
+
+  sleep 2
+
+  for svc_name in api-server web-console keycloak; do
+    local pf="${KUBECTL_PF_DIR}/${svc_name}.pid"
+    if [[ -f "${pf}" ]] && kill -0 "$(cat "${pf}")" 2>/dev/null; then
+      success "  ${svc_name}: forwarding"
+    else
+      warn "  ${svc_name}: failed (check ${KUBECTL_PF_DIR}/${svc_name}.log)"
+    fi
+  done
+}
+
+stop_kubectl_port_forwards() {
+  if [[ ! -d "${KUBECTL_PF_DIR}" ]]; then return; fi
+  for pf in "${KUBECTL_PF_DIR}"/*.pid; do
+    [[ -f "${pf}" ]] || continue
+    kill "$(cat "${pf}")" 2>/dev/null || true
+  done
+  rm -rf "${KUBECTL_PF_DIR}"
+}
+
 # --- Port forwarding (443 → ephemeral) ---
 
 PF_ANCHOR="com.hypershell/${KIND_CLUSTER_NAME}"
@@ -172,6 +269,7 @@ IPTABLES_CHAIN="HS-${KIND_CLUSTER_NAME}"
 
 start_port_forward() {
   local ephemeral_port="$1"
+  local http_port="${2:-}"
   PORT_FORWARD_ACTIVE=""
   if [[ "${HAVE_SUDO:-true}" == "false" ]]; then
     warn "Skipping port forwarding (no sudo) - use port ${ephemeral_port} directly"
@@ -183,12 +281,20 @@ start_port_forward() {
       local pf_rules
       pf_rules=$(sed '/^rdr-anchor "com\.apple\/\*"/a\
 rdr-anchor "com.hypershell/*"' /etc/pf.conf)
+      local rdr_lines
+      rdr_lines="rdr pass on lo0 inet proto tcp from any to 127.0.0.1 port 443 -> 127.0.0.1 port ${ephemeral_port}"
+      if [[ -n "${http_port}" ]]; then
+        rdr_lines="${rdr_lines}
+rdr pass on lo0 inet proto tcp from any to 127.0.0.1 port 8080 -> 127.0.0.1 port ${http_port}"
+      fi
       if echo "${pf_rules}" | sudo pfctl -f - 2>/dev/null && \
-         echo "rdr pass on lo0 inet proto tcp from any to 127.0.0.1 port 443 -> 127.0.0.1 port ${ephemeral_port}" \
-           | sudo pfctl -a "${PF_ANCHOR}" -f - 2>/dev/null && \
+         echo "${rdr_lines}" | sudo pfctl -a "${PF_ANCHOR}" -f - 2>/dev/null && \
          sudo pfctl -E 2>/dev/null; then
         PORT_FORWARD_ACTIVE=true
         success "Port forwarding active: https://localhost:443 -> :${ephemeral_port}"
+        if [[ -n "${http_port}" ]]; then
+          success "Port forwarding active: http://localhost:8080 -> :${http_port}"
+        fi
       else
         warn "pfctl setup failed - access services on port ${ephemeral_port} instead"
       fi
@@ -205,6 +311,12 @@ rdr-anchor "com.hypershell/*"' /etc/pf.conf)
         success "Port forwarding active: https://localhost:443 -> :${ephemeral_port}"
       else
         warn "iptables setup failed - access services on port ${ephemeral_port} instead"
+      fi
+      if [[ -n "${http_port}" ]]; then
+        if sudo iptables -t nat -A "${IPTABLES_CHAIN}" -p tcp -d 127.0.0.1 --dport 8080 \
+             -j REDIRECT --to-port "${http_port}"; then
+          success "Port forwarding active: http://localhost:8080 -> :${http_port}"
+        fi
       fi
       ;;
   esac

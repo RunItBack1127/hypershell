@@ -9,6 +9,28 @@ export const gatewayListQueryRoot = ["gateways", "list"] as const;
 export const gatewayPlacementQueryRoot = ["gateways", "placements"] as const;
 export const gatewayPlacementStaleMilliseconds = 60_000;
 export const gatewaySearchDebounceMilliseconds = 250;
+export const gatewayStatusPollMilliseconds = 5_000;
+
+const gatewayPollingStates = new Set([
+  "pending",
+  "provisioning",
+  "reconciling",
+  "updating",
+]);
+const gatewayFailedLifecycleStates = new Set(["error", "failed"]);
+
+export function gatewayNeedsStatusPolling(
+  gateway: Pick<GatewayRecord, "phase" | "status">,
+): boolean {
+  const states = [gateway.phase, gateway.status]
+    .map((value) => value?.trim().toLocaleLowerCase() ?? "")
+    .filter(Boolean);
+
+  return (
+    states.length === 0 ||
+    states.some((value) => gatewayPollingStates.has(value))
+  );
+}
 
 export function gatewayListQueryKey(request: GatewayListRequest) {
   return [
@@ -65,20 +87,27 @@ export function toGatewayConnection(
   hubClusterName: string,
 ): GatewayConnection {
   const clusterId = gateway.clusterId.trim();
-  const status = [gateway.status, gateway.phase].find(
-    (value) => value !== undefined && value.trim().length > 0,
-  );
+  const phase = gateway.phase?.trim() ?? "";
+  const healthStatus = gateway.status?.trim() ?? "";
+  const normalizedPhase = phase.toLocaleLowerCase();
+  const status =
+    phase &&
+    (gatewayPollingStates.has(normalizedPhase) ||
+      gatewayFailedLifecycleStates.has(normalizedPhase))
+      ? phase
+      : healthStatus || phase;
 
   return {
     ...(clusterId ? { clusterId } : {}),
     clusterName: clusterId ? "" : hubClusterName,
     ...(gateway.consoleUrl ? { consoleUrl: gateway.consoleUrl } : {}),
+    ...(gateway.createdAt ? { createdAt: gateway.createdAt } : {}),
     endpoint: gatewayEndpoint(gateway),
     id: gateway.id,
     name: gateway.name,
     ...(gateway.oidcAudience ? { oidcAudience: gateway.oidcAudience } : {}),
     ...(gateway.oidcClientId ? { oidcClientId: gateway.oidcClientId } : {}),
     ...(gateway.oidcIssuer ? { oidcIssuer: gateway.oidcIssuer } : {}),
-    status: status ?? "Unknown",
+    status: status || "Unknown",
   };
 }

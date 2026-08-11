@@ -273,7 +273,7 @@ describe("gateway API operations adapter", () => {
     expect(gatewayApi.list).toHaveBeenCalledWith(
       expect.objectContaining({
         search:
-          "name ilike '%my\\_cluster\\%\\\\west''s%' or cluster_id ilike '%my\\_cluster\\%\\\\west''s%' or status ilike '%my\\_cluster\\%\\\\west''s%' or external_dns ilike '%my\\_cluster\\%\\\\west''s%'",
+          "name ilike '%my\\_cluster\\%\\\\west''s%' or cluster_id ilike '%my\\_cluster\\%\\\\west''s%' or status ilike '%my\\_cluster\\%\\\\west''s%' or route_address ilike '%my\\_cluster\\%\\\\west''s%' or external_dns ilike '%my\\_cluster\\%\\\\west''s%'",
       }),
       { signal: undefined },
     );
@@ -281,7 +281,9 @@ describe("gateway API operations adapter", () => {
 
   it("maps exactly one authoritative gateway page with search and sort", async () => {
     const abortController = new AbortController();
-    gatewayApi.list.mockResolvedValueOnce(gatewayList([gateway()], 21, 2));
+    gatewayApi.list.mockResolvedValueOnce(
+      gatewayList([gateway({ created_at: "2026-08-10T14:30:00Z" })], 21, 2),
+    );
 
     await expect(
       controlPlane.listGateways(listRequest, {
@@ -289,7 +291,13 @@ describe("gateway API operations adapter", () => {
         signal: abortController.signal,
       }),
     ).resolves.toMatchObject({
-      items: [{ id: "gateway-1", name: "Team gateway" }],
+      items: [
+        {
+          createdAt: "2026-08-10T14:30:00Z",
+          id: "gateway-1",
+          name: "Team gateway",
+        },
+      ],
       page: 2,
       size: 20,
       total: 21,
@@ -301,10 +309,30 @@ describe("gateway API operations adapter", () => {
         orderBy: "status desc",
         page: 2,
         search:
-          "name ilike '%team''s gateway%' or cluster_id ilike '%team''s gateway%' or status ilike '%team''s gateway%' or external_dns ilike '%team''s gateway%'",
+          "name ilike '%team''s gateway%' or cluster_id ilike '%team''s gateway%' or status ilike '%team''s gateway%' or route_address ilike '%team''s gateway%' or external_dns ilike '%team''s gateway%'",
         size: 20,
       },
       { signal: abortController.signal },
+    );
+  });
+
+  it("sorts displayed route endpoints by their authoritative field", async () => {
+    gatewayApi.list.mockResolvedValue(gatewayList([], 0, 1));
+
+    await controlPlane.listGateways(
+      {
+        ...listRequest,
+        page: 1,
+        search: "",
+        sortDirection: "asc",
+        sortField: "endpoint",
+      },
+      context,
+    );
+
+    expect(gatewayApi.list).toHaveBeenCalledWith(
+      expect.objectContaining({ orderBy: "route_address asc" }),
+      { signal: undefined },
     );
   });
 
@@ -325,6 +353,21 @@ describe("gateway API operations adapter", () => {
       oidcAudience: "openshell-api",
       oidcClientId: "openshell-cli",
       oidcIssuer: "https://issuer.example.test/realms/openshell",
+    });
+  });
+
+  it("derives the endpoint from route_address when external_dns is absent", async () => {
+    gatewayApi.get.mockResolvedValue(
+      gateway({
+        external_dns: "",
+        route_address: "grpcs://openshell-gw-test.apps.example.com:443",
+      }),
+    );
+
+    await expect(
+      controlPlane.getGateway("gateway-1", context),
+    ).resolves.toMatchObject({
+      externalDns: "openshell-gw-test.apps.example.com:443",
     });
   });
 
@@ -361,6 +404,20 @@ describe("gateway API operations adapter", () => {
     );
   });
 
+  it("sorts gateways by the API creation timestamp", async () => {
+    gatewayApi.list.mockResolvedValue(gatewayList([], 0, 1));
+
+    await controlPlane.listGateways(
+      { ...listRequest, page: 1, search: "", sortField: "created" },
+      context,
+    );
+
+    expect(gatewayApi.list).toHaveBeenCalledWith(
+      { orderBy: "created_at desc", page: 1, size: 20 },
+      { signal: undefined },
+    );
+  });
+
   it("provisions on the selected cluster with hidden request defaults", async () => {
     gatewayApi.create.mockResolvedValue(
       gateway({ database_id: "", release_id: "" }),
@@ -381,6 +438,7 @@ describe("gateway API operations adapter", () => {
         fleet_id: "",
         name: "team-gateway",
         release_id: "",
+        route: '{"enabled":true}',
       },
       { signal: undefined },
     );

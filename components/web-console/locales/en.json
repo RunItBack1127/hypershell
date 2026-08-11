@@ -315,6 +315,10 @@
     "defaultMessage": "Actions",
     "description": "Accessible heading for table row actions."
   },
+  "app.table.column.created": {
+    "defaultMessage": "Created",
+    "description": "Heading for a resource creation date column."
+  },
   "app.table.column.status": {
     "defaultMessage": "Status",
     "description": "Heading for a resource status column."
@@ -322,6 +326,14 @@
   "app.table.results": {
     "defaultMessage": "results",
     "description": "Context announced after a filtered collection result count."
+  },
+  "app.toggleDarkMode.off": {
+    "defaultMessage": "Switch to dark mode",
+    "description": "Accessible label for the color scheme toggle when light mode is active."
+  },
+  "app.toggleDarkMode.on": {
+    "defaultMessage": "Switch to light mode",
+    "description": "Accessible label for the color scheme toggle when dark mode is active."
   },
   "app.value.notAvailable": {
     "defaultMessage": "Not available",

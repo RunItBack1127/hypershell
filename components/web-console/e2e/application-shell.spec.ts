@@ -3,7 +3,7 @@ import { expect, test } from "@playwright/test";
 
 const gateway = {
   cluster_id: "cluster-east",
-  created_at: null,
+  created_at: "2026-08-10T14:30:00Z",
   database_id: "database-1",
   external_dns: "gateway.example.test",
   fleet_id: "",
@@ -141,12 +141,72 @@ test("makes gateway management the primary HyperShell experience", async ({
       .getByRole("grid", { name: "OpenShell Gateways" })
       .getByText("Cluster East"),
   ).toBeVisible();
+  const gatewayGrid = page.getByRole("grid", { name: "OpenShell Gateways" });
+  await expect(
+    gatewayGrid.getByRole("columnheader", { name: "Created" }),
+  ).toBeVisible();
+  await expect(gatewayGrid.getByText("Aug 10, 2026")).toBeVisible();
+  await expect(gatewayGrid.locator(".pf-v6-c-label")).toHaveCount(0);
   await expect(
     page.getByRole("navigation", { name: "Primary navigation" }),
   ).toHaveCount(0);
   await page.getByRole("button", { name: "Refresh gateways" }).click();
 
   const results = await new AxeBuilder({ page }).analyze();
+  expect(results.violations).toEqual([]);
+});
+
+test("keeps unknown gateway status readable in every theme", async ({
+  page,
+}) => {
+  const unknownGateway = { ...gateway, status: "Future status" };
+  await page.route("**/api/hypershell/v1/gateways**", async (route) => {
+    const request = route.request();
+    if (request.method() !== "GET") {
+      await route.fallback();
+      return;
+    }
+
+    const gatewayId = new URL(request.url()).pathname.split("/").at(-1);
+    await route.fulfill({
+      body: JSON.stringify(
+        gatewayId === "gateways"
+          ? {
+              items: [unknownGateway],
+              kind: "GatewayList",
+              page: 1,
+              size: 100,
+              total: 1,
+            }
+          : unknownGateway,
+      ),
+      contentType: "application/json",
+      status: 200,
+    });
+  });
+
+  await page.goto("/");
+  await expect(page.getByText("Future status", { exact: true })).toBeVisible();
+  let results = await new AxeBuilder({ page }).analyze();
+  expect(results.violations).toEqual([]);
+
+  await page
+    .getByRole("link", { name: "openshell-gateway-test", exact: true })
+    .click();
+  await expect(
+    page.getByText("Future status", { exact: true }).first(),
+  ).toBeVisible();
+  results = await new AxeBuilder({ page }).analyze();
+  expect(results.violations).toEqual([]);
+
+  await page.getByRole("button", { name: "Switch to dark mode" }).click();
+  await expect(page.locator("html")).toHaveClass(/pf-v6-theme-dark/u);
+  results = await new AxeBuilder({ page }).analyze();
+  expect(results.violations).toEqual([]);
+
+  await page.goto("/");
+  await expect(page.getByText("Future status", { exact: true })).toBeVisible();
+  results = await new AxeBuilder({ page }).analyze();
   expect(results.violations).toEqual([]);
 });
 
@@ -161,7 +221,7 @@ test("operates gateway rows and opens provisioning", async ({ page }) => {
   ).toHaveCount(0);
   await expect(
     page.getByRole("menuitem", { name: "Copy CLI connection command" }),
-  ).toHaveCount(0);
+  ).toBeVisible();
 
   await expect(
     page.getByRole("columnheader", { name: "Gateway name" }),
@@ -223,11 +283,14 @@ test("keeps connection methods on gateway details", async ({
   ).toBeVisible();
 
   const copyFields = page.getByRole("textbox");
-  await expect(copyFields).toHaveCount(1);
+  await expect(copyFields).toHaveCount(2);
   await expect(copyFields.nth(0)).toHaveValue(
     "https://gateway.example.test:443",
   );
-  await expect(page.getByText("Not available")).toBeVisible();
+  await expect(copyFields.nth(1)).toHaveValue(
+    "openshell gateway add --name openshell-gateway-test https://gateway.example.test:443",
+  );
+  await expect(page.getByText("Not available")).toHaveCount(0);
   await page
     .getByRole("button", {
       name: "Copy gateway endpoint for openshell-gateway-test",
@@ -236,6 +299,16 @@ test("keeps connection methods on gateway details", async ({
   await expect
     .poll(() => page.evaluate(() => navigator.clipboard.readText()))
     .toBe("https://gateway.example.test:443");
+  await page
+    .getByRole("button", {
+      name: "Copy connection command for openshell-gateway-test",
+    })
+    .click();
+  await expect
+    .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+    .toBe(
+      "openshell gateway add --name openshell-gateway-test https://gateway.example.test:443",
+    );
 
   await expect(
     page
@@ -434,6 +507,7 @@ test("provisions a gateway on an existing managed cluster", async ({
     fleet_id: "",
     name: "team-gateway",
     release_id: "",
+    route: '{"enabled":true}',
   });
 });
 
