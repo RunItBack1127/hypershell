@@ -1027,7 +1027,7 @@ func reconcileGatewayAPIResources(ctx context.Context, dynamicClient dynamic.Int
 
 		btlsPolicy := &unstructured.Unstructured{
 			Object: map[string]interface{}{
-				"apiVersion": "gateway.networking.k8s.io/v1alpha3",
+				"apiVersion": "gateway.networking.k8s.io/v1",
 				"kind":       "BackendTLSPolicy",
 				"metadata": map[string]interface{}{
 					"name":      "openshell-gateway",
