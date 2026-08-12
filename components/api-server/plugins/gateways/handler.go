@@ -1,29 +1,41 @@
 package gateways
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/gorilla/mux"
 
 	"github.com/openshift-online/hypershell/components/api-server/pkg/api/openapi"
+	"github.com/openshift-online/hypershell/components/api-server/pkg/rbac"
 	"github.com/openshift-online/rh-trex-ai/pkg/api/presenters"
 	"github.com/openshift-online/rh-trex-ai/pkg/errors"
 	"github.com/openshift-online/rh-trex-ai/pkg/handlers"
 	"github.com/openshift-online/rh-trex-ai/pkg/services"
 )
 
+type OwnerBindingCreator interface {
+	CreateOwnerBinding(ctx context.Context, userID string, gatewayID string) error
+}
+
 var _ handlers.RestHandler = gatewayHandler{}
 
 type gatewayHandler struct {
-	gateway GatewayService
-	generic services.GenericService
+	gateway       GatewayService
+	generic       services.GenericService
+	ownerBinding  OwnerBindingCreator
+	bindingLookup rbac.RoleBindingLookup
 }
 
-func NewGatewayHandler(gateway GatewayService, generic services.GenericService) *gatewayHandler {
+func NewGatewayHandler(gateway GatewayService, generic services.GenericService, ownerBinding OwnerBindingCreator, bindingLookup rbac.RoleBindingLookup) *gatewayHandler {
 	return &gatewayHandler{
-		gateway: gateway,
-		generic: generic,
+		gateway:       gateway,
+		generic:       generic,
+		ownerBinding:  ownerBinding,
+		bindingLookup: bindingLookup,
 	}
 }
 
@@ -39,6 +51,14 @@ func (h gatewayHandler) Create(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				return nil, err
 			}
+
+			userID := rbac.GetUserIDFromContext(ctx)
+			if userID != "" && h.ownerBinding != nil {
+				if bindErr := h.ownerBinding.CreateOwnerBinding(ctx, userID, gatewayModel.ID); bindErr != nil {
+					return nil, errors.GeneralError("failed to create owner binding: %s", bindErr)
+				}
+			}
+
 			return PresentGateway(gatewayModel), nil
 		},
 		ErrorHandler: handlers.HandleError,
@@ -130,6 +150,11 @@ func (h gatewayHandler) List(w http.ResponseWriter, r *http.Request) {
 			ctx := r.Context()
 
 			listArgs := services.NewListArguments(r.URL.Query())
+
+			if scopeErr := h.applyScopeFilter(ctx, listArgs); scopeErr != nil {
+				return nil, scopeErr
+			}
+
 			var gateways []Gateway
 			paging, err := h.generic.List(ctx, "id", listArgs, &gateways)
 			if err != nil {
@@ -195,4 +220,53 @@ func (h gatewayHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 	handlers.HandleDelete(w, r, cfg, http.StatusNoContent)
+}
+
+func (h gatewayHandler) applyScopeFilter(ctx context.Context, args *services.ListArguments) *errors.ServiceError {
+	if h.bindingLookup == nil {
+		return nil
+	}
+
+	userID := rbac.GetUserIDFromContext(ctx)
+	if userID == "" {
+		return nil
+	}
+
+	bindings, err := h.bindingLookup.FindBindingsByUserID(ctx, userID)
+	if err != nil {
+		return errors.GeneralError("unable to resolve gateway scope: %v", err)
+	}
+
+	for _, b := range bindings {
+		if b.RoleName == "gateway:creator" {
+			return nil
+		}
+	}
+
+	gatewayIDs := make([]string, 0, len(bindings))
+	seen := make(map[string]bool)
+	for _, b := range bindings {
+		if b.GatewayID != nil && !seen[*b.GatewayID] {
+			gatewayIDs = append(gatewayIDs, *b.GatewayID)
+			seen[*b.GatewayID] = true
+		}
+	}
+
+	if len(gatewayIDs) == 0 {
+		args.Search = "id = ''"
+		return nil
+	}
+
+	quoted := make([]string, len(gatewayIDs))
+	for i, id := range gatewayIDs {
+		quoted[i] = fmt.Sprintf("'%s'", strings.ReplaceAll(id, "'", "''"))
+	}
+	scopeFilter := fmt.Sprintf("id in (%s)", strings.Join(quoted, ","))
+
+	if args.Search != "" {
+		args.Search = fmt.Sprintf("(%s) and %s", args.Search, scopeFilter)
+	} else {
+		args.Search = scopeFilter
+	}
+	return nil
 }
