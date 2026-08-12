@@ -5,7 +5,9 @@ resources:
   - certificates.yaml
   - gateway.yaml
   - httproutes.yaml
+  - oidc-secrets.yaml
 patches:
+  # --- Controller: Kind env vars + OIDC ---
   - patch: |
       apiVersion: apps/v1
       kind: Deployment
@@ -28,6 +30,70 @@ patches:
                     value: hypershell-ca-issuer
                   - name: HYPERSHELL_DATABASE_IMAGE
                     value: "registry.access.redhat.com/hi/postgresql:18.4@sha256:9b1917bf15a3b3a6a99b94ab75db1bfde3f434990e881c69d527417d2c035a09"
+                  - name: OIDC_ISSUER
+                    value: "http://keycloak-service.keycloak.svc.cluster.local:8080/realms/hypershell"
+                  - name: OIDC_CLIENT_ID
+                    value: "hypershell-control-plane"
+                  - name: OIDC_CLIENT_SECRET
+                    valueFrom:
+                      secretKeyRef:
+                        name: hypershell-cp-oidc
+                        key: client-secret
+  # --- Web console: OIDC ---
+  - patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: hypershell-web-console
+        namespace: hypershell-system
+      spec:
+        template:
+          spec:
+            containers:
+              - name: web-console
+                env:
+                  - name: OIDC_ISSUER
+                    value: "https://keycloak.hypershell.localhost/realms/hypershell"
+                  - name: OIDC_CLIENT_ID
+                    value: "hypershell-frontend"
+                  - name: OIDC_REDIRECT_URI
+                    value: "https://console.hypershell.localhost/auth/callback"
+                  - name: NODE_TLS_REJECT_UNAUTHORIZED
+                    value: "0"
+                  - name: SESSION_SECRET
+                    valueFrom:
+                      secretKeyRef:
+                        name: hypershell-oidc-session
+                        key: session-secret
+  # --- API server: OIDC env + JWK cert URL ---
+  - target:
+      kind: Deployment
+      name: hypershell-api-server
+      namespace: hypershell-system
+    patch: |
+      - op: add
+        path: /spec/template/spec/containers/0/env
+        value:
+          - name: API_ENV
+            value: development_oidc
+      - op: add
+        path: /spec/template/spec/containers/0/command/-
+        value: "--jwk-cert-url=http://keycloak-service.keycloak.svc.cluster.local:8080/realms/hypershell/protocol/openid-connect/certs"
+  # --- Keycloak: HTTPS hostname via gateway ---
+  - patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: keycloak
+        namespace: keycloak
+      spec:
+        template:
+          spec:
+            containers:
+              - name: keycloak
+                env:
+                  - name: KC_HOSTNAME
+                    value: "https://keycloak.hypershell.localhost"
 images:
   - name: quay.io/redhat-services-prod/hcm-eng-prod-tenant/hypershell-main/hypershell-api-server-main
     newTag: latest

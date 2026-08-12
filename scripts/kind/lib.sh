@@ -40,13 +40,8 @@ fi
 : "${KEYCLOAK_OIDC_ISSUER:=http://${KEYCLOAK_HOSTNAME}:8080/realms/hypershell}"
 : "${KEYCLOAK_OIDC_CLIENT_ID:=hypershell-frontend}"
 : "${KEYCLOAK_OIDC_AUDIENCE:=hypershell-frontend}"
-: "${KIND_ENABLE_OIDC:=}"
 : "${KIND_DNS_PORT:=5553}"
 DNS_CONTAINER_NAME="${KIND_CLUSTER_NAME}-dns"
-
-oidc_enabled() {
-  [[ "${KIND_ENABLE_OIDC}" == "true" ]]
-}
 
 # --- Cluster helpers ---
 
