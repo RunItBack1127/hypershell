@@ -26,7 +26,7 @@ error()   { printf "${RED}ERROR: %s${NC}\n" "$*" >&2; }
 : "${KIND_CLUSTER_NAME:=hypershell-dev}"
 : "${KIND_NAMESPACE:=hypershell-system}"
 : "${CONTAINER_ENGINE:=$(command -v podman 2>/dev/null || echo docker)}"
-REPO_ROOT="$(cd "${SCRIPT_DIR:-$(dirname "${BASH_SOURCE[0]}")}/../.." && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR:-$(dirname "${BASH_SOURCE[0]:-$0}")}/../.." && pwd)"
 
 # Prefer locally-built binaries from make kind-prereqs
 if [[ -d "${REPO_ROOT}/bin" ]]; then
