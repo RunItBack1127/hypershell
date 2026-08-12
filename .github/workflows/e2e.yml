@@ -222,27 +222,41 @@ jobs:
         if: failure()
         run: |
           mkdir -p e2e-diagnostics
-          echo "=== Pod descriptions ===" > e2e-diagnostics/pod-describes.txt
-          kubectl describe pods -n hypershell-system >> e2e-diagnostics/pod-describes.txt 2>&1 || true
-          echo "=== Pod logs ===" > e2e-diagnostics/pod-logs.txt
-          kubectl logs --all-containers --prefix -l app.kubernetes.io/name=hypershell -n hypershell-system >> e2e-diagnostics/pod-logs.txt 2>&1 || true
-          kubectl logs --all-containers --prefix -l app=hypershell-api-server -n hypershell-system >> e2e-diagnostics/pod-logs.txt 2>&1 || true
-          kubectl logs --all-containers --prefix -l app=hypershell-controller -n hypershell-system >> e2e-diagnostics/pod-logs.txt 2>&1 || true
-          kubectl logs --all-containers --prefix -l app=hypershell-web-console -n hypershell-system >> e2e-diagnostics/pod-logs.txt 2>&1 || true
-          echo "=== Events ===" > e2e-diagnostics/events.txt
-          kubectl get events --sort-by=.lastTimestamp -n hypershell-system >> e2e-diagnostics/events.txt 2>&1 || true
-          echo "=== All pods ===" > e2e-diagnostics/pods.txt
-          kubectl get pods -A >> e2e-diagnostics/pods.txt 2>&1 || true
-          echo "=== Keycloak logs ===" > e2e-diagnostics/keycloak-logs.txt
-          kubectl logs --all-containers --prefix -l app=keycloak -n keycloak --tail=100 >> e2e-diagnostics/keycloak-logs.txt 2>&1 || true
-          echo "=== Gateway API resources ===" > e2e-diagnostics/gateway-api.txt
-          kubectl get gateways,grpcroutes,httproutes -A -o wide >> e2e-diagnostics/gateway-api.txt 2>&1 || true
-          echo "=== Openshell namespaces ===" >> e2e-diagnostics/gateway-api.txt
-          for ns in $(kubectl get ns -l hypershell.redhat.io/managed=true -o name 2>/dev/null); do
-            echo "--- $ns ---" >> e2e-diagnostics/gateway-api.txt
-            kubectl get pods,svc,deployments -n "${ns##*/}" >> e2e-diagnostics/gateway-api.txt 2>&1 || true
-            kubectl logs --all-containers --prefix -l app.kubernetes.io/name=openshell -n "${ns##*/}" --tail=50 >> e2e-diagnostics/gateway-api.txt 2>&1 || true
-          done
+
+          echo "::group::All pods"
+          kubectl get pods -A -o wide 2>&1 | tee e2e-diagnostics/pods.txt || true
+          echo "::endgroup::"
+
+          echo "::group::Pod descriptions (hypershell-system)"
+          kubectl describe pods -n hypershell-system 2>&1 | tee e2e-diagnostics/pod-describes.txt || true
+          echo "::endgroup::"
+
+          echo "::group::Pod logs (hypershell-system)"
+          {
+            for label in app.kubernetes.io/name=hypershell app=hypershell-api-server app=hypershell-controller app=hypershell-web-console; do
+              kubectl logs --all-containers --prefix --tail=200 -l "${label}" -n hypershell-system 2>&1 || true
+            done
+          } | tee e2e-diagnostics/pod-logs.txt
+          echo "::endgroup::"
+
+          echo "::group::Keycloak logs"
+          kubectl logs --all-containers --prefix --tail=100 -l app=keycloak -n keycloak 2>&1 | tee e2e-diagnostics/keycloak-logs.txt || true
+          echo "::endgroup::"
+
+          echo "::group::Events (hypershell-system)"
+          kubectl get events --sort-by=.lastTimestamp -n hypershell-system 2>&1 | tee e2e-diagnostics/events.txt || true
+          echo "::endgroup::"
+
+          echo "::group::Gateway API resources"
+          {
+            kubectl get gateways,grpcroutes,httproutes -A -o wide 2>&1 || true
+            for ns in $(kubectl get ns -l hypershell.redhat.io/managed=true -o name 2>/dev/null); do
+              echo "--- $ns ---"
+              kubectl get pods,svc,deployments -n "${ns##*/}" 2>&1 || true
+              kubectl logs --all-containers --prefix --tail=50 -l app.kubernetes.io/name=openshell -n "${ns##*/}" 2>&1 || true
+            done
+          } | tee e2e-diagnostics/gateway-api.txt
+          echo "::endgroup::"
 
       - name: Upload diagnostics
         if: failure()

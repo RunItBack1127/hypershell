@@ -65,17 +65,15 @@ patches:
                       secretKeyRef:
                         name: hypershell-oidc-session
                         key: session-secret
-  # --- API server: OIDC env + JWK cert URL ---
+  # --- API server: enable JWT + JWK cert URL ---
   - target:
       kind: Deployment
       name: hypershell-api-server
       namespace: hypershell-system
     patch: |
-      - op: add
-        path: /spec/template/spec/containers/0/env
-        value:
-          - name: API_ENV
-            value: development_oidc
+      - op: replace
+        path: /spec/template/spec/containers/0/command/6
+        value: "--enable-jwt=true"
       - op: add
         path: /spec/template/spec/containers/0/command/-
         value: "--jwk-cert-url=http://keycloak-service.keycloak.svc.cluster.local:8080/realms/hypershell/protocol/openid-connect/certs"
