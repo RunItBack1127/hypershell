@@ -22,6 +22,8 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/watch"
 )
 
 func ReconcileGateway(
@@ -355,24 +357,25 @@ func waitForSecret(ctx context.Context, clientset *kubernetes.Clientset, namespa
 		return nil
 	}
 
-	deadline := time.After(timeout)
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
+	watchCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-deadline:
-			return fmt.Errorf("timed out waiting for secret %s/%s", namespace, name)
-		case <-ticker.C:
-			_, err := clientset.CoreV1().Secrets(namespace).Get(ctx, name, metav1.GetOptions{})
-			if err == nil {
-				log.Printf("INFO secret %s/%s is available", namespace, name)
-				return nil
-			}
+	watcher, err := clientset.CoreV1().Secrets(namespace).Watch(watchCtx, metav1.ListOptions{
+		FieldSelector: fields.OneTermEqualSelector("metadata.name", name).String(),
+	})
+	if err != nil {
+		return fmt.Errorf("watch secret %s/%s: %w", namespace, name, err)
+	}
+	defer watcher.Stop()
+
+	for event := range watcher.ResultChan() {
+		if event.Type == watch.Added || event.Type == watch.Modified {
+			log.Printf("INFO secret %s/%s is available", namespace, name)
+			return nil
 		}
 	}
+
+	return fmt.Errorf("timed out waiting for secret %s/%s", namespace, name)
 }
 
 func waitForDeploymentReady(ctx context.Context, clientset *kubernetes.Clientset, namespace, name string, timeout time.Duration) error {
