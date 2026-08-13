@@ -80,20 +80,34 @@ deploy/
     controller.yaml
     controller-rbac.yaml
     web-console.yaml
+    keycloak/               ← Keycloak deployment + realm import + theme
+      kustomization.yaml
+      keycloak.yaml
+      namespace.yaml
+    certificates/           ← CA chain for TLS
+      kustomization.yaml
+      ca-chain.yaml
+    networkpolicies.yaml
   kind/                     ← Kind overlay (extends base)
-    kustomization.yaml      ← references ../base
+    kustomization.yaml      ← references ../base, patches for OIDC + Kind env
     kind-config.yaml
+    certificates.yaml       ← cert-manager Certificates + Issuers
+    gateway.yaml            ← networking Gateway (cloud-provider-kind)
+    httproutes.yaml         ← HTTPRoutes for component services
+    oidc-secrets.yaml       ← control-plane OIDC client secret
     coredns/
       Corefile
-    prerequisites/
-      certificates.yaml
-      networking-gateway.yaml
-      httproutes.yaml
-      keycloak.yaml
+    infrastructure/         ← CRDs + controllers (cert-manager, Gateway API, Agent Sandbox)
+      kustomization.yaml
   openshift/                ← OpenShift overlay (extends base)
     kustomization.yaml      ← references ../base
     route.yaml
     scc.yaml
+    certificates.yaml
+    networkpolicies.yaml
+    infrastructure/
+      kustomization.yaml
+      gatewayclass.yaml
 ```
 
 ## Requirements
@@ -144,7 +158,7 @@ Each driver script SHALL export the following shell functions. The main test scr
 
 - GIVEN the `kind` driver is active
 - WHEN `discover_api_host` is called
-- THEN it SHALL return `api.hypershell.localhost` (the HTTPRoute hostname from `deploy/kind/prerequisites/httproutes.yaml`)
+- THEN it SHALL return `api.hypershell.localhost` (the HTTPRoute hostname from `deploy/kind/httproutes.yaml`)
 - OR fall back to `localhost:<port>` via `kubectl port-forward svc/hypershell-api-server` if the HTTPRoute is not reachable
 
 #### Scenario: Gateway Endpoint Discovery -- Kind
@@ -244,6 +258,13 @@ The system SHALL provide a GitHub Actions workflow at `.github/workflows/e2e.yml
 - THEN the e2e job SHALL be skipped
 - AND the workflow SHALL report `success` (to avoid blocking merges)
 
+#### Scenario: Infrastructure-Only Changes (No Source Components)
+
+- GIVEN the PR modifies e2e-relevant files (Makefile, `.github/`, `deploy/`, `tests/e2e/`) but no files under `components/api-server/`, `components/control-plane/`, or `components/web-console/`
+- WHEN the `e2e` workflow evaluates the change detection outputs
+- THEN the e2e job SHALL run using baseline registry images (no Konflux build wait)
+- AND the workflow SHALL NOT poll for Konflux check runs
+
 #### Scenario: Workflow Timeout
 
 - GIVEN the e2e job starts
@@ -284,7 +305,14 @@ On test failure, the CI workflow SHALL collect diagnostic artifacts to aid debug
 
 - GIVEN an e2e test failure
 - WHEN the workflow reaches its post-test phase
-- THEN it SHALL collect: all pod logs from the HyperShell namespace (`kubectl logs --all-containers`), cluster events (`kubectl get events --sort-by=.lastTimestamp`), pod descriptions (`kubectl describe pods`), the e2e test script stdout/stderr
+- THEN it SHALL collect diagnostics inside collapsible `::group::` sections for readable CI output:
+  - All pods across all namespaces (`kubectl get pods -A -o wide`)
+  - Pod descriptions from the HyperShell namespace (`kubectl describe pods`)
+  - Pod logs from all HyperShell components (`kubectl logs --all-containers --prefix --tail=200`)
+  - Keycloak logs (`kubectl logs -l app=keycloak -n keycloak`)
+  - Cluster events sorted by timestamp (`kubectl get events --sort-by=.lastTimestamp`)
+  - Gateway API resources (Gateways, GRPCRoutes, HTTPRoutes) and managed namespace resources
+- AND each section SHALL be written to both stdout (via `tee`) and a file in `e2e-diagnostics/`
 - AND upload them as a GitHub Actions artifact named `e2e-diagnostics`
 
 #### Scenario: Success -- No Artifacts
@@ -302,7 +330,7 @@ The `deploy/` directory SHALL use a kustomize base/overlay structure to support 
 - GIVEN `deploy/kind/kustomization.yaml` references `../base` as a resource
 - WHEN `kustomize build deploy/kind/` is executed
 - THEN the output SHALL include all base resources (namespace, postgres, api-server, controller, controller-rbac, web-console)
-- AND Kind-specific resources: networking Gateway with `gatewayClassName: cloud-provider-kind`, cert-manager certificates for `*.hypershell.localhost` and `*.gw.localhost`, HTTPRoutes for component services, CoreDNS Corefile, Keycloak deployment
+- AND Kind-specific resources: networking Gateway with `gatewayClassName: cloud-provider-kind`, cert-manager certificates for `*.hypershell.localhost` and `*.gw.localhost`, HTTPRoutes for component services, CoreDNS Corefile, OIDC secrets, and Kustomize patches for OIDC configuration (JWT flags, Keycloak hostname, control-plane and web-console OIDC env vars)
 
 #### Scenario: OpenShift Overlay
 
@@ -359,20 +387,29 @@ deploy/
     controller.yaml
     controller-rbac.yaml
     web-console.yaml
-  kind/                    -- overlay (existing directory, restructured)
-    kustomization.yaml     -- references ../base
+    keycloak/              -- Keycloak deployment + realm import + theme
+    certificates/          -- CA chain for TLS
+    networkpolicies.yaml
+  kind/                    -- overlay (extends base)
+    kustomization.yaml     -- references ../base, OIDC patches
     kind-config.yaml
+    certificates.yaml      -- cert-manager Certificates + Issuers
+    gateway.yaml           -- networking Gateway (cloud-provider-kind)
+    httproutes.yaml        -- HTTPRoutes for component services
+    oidc-secrets.yaml      -- control-plane OIDC client secret
     coredns/
       Corefile
-    prerequisites/
-      certificates.yaml
-      networking-gateway.yaml
-      httproutes.yaml
-      keycloak.yaml
-  openshift/               -- new overlay (follow-up)
+    infrastructure/        -- CRDs + controllers (cert-manager, Gateway API, Agent Sandbox)
+      kustomization.yaml
+  openshift/               -- OpenShift overlay (extends base)
     kustomization.yaml     -- references ../base
     route.yaml
     scc.yaml
+    certificates.yaml
+    networkpolicies.yaml
+    infrastructure/
+      kustomization.yaml
+      gatewayclass.yaml
 .github/workflows/
   e2e.yml                  -- CI e2e workflow
 ```
@@ -403,7 +440,7 @@ deploy/
 | CI pulls Konflux-built images, not rebuild | Images are built by Konflux (the existing build pipeline). The e2e workflow gates on those builds and pulls images by digest, avoiding duplicate builds and ensuring CI tests the exact images that ship. This is expected to cover HYPERSHELL-16 |
 | Diagnostic artifacts only on failure | Uploading pod logs, events, and describes on every run wastes GitHub Actions storage. Conditional upload on failure provides debugging information when needed |
 | 20-minute CI timeout | Kind cluster creation takes ~2 min, image pulls ~1-2 min, e2e tests ~5-8 min. A 20-minute ceiling provides margin for slow GitHub runners while preventing runaway jobs |
-| e2e workflow skips for irrelevant changes | SDK-only or docs-only PRs do not affect the e2e path. Skipping avoids CI time and Konflux build overhead. The `detect-components.sh` infrastructure tracks `api_server`, `control_plane`, and `pr_test` component paths |
+| e2e workflow skips for irrelevant changes | SDK-only or docs-only PRs do not affect the e2e path. Skipping avoids CI time and Konflux build overhead. The `detect-components.sh` infrastructure tracks `api_server`, `control_plane`, `pr_test`, and `e2e` component paths for "should we re-run e2e" decisions. Separately, Konflux image builds only trigger on changes under `components/<name>/` source paths -- the workflow checks the actual diff to distinguish e2e-relevant infrastructure changes (which use baseline images) from source changes (which require Konflux-built images) |
 | `make kind-up` accepts image overrides | Passing `IMAGE_TAG=<digest>` or per-component image variables to `make kind-up` allows CI to deploy Konflux-built images directly without a separate load step. Developers can also use this to test specific image versions locally |
 | Backward-compatible migration | The refactoring does not change `make kind-up`. `scripts/kind/up.sh` can be migrated to use `kustomize build deploy/kind/` incrementally. The spec defines the target state; the migration path is incremental |
 | OpenShift overlay and driver are follow-up | The `deploy/openshift/` overlay (Route, SCC) and the `tests/e2e/drivers/openshift.sh` driver are not part of this spec's implementation scope. The driver interface is defined here to establish the contract; the OpenShift implementation and its CI job come in a subsequent iteration |
