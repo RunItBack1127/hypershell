@@ -67,7 +67,9 @@ patches:
                       secretKeyRef:
                         name: hypershell-oidc-session
                         key: session-secret
-  # --- API server: enable JWT + JWK cert URL ---
+  # --- API server: enable JWT + JWK cert URL + bypass paths ---
+  # Index 6 = --enable-jwt=false in deploy/base/api-server.yaml.
+  # If the base command array changes, update this index.
   - target:
       kind: Deployment
       name: hypershell-api-server
@@ -79,6 +81,12 @@ patches:
       - op: add
         path: /spec/template/spec/containers/0/command/-
         value: "--jwk-cert-url=http://keycloak-service.keycloak.svc.cluster.local:8080/realms/hypershell/protocol/openid-connect/certs"
+      - op: add
+        path: /spec/template/spec/containers/0/command/-
+        value: "--auth-bypass-paths=/healthcheck,/metrics,/api/hypershell/v1/openapi,/openapi"
+      - op: add
+        path: /spec/template/spec/containers/0/command/-
+        value: "--auth-bypass-methods=/grpc.health.v1.Health/,/grpc.reflection.v1alpha.ServerReflection/,/hypershell.v1.FleetService/WatchFleets,/hypershell.v1.GatewayService/WatchGateways,/hypershell.v1.GatewayReleaseService/WatchGatewayReleases,/hypershell.v1.ManagedClusterService/WatchManagedClusters,/hypershell.v1.ManagedDatabaseService/WatchManagedDatabases,/hypershell.v1.GatewayNetworkService/WatchGatewayNetworks"
   # --- Keycloak: HTTPS hostname via gateway ---
   - patch: |
       apiVersion: apps/v1

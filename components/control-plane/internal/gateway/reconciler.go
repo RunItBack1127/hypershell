@@ -360,8 +360,21 @@ func waitForSecret(ctx context.Context, clientset *kubernetes.Clientset, namespa
 	watchCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	fieldSelector := fields.OneTermEqualSelector("metadata.name", name).String()
+
+	list, err := clientset.CoreV1().Secrets(namespace).List(watchCtx, metav1.ListOptions{
+		FieldSelector: fieldSelector,
+	})
+	if err != nil {
+		return fmt.Errorf("list secret %s/%s: %w", namespace, name, err)
+	}
+	if len(list.Items) > 0 {
+		return nil
+	}
+
 	watcher, err := clientset.CoreV1().Secrets(namespace).Watch(watchCtx, metav1.ListOptions{
-		FieldSelector: fields.OneTermEqualSelector("metadata.name", name).String(),
+		FieldSelector:   fieldSelector,
+		ResourceVersion: list.ResourceVersion,
 	})
 	if err != nil {
 		return fmt.Errorf("watch secret %s/%s: %w", namespace, name, err)
@@ -375,7 +388,10 @@ func waitForSecret(ctx context.Context, clientset *kubernetes.Clientset, namespa
 		}
 	}
 
-	return fmt.Errorf("timed out waiting for secret %s/%s", namespace, name)
+	if watchCtx.Err() != nil {
+		return fmt.Errorf("timed out waiting for secret %s/%s: %w", namespace, name, watchCtx.Err())
+	}
+	return fmt.Errorf("watch closed for secret %s/%s before it appeared", namespace, name)
 }
 
 func waitForDeploymentReady(ctx context.Context, clientset *kubernetes.Clientset, namespace, name string, timeout time.Duration) error {

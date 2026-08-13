@@ -227,18 +227,17 @@ OIDC is always enabled in the Kind cluster. `make kind-up` configures all compon
 
 `make kind-up` SHALL:
 
-1. Deploy the API server with `API_ENV=development_oidc` and `--jwk-cert-url=http://keycloak-service.keycloak.svc.cluster.local:8080/realms/hypershell/protocol/openid-connect/certs`
+1. Deploy the API server with `--enable-jwt=true`, `--jwk-cert-url`, `--auth-bypass-paths`, and `--auth-bypass-methods` flags via Kustomize JSON patch (direct flag override avoids dependency on `API_ENV=development_oidc` which may not exist in baseline images)
 2. Deploy the web console BFF with:
-   - `OIDC_ISSUER=http://keycloak.hypershell.localhost:8080/realms/hypershell`
+   - `OIDC_ISSUER=https://keycloak.hypershell.localhost/realms/hypershell`
    - `OIDC_CLIENT_ID=hypershell-frontend`
    - `SESSION_SECRET` generated via `openssl rand -hex 32` during `kind-up` and stored in a Kubernetes Secret
 3. Create the gateway resource with OIDC configuration per `local-development.spec.md`
 4. Print OIDC connection information in the banner:
    ```
-   OIDC Authentication: ENABLED
-   Keycloak:            https://keycloak.hypershell.localhost (admin/admin)
-   Login:               https://console.hypershell.localhost/auth/login
-   Test users:          admin/admin (admins + users), developer/developer (users only)
+   Keycloak:     https://keycloak.hypershell.localhost (admin/admin)
+   Login:        https://console.hypershell.localhost/auth/login
+   Test users:   admin/admin (admins + users), developer/developer (users only)
    ```
 
 #### Keycloak Client Configuration (Kind)
