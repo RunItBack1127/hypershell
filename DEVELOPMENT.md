@@ -182,26 +182,11 @@ KIND_KEYCLOAK_URL=https://keycloak.example.com/realms/hypershell make kind-up
 This skips the local Keycloak deployment and points the gateway OIDC issuer at
 the external URL.
 
-## OIDC Authentication (opt-in)
+## OIDC Authentication
 
-By default, the Kind cluster runs without OIDC authentication: the API server
-disables JWT validation and the web console serves pages without requiring login.
-Enable OIDC to test the full authentication flow end-to-end:
-
-```bash
-KIND_ENABLE_OIDC=true make kind-up
-```
-
-### What changes when OIDC is enabled
-
-| Component | Default (no OIDC) | With OIDC |
-|-----------|-------------------|-----------|
-| API server | `--enable-jwt=false` | `API_ENV=development_oidc`, JWK cert URL configured |
-| Web console | No session, no login | `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `SESSION_SECRET` configured |
-| Gateway seed | Fleet, cluster, release, DB only | Also creates a Gateway with OIDC config |
-
-Keycloak deploys in both modes. OIDC mode patches the API server and web console
-deployments at runtime (the base YAML manifests are unchanged).
+The Kind cluster runs with OIDC authentication enabled. Keycloak is deployed as
+the identity provider and all components are configured for JWT validation and
+session management during `make kind-up`.
 
 ### Browser login flow
 
@@ -284,14 +269,14 @@ reapplies manifests and waits for readiness. Swapped components are preserved.
 | `KIND_HOST_MOUNT_PATH` | Repository root | Host directory mounted into Kind nodes |
 | `KIND_KEYCLOAK_URL` | (unset) | External Keycloak URL; skips local deploy |
 | `KEYCLOAK_OIDC_ISSUER` | `http://keycloak.hypershell.localhost:8080/realms/hypershell` | OIDC issuer URL |
-| `KIND_ENABLE_OIDC` | (unset) | Set to `true` to enable OIDC authentication across all components |
 | `KIND_PULL_SECRET` | (unset) | Path to pull secret YAML for private registries |
 | `IMAGE_REGISTRY` | `quay.io/redhat-services-prod/hcm-eng-prod-tenant/hypershell-main` | Container registry |
 | `IMAGE_TAG` | `latest` | Image tag for baseline images |
 | `LOCAL_IMAGES` | (unset) | Set to `true` for offline baseline builds |
 | `CONTAINER_ENGINE` | Auto-detected | `podman` or `docker` |
 | `GATEWAY_API_VERSION` | `v1.5.1` | Gateway API CRD version |
-| `CLOUD_PROVIDER_KIND_VERSION` | `v0.11.1` | cloud-provider-kind version |
+| `CLOUD_PROVIDER_KIND_REPO` | `https://github.com/squizzi/cloud-provider-kind.git` | cloud-provider-kind git repo |
+| `CLOUD_PROVIDER_KIND_BRANCH` | `hypershell` | cloud-provider-kind branch to build |
 | `CERT_MANAGER_VERSION` | `v1.21.1` | cert-manager version |
 | `KIND_DB_IMAGE` | `registry.access.redhat.com/hi/postgresql:18.4@sha256:9b19...` | Database image for Gateway; override for OSS dev |
 | `KIND_NO_SUDO` | (unset) | Set to `true` to skip sudo operations |
@@ -368,13 +353,15 @@ The gateway becomes reachable at
 port-forward needed. The control plane writes this address back to the API
 server's `route_address` field.
 
-### Why Kind requires port-forward
+### Gateway TLS in Kind
 
 The networking Gateway's `*.gw.localhost` listener uses TLS Terminate mode,
-which strips the external TLS and forwards plaintext to the backend. But
+which strips the external TLS and forwards plaintext to the backend.
 openshell-gateway pods expect TLS connections (they serve gRPC with their own
-cert-manager certificates). On OpenShift this is solved with BackendTLSPolicy
-(re-encryption), which cloud-provider-kind does not support.
+cert-manager certificates). BackendTLSPolicy instructs the gateway
+implementation to re-encrypt traffic to the backend. The `kind-prereqs` target
+builds cloud-provider-kind from a fork that adds BackendTLSPolicy support,
+so per-tenant gateways work without port-forward workarounds.
 
 ### Creating a gateway with OIDC
 
@@ -430,9 +417,7 @@ LOCAL_IMAGES=true make kind-up
 ### cloud-provider-kind not found
 
 ```bash
-brew install cloud-provider-kind
-# or
-go install sigs.k8s.io/cloud-provider-kind@latest
+make kind-prereqs
 ```
 
 ### DNS resolution not working

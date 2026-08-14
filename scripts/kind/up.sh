@@ -27,18 +27,13 @@ else
 fi
 echo ""
 
-# --- Podman + kind compatibility check ---
-# kind v0.32.0 has a ListClusters bug with podman 6+ (kubernetes-sigs/kind#4231).
-# Build patched binaries into ./bin/ automatically if needed.
-if [[ "$(basename "${CONTAINER_ENGINE}")" == "podman" ]]; then
-  kind_ver="$(kind version 2>/dev/null | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' || true)"
-  if [[ "${kind_ver}" == "v0.32.0" ]]; then
-    warn "kind ${kind_ver} is incompatible with podman 6+ (kubernetes-sigs/kind#4231)"
-    info "Building patched cloud-provider-kind into ./bin/..."
-    make -C "${REPO_ROOT}" kind-prereqs
-    export PATH="${REPO_ROOT}/bin:${PATH}"
-  fi
-fi
+# --- Build cloud-provider-kind from fork ---
+# The fork (squizzi/cloud-provider-kind branch hypershell) adds BackendTLSPolicy
+# support (TLS re-encryption) and HTTP/2 protocol options for GRPCRoute backends.
+# Build once into ./bin/ and prepend to PATH so up.sh always finds it.
+info "Ensuring cloud-provider-kind is built from fork..."
+make -C "${REPO_ROOT}" kind-prereqs
+export PATH="${REPO_ROOT}/bin:${PATH}"
 
 # --- Cluster creation (idempotent) ---
 header "Cluster"
@@ -66,12 +61,123 @@ for i in $(seq 1 15); do
 done
 echo ""
 
-# --- Create namespace ---
-header "Namespace"
-kube create namespace "${KIND_NAMESPACE}" --dry-run=client -o yaml | \
-  kube apply -f -
+# --- Verify and start cloud-provider-kind ---
+header "cloud-provider-kind"
+CPK_RUNNING=false
 
+# Returns 0 if a running cloud-provider-kind can still enumerate the kind
+# cluster, 1 if it is stuck. A stale runtime connection makes the daemon spin
+# on "failed to list clusters" so it never assigns LoadBalancer/Gateway
+# addresses - reusing such an instance silently breaks networking.
+cpk_healthy() {
+  # The daemon lists clusters via the same container engine we use here; if the
+  # CLI cannot, neither can the daemon.
+  ${CONTAINER_ENGINE} ps -a --filter label=io.x-k8s.kind.cluster >/dev/null 2>&1 || return 1
+  # A recent, unrecovered list failure at the tail of the log is the signature.
+  if [[ -f "${CPK_LOG}" ]] && tail -n 5 "${CPK_LOG}" 2>/dev/null | grep -q "failed to list clusters"; then
+    return 1
+  fi
+  return 0
+}
+
+start_cpk() {
+  # Remove orphaned proxy containers before launching. A fresh daemon binds its
+  # xDS server to a new port; proxies left over from a prior daemon keep
+  # pointing at the dead xDS port and serve stale config (e.g. old Service
+  # ClusterIPs), which surfaces as 503s through the Gateway. Deleting them forces
+  # a clean rebuild against the current cluster.
+  local stale
+  stale=$(${CONTAINER_ENGINE} ps -aq --filter "name=kindccm" 2>/dev/null || true)
+  if [[ -n "${stale}" ]]; then
+    info "Removing stale cloud-provider-kind proxy containers..."
+    # shellcheck disable=SC2086
+    ${CONTAINER_ENGINE} rm -f ${stale} >/dev/null 2>&1 || true
+  fi
+
+  info "Starting cloud-provider-kind..."
+  if nohup cloud-provider-kind --enable-lb-port-mapping >"${CPK_LOG}" 2>&1 &
+     sleep 2 && pgrep -f "cloud-provider-kind" >/dev/null 2>&1; then
+    CPK_RUNNING=true
+    success "cloud-provider-kind started (without sudo)"
+  elif [[ "${HAVE_SUDO}" == "true" ]]; then
+    info "Retrying with sudo..."
+    sudo -E nohup cloud-provider-kind --enable-lb-port-mapping >"${CPK_LOG}" 2>&1 &
+    sleep 2
+    if pgrep -f "cloud-provider-kind" >/dev/null 2>&1; then
+      CPK_RUNNING=true
+      success "cloud-provider-kind started (with sudo)"
+    else
+      error "cloud-provider-kind failed to start - check ${CPK_LOG}"
+      exit 1
+    fi
+  else
+    warn "cloud-provider-kind requires sudo on this system - will use kubectl port-forward instead"
+  fi
+}
+
+if ! command -v cloud-provider-kind >/dev/null 2>&1; then
+  if [[ "${HAVE_SUDO}" == "true" ]]; then
+    error "cloud-provider-kind not found in PATH"
+    info "Install via: make kind-prereqs"
+    exit 1
+  else
+    warn "cloud-provider-kind not found - will use kubectl port-forward instead"
+  fi
+elif pgrep -f "cloud-provider-kind" >/dev/null 2>&1; then
+  if cpk_healthy; then
+    warn "cloud-provider-kind already running"
+    CPK_RUNNING=true
+  else
+    warn "cloud-provider-kind already running but unhealthy (cannot list clusters) - restarting"
+    info "  See ${CPK_LOG} for the underlying error"
+    pkill -f "cloud-provider-kind" 2>/dev/null || true
+    [[ "${HAVE_SUDO}" == "true" ]] && sudo pkill -f "cloud-provider-kind" 2>/dev/null || true
+    sleep 2
+    start_cpk
+  fi
+else
+  start_cpk
+fi
+echo ""
+
+# --- Install infrastructure prerequisites via kustomize ---
+header "Infrastructure"
+# Kubernetes 1.33+ may pre-install Gateway API CRDs whose storedVersions
+# contain API versions the experimental bundle no longer serves (e.g. v1 for
+# TCPRoute/UDPRoute).  Delete them first so the apply can re-create them
+# with the correct spec.versions.
+for crd in tcproutes.gateway.networking.k8s.io udproutes.gateway.networking.k8s.io; do
+  kube delete crd "$crd" --ignore-not-found 2>/dev/null || true
+done
+for crd in tcproutes.gateway.networking.k8s.io udproutes.gateway.networking.k8s.io; do
+  kube wait --for=delete crd/"$crd" --timeout=30s 2>/dev/null || true
+done
+info "Installing CRDs and controllers (cert-manager, Gateway API, Agent Sandbox)..."
+kustomize build --load-restrictor=LoadRestrictionsNone deploy/kind/infrastructure | \
+  kube apply --server-side --force-conflicts -f -
+info "Waiting for cert-manager..."
+kube wait --for=condition=available deployment/cert-manager -n cert-manager --timeout=120s
+kube wait --for=condition=available deployment/cert-manager-webhook -n cert-manager --timeout=120s
+info "Waiting for agent-sandbox controller..."
+kube wait --for=condition=available deployment/agent-sandbox-controller -n agent-sandbox-system --timeout=120s
+success "Infrastructure ready"
+echo ""
+
+# --- Build and load local images (offline mode) ---
+FORCE_ROLLOUT=""
+if [[ "${LOCAL_IMAGES:-}" == "true" ]]; then
+  header "Local Images"
+  info "Building baseline images from origin/main..."
+  "${SCRIPT_DIR}/build-images.sh"
+  FORCE_ROLLOUT=true
+  echo ""
+fi
+
+# --- Apply pull secret (if configured) ---
 if [[ -n "${KIND_PULL_SECRET:-}" ]]; then
+  header "Pull Secret"
+  kube create namespace "${KIND_NAMESPACE}" --dry-run=client -o yaml | \
+    kube apply -f -
   info "Applying pull secret from ${KIND_PULL_SECRET}..."
   kube apply -f "${KIND_PULL_SECRET}" -n "${KIND_NAMESPACE}"
   SECRET_NAME=$(kube get -f "${KIND_PULL_SECRET}" -n "${KIND_NAMESPACE}" -o jsonpath='{.metadata.name}')
@@ -85,115 +191,44 @@ if [[ -n "${KIND_PULL_SECRET:-}" ]]; then
     kube patch serviceaccount default -n "${KIND_NAMESPACE}" \
       -p "{\"imagePullSecrets\":[{\"name\":\"${SECRET_NAME}\"}]}"
   fi
-fi
-echo ""
-
-# --- Install Gateway API CRDs ---
-header "Gateway API CRDs"
-info "Installing Gateway API CRDs (${GATEWAY_API_VERSION}, experimental channel)..."
-kube apply --server-side --force-conflicts -f "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/experimental-install.yaml"
-success "Gateway API CRDs installed"
-echo ""
-
-# --- Verify and start cloud-provider-kind ---
-header "cloud-provider-kind"
-CPK_RUNNING=false
-if ! command -v cloud-provider-kind >/dev/null 2>&1; then
-  if [[ "${HAVE_SUDO}" == "true" ]]; then
-    error "cloud-provider-kind not found in PATH"
-    info "Install via: brew install cloud-provider-kind"
-    info "         or: go install sigs.k8s.io/cloud-provider-kind@${CLOUD_PROVIDER_KIND_VERSION}"
-    exit 1
-  else
-    warn "cloud-provider-kind not found - will use kubectl port-forward instead"
-  fi
-elif pgrep -f "cloud-provider-kind" >/dev/null 2>&1; then
-  warn "cloud-provider-kind already running"
-  CPK_RUNNING=true
-else
-  info "Starting cloud-provider-kind..."
-  if nohup cloud-provider-kind --enable-lb-port-mapping >/tmp/cloud-provider-kind.log 2>&1 &
-     sleep 2 && pgrep -f "cloud-provider-kind" >/dev/null 2>&1; then
-    CPK_RUNNING=true
-    success "cloud-provider-kind started (without sudo)"
-  elif [[ "${HAVE_SUDO}" == "true" ]]; then
-    info "Retrying with sudo..."
-    sudo -E nohup cloud-provider-kind --enable-lb-port-mapping >/tmp/cloud-provider-kind.log 2>&1 &
-    sleep 2
-    if pgrep -f "cloud-provider-kind" >/dev/null 2>&1; then
-      CPK_RUNNING=true
-      success "cloud-provider-kind started (with sudo)"
-    else
-      error "cloud-provider-kind failed to start - check /tmp/cloud-provider-kind.log"
-      exit 1
-    fi
-  else
-    warn "cloud-provider-kind requires sudo on this system - will use kubectl port-forward instead"
-  fi
-fi
-echo ""
-
-# --- Install cert-manager ---
-header "cert-manager"
-info "Installing cert-manager ${CERT_MANAGER_VERSION}..."
-if kube get namespace cert-manager >/dev/null 2>&1; then
-  warn "cert-manager namespace exists, skipping install"
-else
-  kube apply -f "https://github.com/cert-manager/cert-manager/releases/download/${CERT_MANAGER_VERSION}/cert-manager.yaml"
-fi
-info "Waiting for cert-manager..."
-kube wait --for=condition=available deployment/cert-manager -n cert-manager --timeout=120s
-kube wait --for=condition=available deployment/cert-manager-webhook -n cert-manager --timeout=120s
-success "cert-manager ready"
-echo ""
-
-# --- Install Agent Sandbox CRDs ---
-header "Agent Sandbox"
-info "Installing Agent Sandbox controller (${AGENT_SANDBOX_VERSION})..."
-if kube get namespace agent-sandbox-system >/dev/null 2>&1; then
-  warn "agent-sandbox-system namespace exists, skipping install"
-else
-  kube apply -f "https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${AGENT_SANDBOX_VERSION}/sandbox.yaml"
-fi
-info "Waiting for agent-sandbox controller..."
-kube wait --for=condition=available deployment/agent-sandbox-controller -n agent-sandbox-system --timeout=120s
-success "Agent Sandbox controller ready"
-echo ""
-
-# --- Build and load local images (offline mode) ---
-FORCE_ROLLOUT=""
-if [[ "${LOCAL_IMAGES:-}" == "true" ]]; then
-  header "Local Images"
-  info "Building baseline images from origin/main..."
-  "${SCRIPT_DIR}/build-images.sh"
-  FORCE_ROLLOUT=true
   echo ""
 fi
 
-# --- Deploy Keycloak (cluster-wide, one instance shared by all namespaces) ---
-header "Keycloak"
-if [[ -z "${KIND_KEYCLOAK_URL:-}" ]]; then
-  info "Deploying local Keycloak in 'keycloak' namespace..."
-  kube create namespace keycloak --dry-run=client -o yaml | \
-    kube apply -f -
-  kustomize build deploy/base/keycloak-theme | kube apply -f -
-  kube apply -f deploy/kind/prerequisites/keycloak.yaml
-  info "Waiting for Keycloak..."
-  kube wait --for=condition=available deployment/keycloak -n keycloak --timeout=180s
-  success "Keycloak ready"
-else
-  warn "Using external Keycloak: ${KIND_KEYCLOAK_URL}"
-fi
+# --- OIDC session secret (must exist before kustomize apply) ---
+header "OIDC Secrets"
+kube create namespace "${KIND_NAMESPACE}" --dry-run=client -o yaml | kube apply -f -
+info "Creating OIDC session secret..."
+SESSION_SECRET=$(openssl rand -hex 32)
+kube create secret generic hypershell-oidc-session \
+  -n "${KIND_NAMESPACE}" \
+  --from-literal=session-secret="${SESSION_SECRET}" \
+  --dry-run=client -o yaml | kube apply -f -
+success "OIDC session secret created"
 echo ""
 
-# --- Apply manifests via kustomize (scale down swapped components) ---
+# --- Deploy all components via kustomize ---
 header "Deploying Components"
-info "Rendering Kind manifests via kustomize build..."
-kustomize build deploy/kind | sed "s|__KIND_DB_IMAGE__|${KIND_DB_IMAGE}|g" | kube apply -f -
+info "Applying Kind manifests via kustomize..."
+kustomize build deploy/kind | kube apply -f -
 
 info "Waiting for PostgreSQL..."
 kube wait --for=condition=available deployment/hypershell-postgres -n "${KIND_NAMESPACE}" --timeout=300s
 success "PostgreSQL ready"
+
+if [[ -z "${KIND_KEYCLOAK_URL:-}" ]]; then
+  info "Waiting for Keycloak..."
+  kube wait --for=condition=available deployment/keycloak -n keycloak --timeout=180s
+  success "Keycloak ready"
+fi
+
+# The API server enforces JWT and loads Keycloak's JWKS at startup. If it
+# started before Keycloak was serving keys it is stuck in CrashLoopBackoff;
+# restart it now that Keycloak is ready so a fresh pod (with no backoff delay)
+# comes up on the first try instead of waiting out the backoff timer.
+if ! is_swapped api-server; then
+  info "Restarting API server now that Keycloak serves JWKS..."
+  kube rollout restart deployment/hypershell-api-server -n "${KIND_NAMESPACE}"
+fi
 
 # The controller's gRPC watch streams must connect to a running API server.
 # With simultaneous deployment the controller may start before the API server
@@ -319,7 +354,11 @@ if [[ "${CPK_RUNNING}" == "true" ]]; then
       warn "Could not discover Gateway proxy port - check '${CONTAINER_ENGINE} ps --filter name=kindccm-gw'"
     fi
   else
-    warn "Gateway has no address after 60s - cloud-provider-kind may not be running"
+    warn "Gateway has no address after 60s - cloud-provider-kind is not assigning addresses"
+    if [[ -f "${CPK_LOG}" ]]; then
+      warn "Recent cloud-provider-kind log (${CPK_LOG}):"
+      tail -n 10 "${CPK_LOG}" 2>/dev/null | sed 's/^/      /' || true
+    fi
   fi
 else
   info "Skipping Gateway address discovery (no cloud-provider-kind)"
@@ -327,94 +366,45 @@ else
 fi
 echo ""
 
-# --- OIDC configuration (opt-in, after port discovery) ---
-if oidc_enabled; then
-  header "OIDC Configuration"
+# --- OIDC port-suffix overrides (only when port forwarding failed) ---
+PORT_SUFFIX=""
+if [[ -z "${PORT_FORWARD_ACTIVE:-}" ]] && [[ -n "${GATEWAY_PORT:-}" ]]; then
+  PORT_SUFFIX=":${GATEWAY_PORT}"
+fi
 
-  # Determine the external Keycloak OIDC issuer URL.  When running behind the
-  # Gateway API HTTPS listener the browser reaches Keycloak on the same
-  # ephemeral port as every other service.  We set KC_HOSTNAME so Keycloak
-  # generates URLs that match what the browser sees.
-  PORT_SUFFIX=""
-  if [[ -z "${PORT_FORWARD_ACTIVE:-}" ]] && [[ -n "${GATEWAY_PORT:-}" ]]; then
-    PORT_SUFFIX=":${GATEWAY_PORT}"
-  fi
-  OIDC_EXTERNAL_ISSUER="https://${KEYCLOAK_HOSTNAME}${PORT_SUFFIX}/realms/hypershell"
+if [[ -n "${GATEWAY_PORT:-}" ]] && [[ -n "${GW_ADDR:-}" ]] && [[ -z "${PORT_FORWARD_ACTIVE:-}" ]]; then
+  info "Routing in-cluster port ${GATEWAY_PORT} to gateway port 443..."
+  ${CONTAINER_ENGINE} exec "${KIND_CLUSTER_NAME}-control-plane" \
+    iptables -t nat -C PREROUTING -p tcp -d "${GW_ADDR}" --dport "${GATEWAY_PORT}" \
+      -j DNAT --to-destination "${GW_ADDR}:443" 2>/dev/null || \
+  ${CONTAINER_ENGINE} exec "${KIND_CLUSTER_NAME}-control-plane" \
+    iptables -t nat -A PREROUTING -p tcp -d "${GW_ADDR}" --dport "${GATEWAY_PORT}" \
+      -j DNAT --to-destination "${GW_ADDR}:443"
+  success "In-cluster OIDC routing: ${GW_ADDR}:${GATEWAY_PORT} -> ${GW_ADDR}:443"
+fi
 
-  # Route in-cluster traffic for the ephemeral port to the gateway's port 443.
-  # Pods resolve keycloak.hypershell.localhost to the gateway IP via CoreDNS,
-  # but the gateway only listens on 443 internally.  A PREROUTING rule inside
-  # the Kind node maps the ephemeral port to 443 so the OIDC issuer URL is
-  # the same for both browser and in-cluster services.
-  if [[ -n "${GATEWAY_PORT:-}" ]] && [[ -n "${GW_ADDR:-}" ]] && [[ -z "${PORT_FORWARD_ACTIVE:-}" ]]; then
-    info "Routing in-cluster port ${GATEWAY_PORT} to gateway port 443..."
-    ${CONTAINER_ENGINE} exec "${KIND_CLUSTER_NAME}-control-plane" \
-      iptables -t nat -C PREROUTING -p tcp -d "${GW_ADDR}" --dport "${GATEWAY_PORT}" \
-        -j DNAT --to-destination "${GW_ADDR}:443" 2>/dev/null || \
-    ${CONTAINER_ENGINE} exec "${KIND_CLUSTER_NAME}-control-plane" \
-      iptables -t nat -A PREROUTING -p tcp -d "${GW_ADDR}" --dport "${GATEWAY_PORT}" \
-        -j DNAT --to-destination "${GW_ADDR}:443"
-    success "In-cluster OIDC routing: ${GW_ADDR}:${GATEWAY_PORT} -> ${GW_ADDR}:443"
-  fi
+if [[ -n "${PORT_SUFFIX}" ]]; then
+  warn "Port forwarding not active - overriding OIDC URLs with port suffix ${PORT_SUFFIX}"
+  warn "Caveat: gateway OIDC validation expects the canonical issuer"
+  warn "  http://${KEYCLOAK_HOSTNAME}:8080 that the gateway is seeded with. On this"
+  warn "  fallback path Keycloak mints tokens with a port-suffixed issuer, which"
+  warn "  will not match, so gateway token validation will fail. Use port"
+  warn "  forwarding (the default) for end-to-end gateway OIDC."
 
   if [[ -z "${KIND_KEYCLOAK_URL:-}" ]]; then
-    info "Setting Keycloak hostname to ${OIDC_EXTERNAL_ISSUER%/realms/hypershell}..."
     kube set env deployment/keycloak -n keycloak \
       KC_HOSTNAME="https://${KEYCLOAK_HOSTNAME}${PORT_SUFFIX}"
     kube rollout restart deployment/keycloak -n keycloak
     kube wait --for=condition=available deployment/keycloak -n keycloak --timeout=120s
-    success "Keycloak configured for OIDC"
   fi
-
-  if ! is_swapped api-server; then
-    info "Patching API server for OIDC..."
-    kube set env deployment/hypershell-api-server -n "${KIND_NAMESPACE}" -c api-server \
-      API_ENV=development_oidc
-    kube patch deployment hypershell-api-server -n "${KIND_NAMESPACE}" --type=json \
-      -p '[{"op":"add","path":"/spec/template/spec/containers/0/command/-","value":"--jwk-cert-url=http://keycloak-service.keycloak.svc.cluster.local:8080/realms/hypershell/protocol/openid-connect/certs"}]'
-    success "API server patched for OIDC"
-  fi
-
-  info "Creating OIDC session secret..."
-  SESSION_SECRET=$(openssl rand -hex 32)
-  kube create secret generic hypershell-oidc-session \
-    -n "${KIND_NAMESPACE}" \
-    --from-literal=session-secret="${SESSION_SECRET}" \
-    --dry-run=client -o yaml | kube apply -f -
-  success "OIDC session secret created"
 
   if ! is_swapped web-console; then
-    info "Patching web console for OIDC..."
-    # Remove any stale SESSION_SECRET entries before adding the secretKeyRef.
     kube set env deployment/hypershell-web-console -n "${KIND_NAMESPACE}" -c web-console \
-      OIDC_ISSUER="${OIDC_EXTERNAL_ISSUER}" \
-      OIDC_CLIENT_ID="${KEYCLOAK_OIDC_CLIENT_ID}" \
-      OIDC_REDIRECT_URI="https://${CONSOLE_HOSTNAME}${PORT_SUFFIX}/auth/callback" \
-      NODE_TLS_REJECT_UNAUTHORIZED="0" `# local dev only: cert-manager self-signed CA` \
-      SESSION_SECRET-
-    kube set env deployment/hypershell-web-console -n "${KIND_NAMESPACE}" -c web-console \
-      --from=secret/hypershell-oidc-session --keys=session-secret --prefix="" 2>/dev/null || \
-    kube patch deployment hypershell-web-console -n "${KIND_NAMESPACE}" --type=json \
-      -p '[{"op":"add","path":"/spec/template/spec/containers/0/env/-","value":{"name":"SESSION_SECRET","valueFrom":{"secretKeyRef":{"name":"hypershell-oidc-session","key":"session-secret"}}}}]'
-    success "Web console patched for OIDC"
+      OIDC_ISSUER="https://${KEYCLOAK_HOSTNAME}${PORT_SUFFIX}/realms/hypershell" \
+      OIDC_REDIRECT_URI="https://${CONSOLE_HOSTNAME}${PORT_SUFFIX}/auth/callback"
   fi
-
-  if ! is_swapped control-plane; then
-    info "Patching control plane for OIDC..."
-    kube create secret generic hypershell-cp-oidc \
-      -n "${KIND_NAMESPACE}" \
-      --from-literal=client-secret=control-plane-secret \
-      --dry-run=client -o yaml | kube apply -f -
-    kube set env deployment/hypershell-controller -n "${KIND_NAMESPACE}" -c controller \
-      OIDC_ISSUER="http://keycloak-service.keycloak.svc.cluster.local:8080/realms/hypershell" \
-      OIDC_CLIENT_ID=hypershell-control-plane
-    kube patch deployment hypershell-controller -n "${KIND_NAMESPACE}" --type=json \
-      -p '[{"op":"add","path":"/spec/template/spec/containers/0/env/-","value":{"name":"OIDC_CLIENT_SECRET","valueFrom":{"secretKeyRef":{"name":"hypershell-cp-oidc","key":"client-secret"}}}}]'
-    success "Control plane patched for OIDC"
-  fi
-
-  echo ""
 fi
+echo ""
 
 # --- Wait for readiness ---
 header "Readiness"
@@ -441,29 +431,27 @@ cleanup_pf() { kill "${PF_PID}" 2>/dev/null || true; wait "${PF_PID}" 2>/dev/nul
 trap cleanup_pf EXIT
 sleep 2
 
-# When OIDC is enabled, obtain a Bearer token for API calls.
+# Obtain a Bearer token from Keycloak for API calls.
 API_AUTH_HEADER=""
-if oidc_enabled; then
-  info "Obtaining API token from Keycloak..."
-  KC_TOKEN_URL="http://localhost:8080/realms/hypershell/protocol/openid-connect/token"
-  kube port-forward svc/keycloak-service -n keycloak 8080:8080 >/dev/null 2>&1 &
-  KC_PF_PID=$!
-  cleanup_pf_orig=$(declare -f cleanup_pf | tail -n +2)
-  cleanup_pf() { kill "${KC_PF_PID}" 2>/dev/null || true; eval "${cleanup_pf_orig}"; }
-  sleep 2
-  TOKEN_RESP=$(curl -sS -X POST "${KC_TOKEN_URL}" \
-    -d "grant_type=client_credentials" \
-    -d "client_id=hypershell-control-plane" \
-    -d "client_secret=control-plane-secret" 2>&1 || true)
-  API_TOKEN=$(echo "${TOKEN_RESP}" | grep -o '"access_token":"[^"]*"' | cut -d'"' -f4 || true)
-  if [[ -n "${API_TOKEN}" ]]; then
-    API_AUTH_HEADER="Authorization: Bearer ${API_TOKEN}"
-    success "API token obtained"
-  else
-    warn "Could not obtain API token: ${TOKEN_RESP:0:200}"
-  fi
-  kill "${KC_PF_PID}" 2>/dev/null || true
+info "Obtaining API token from Keycloak..."
+KC_TOKEN_URL="http://localhost:8080/realms/hypershell/protocol/openid-connect/token"
+kube port-forward svc/keycloak-service -n keycloak 8080:8080 >/dev/null 2>&1 &
+KC_PF_PID=$!
+cleanup_pf_orig=$(declare -f cleanup_pf | tail -n +2)
+cleanup_pf() { kill "${KC_PF_PID}" 2>/dev/null || true; eval "${cleanup_pf_orig}"; }
+sleep 2
+TOKEN_RESP=$(curl -sS -X POST "${KC_TOKEN_URL}" \
+  -d "grant_type=client_credentials" \
+  -d "client_id=hypershell-control-plane" \
+  -d "client_secret=control-plane-secret" 2>&1 || true)
+API_TOKEN=$(echo "${TOKEN_RESP}" | grep -o '"access_token":"[^"]*"' | cut -d'"' -f4 || true)
+if [[ -n "${API_TOKEN}" ]]; then
+  API_AUTH_HEADER="Authorization: Bearer ${API_TOKEN}"
+  success "API token obtained"
+else
+  warn "Could not obtain API token: ${TOKEN_RESP:0:200}"
 fi
+kill "${KC_PF_PID}" 2>/dev/null || true
 
 # Helper: POST a JSON resource; prints the response body on success or failure.
 api_post() {
@@ -474,7 +462,7 @@ api_post() {
   fi
   curl -sS -w "\n%{http_code}" -X POST "${url}" \
     -H "Content-Type: application/json" \
-    "${auth_args[@]}" \
+    ${auth_args[@]+"${auth_args[@]}"} \
     -d "${data}" 2>&1 || true
 }
 
@@ -548,11 +536,13 @@ if [[ -z "${seed_failed}" ]]; then
   fi
 fi
 
-if [[ -z "${seed_failed}" ]] && oidc_enabled; then
+if [[ -z "${seed_failed}" ]]; then
   info "Creating Gateway with OIDC..."
   OIDC_JSON="{\\\"issuer\\\":\\\"${KEYCLOAK_OIDC_ISSUER}\\\",\\\"audience\\\":\\\"${KEYCLOAK_OIDC_AUDIENCE}\\\",\\\"roles_claim\\\":\\\"groups\\\",\\\"admin_role\\\":\\\"hypershell-admins\\\",\\\"user_role\\\":\\\"hypershell-users\\\"}"
+  # namespace is server-derived (BeforeCreate sets openshell-<hex> from the ksuid);
+  # sending it is rejected as an unknown field (ErrorMalformedRequest / id 17).
   GW_RAW=$(api_post "${API_URL}/api/hypershell/v1/gateways" \
-    "{\"name\":\"dev-gateway\",\"fleet_id\":\"${FLEET_ID}\",\"cluster_id\":\"${CLUSTER_ID}\",\"release_id\":\"${RELEASE_ID}\",\"database_id\":\"${DATABASE_ID}\",\"namespace\":\"openshell-dev\",\"oidc\":\"${OIDC_JSON}\"}")
+    "{\"name\":\"dev-gateway\",\"fleet_id\":\"${FLEET_ID}\",\"cluster_id\":\"${CLUSTER_ID}\",\"release_id\":\"${RELEASE_ID}\",\"database_id\":\"${DATABASE_ID}\",\"oidc\":\"${OIDC_JSON}\"}")
   GW_HTTP=$(echo "${GW_RAW}" | tail -1)
   GW_RESP=$(echo "${GW_RAW}" | sed '$d')
   GATEWAY_ID=$(extract_id "${GW_RESP}")
@@ -605,6 +595,9 @@ if [[ "${CPK_RUNNING}" == "true" ]]; then
   else
     info "Keycloak:     ${KIND_KEYCLOAK_URL}"
   fi
+
+  info "Login:        https://${CONSOLE_HOSTNAME}${PORT_SUFFIX}/auth/login"
+  info "Test users:   admin/admin (admins + users), developer/developer (users only)"
 else
   info "HTTP API:     http://localhost:8000"
   info "Web Console:  http://localhost:3000"
@@ -612,10 +605,12 @@ else
 
   if [[ -z "${KIND_KEYCLOAK_URL:-}" ]]; then
     info "Keycloak:     http://localhost:8080 (admin/admin)"
-    info "OIDC Issuer:  ${KEYCLOAK_OIDC_ISSUER}"
   else
     info "Keycloak:     ${KIND_KEYCLOAK_URL}"
   fi
+
+  info "Login:        http://localhost:3000/auth/login"
+  info "Test users:   admin/admin (admins + users), developer/developer (users only)"
 
   echo ""
   warn "Running without cloud-provider-kind - no TLS or hostname-based routing."
@@ -624,14 +619,6 @@ else
     info "To use full Gateway routing, run: cloud-provider-kind --enable-lb-port-mapping"
     info "Then: make kind-fix-ports"
   fi
-fi
-
-if oidc_enabled; then
-  echo ""
-  info "OIDC Authentication: ENABLED"
-  info "Keycloak:            https://${KEYCLOAK_HOSTNAME}${PORT_SUFFIX:-} (admin/admin)"
-  info "Login:               https://${CONSOLE_HOSTNAME}${PORT_SUFFIX:-}/auth/login"
-  info "Test users:          admin/admin (admins + users), developer/developer (users only)"
 fi
 
 echo ""

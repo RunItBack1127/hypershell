@@ -59,7 +59,7 @@ fi
 # shellcheck source=drivers/kind.sh
 source "$DRIVER_FILE"
 
-REQUIRED_FUNCTIONS=(discover_api_host discover_gateway_endpoint get_cluster_domain get_cli_binary wait_for_gateway_route acquire_oidc_token)
+REQUIRED_FUNCTIONS=(discover_api_host discover_gateway_endpoint get_cluster_domain get_cli_binary wait_for_gateway_route acquire_oidc_token api_curl)
 for fn in "${REQUIRED_FUNCTIONS[@]}"; do
   if ! declare -f "$fn" >/dev/null 2>&1; then
     red "ERROR: Driver '${E2E_INFRA_DRIVER}' does not implement required function: ${fn}"
@@ -105,7 +105,11 @@ cleanup() {
   fi
   if [[ "$E2E_SKIP_CLEANUP" != "1" && -n "$GW_ID" ]]; then
     dim "  Cleaning up gateway ${GW_NAME}..."
-    curl -sk -X DELETE "${API_HOST}/api/hypershell/v1/gateways/${GW_ID}" &>/dev/null || true
+    # JWT is enforced, so the DELETE needs a bearer token. The token acquired
+    # earlier may have expired during provisioning, so refresh best-effort before
+    # deleting; cleanup is non-fatal, so ignore failures.
+    acquire_oidc_token 2>/dev/null || true
+    api_curl -X DELETE "${API_HOST}/api/hypershell/v1/gateways/${GW_ID}" &>/dev/null || true
   fi
 }
 trap cleanup EXIT
@@ -125,13 +129,14 @@ echo ""
 bold "HyperShell OpenShell Gateway End-to-End Test"
 sep
 echo ""
-printf '  %s\n' "1. Gateway provisioning via HyperShell API (OIDC)"
-printf '  %s\n' "2. Gateway infrastructure verification"
-printf '  %s\n' "3. OIDC token acquisition"
-printf '  %s\n' "4. Route discovery + openshell CLI registration"
-printf '  %s\n' "5. Gateway connectivity"
-printf '  %s\n' "6. Sandbox lifecycle (create → ready)"
-printf '  %s\n' "7. Sandbox interaction"
+printf '  %s\n' "1. Infrastructure validation"
+printf '  %s\n' "2. Gateway provisioning via HyperShell API (OIDC)"
+printf '  %s\n' "3. Gateway infrastructure verification"
+printf '  %s\n' "4. OIDC token acquisition"
+printf '  %s\n' "5. Route discovery + openshell CLI registration"
+printf '  %s\n' "6. Gateway connectivity"
+printf '  %s\n' "7. Sandbox lifecycle (create → ready)"
+printf '  %s\n' "8. Sandbox interaction"
 echo ""
 dim  "  Driver:            ${E2E_INFRA_DRIVER}"
 dim  "  HyperShell API:    ${API_HOST}"
@@ -141,14 +146,167 @@ dim  "  Sandbox timeout:   ${E2E_SANDBOX_TIMEOUT}s"
 echo ""
 sep
 
-# ── 1. gateway provisioning ────────────────────────────────────────────────
+# ── 0. OIDC authentication verification ──────────────────────────────────
 
 echo ""
-bold "1. Gateway Provisioning via HyperShell API"
+bold "0. OIDC Authentication Verification"
 echo ""
 
-show_cmd "curl -sk ${API_HOST}/api/hypershell/v1/gateways?search=name%3D${GW_NAME}"
-EXISTING_GW=$(curl -sk "${API_HOST}/api/hypershell/v1/gateways?search=name%3D${GW_NAME}" 2>/dev/null || true)
+# Acquire a token for authenticated API calls
+acquire_oidc_token
+if [[ -n "${_OIDC_ACCESS_TOKEN}" ]]; then
+  _API_AUTH_HEADER="Authorization: Bearer ${_OIDC_ACCESS_TOKEN}"
+  pass "OIDC token acquired for API authentication"
+else
+  fail_test "Could not acquire OIDC token for API authentication"
+  exit 1
+fi
+
+# Verify: unauthenticated API requests return 401
+show_cmd "curl -sk -o /dev/null -w '%{http_code}' ${API_HOST}/api/hypershell/v1/gateways (no auth)"
+UNAUTH_STATUS=$(curl -sk -o /dev/null -w '%{http_code}' "${API_HOST}/api/hypershell/v1/gateways" 2>/dev/null || true)
+if [[ "$UNAUTH_STATUS" == "401" ]]; then
+  pass "API server rejects unauthenticated requests (401)"
+else
+  fail_test "Expected 401 for unauthenticated request, got ${UNAUTH_STATUS}"
+fi
+
+# Verify: authenticated API requests return 200
+show_cmd "curl -sk -H 'Authorization: Bearer ...' ${API_HOST}/api/hypershell/v1/gateways"
+AUTH_STATUS=$(api_curl -o /dev/null -w '%{http_code}' "${API_HOST}/api/hypershell/v1/gateways" 2>/dev/null || true)
+if [[ "$AUTH_STATUS" == "200" ]]; then
+  pass "API server accepts authenticated requests (200)"
+else
+  fail_test "Expected 200 for authenticated request, got ${AUTH_STATUS}"
+fi
+
+# Verify: BFF /auth/session returns unauthenticated
+CONSOLE_HOST="${API_HOST/api./console.}"
+show_cmd "curl -sk ${CONSOLE_HOST}/auth/session"
+SESSION_RESP=$(curl -sk "${CONSOLE_HOST}/auth/session" 2>/dev/null || true)
+SESSION_AUTH=$(echo "${SESSION_RESP}" | python3 -c "import json,sys; print(json.load(sys.stdin).get('authenticated',''))" 2>/dev/null || true)
+if [[ "$SESSION_AUTH" == "False" ]]; then
+  pass "BFF /auth/session returns authenticated: false"
+else
+  fail_test "Expected authenticated: false from /auth/session, got: ${SESSION_RESP:0:100}"
+fi
+
+# Verify: BFF /auth/login redirects to Keycloak with PKCE
+show_cmd "curl -sk -o /dev/null -w '%{redirect_url}' ${CONSOLE_HOST}/auth/login"
+LOGIN_REDIRECT=$(curl -sk -o /dev/null -w '%{redirect_url}' "${CONSOLE_HOST}/auth/login" 2>/dev/null || true)
+if echo "${LOGIN_REDIRECT}" | grep -q 'code_challenge_method=S256'; then
+  pass "BFF /auth/login redirects to IdP with PKCE"
+else
+  fail_test "Expected PKCE redirect from /auth/login, got: ${LOGIN_REDIRECT:0:100}"
+fi
+
+# Verify: control plane gRPC streams are healthy
+show_cmd "kubectl logs -l app=hypershell-controller --tail=20 | grep Unauthenticated"
+CP_UNAUTH=$(${CLI} logs -l app=hypershell-controller -n "${E2E_HS_NAMESPACE}" --tail=50 2>/dev/null | grep -c 'Unauthenticated' || true)
+if [[ "$CP_UNAUTH" == "0" ]]; then
+  pass "Control plane gRPC streams: no Unauthenticated errors"
+else
+  fail_test "Control plane has ${CP_UNAUTH} Unauthenticated gRPC errors"
+fi
+
+sep
+
+# ── 1. infrastructure validation ──────────────────────────────────────────
+
+echo ""
+bold "1. Infrastructure Validation"
+echo ""
+
+INFRA_NAMESPACE="${E2E_HS_NAMESPACE}"
+
+show_cmd "$CLI get deployment cert-manager -n cert-manager"
+CM_REPLICAS=$($CLI get deployment cert-manager -n cert-manager -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
+if [[ "${CM_REPLICAS:-0}" -ge 1 ]]; then
+  pass "cert-manager is ready"
+else
+  fail_test "cert-manager is not ready (readyReplicas=${CM_REPLICAS:-0})"
+fi
+
+show_cmd "$CLI get deployment cert-manager-webhook -n cert-manager"
+CMW_REPLICAS=$($CLI get deployment cert-manager-webhook -n cert-manager -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
+if [[ "${CMW_REPLICAS:-0}" -ge 1 ]]; then
+  pass "cert-manager-webhook is ready"
+else
+  fail_test "cert-manager-webhook is not ready (readyReplicas=${CMW_REPLICAS:-0})"
+fi
+
+show_cmd "$CLI get deployment agent-sandbox-controller -n agent-sandbox-system"
+AS_REPLICAS=$($CLI get deployment agent-sandbox-controller -n agent-sandbox-system -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
+if [[ "${AS_REPLICAS:-0}" -ge 1 ]]; then
+  pass "agent-sandbox controller is ready"
+else
+  fail_test "agent-sandbox controller is not ready (readyReplicas=${AS_REPLICAS:-0})"
+fi
+
+show_cmd "$CLI get crd gateways.gateway.networking.k8s.io"
+if $CLI get crd gateways.gateway.networking.k8s.io &>/dev/null; then
+  pass "Gateway API CRDs installed"
+else
+  fail_test "Gateway API CRDs not found"
+fi
+
+show_cmd "$CLI get issuer hypershell-selfsigned -n $INFRA_NAMESPACE"
+SS_READY=$($CLI get issuer hypershell-selfsigned -n "$INFRA_NAMESPACE" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "")
+if [[ "$SS_READY" == "True" ]]; then
+  pass "CA selfsigned Issuer is ready"
+else
+  fail_test "CA selfsigned Issuer is not ready (status=${SS_READY:-unknown})"
+fi
+
+show_cmd "$CLI get certificate hypershell-ca -n $INFRA_NAMESPACE"
+CA_READY=$($CLI get certificate hypershell-ca -n "$INFRA_NAMESPACE" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "")
+if [[ "$CA_READY" == "True" ]]; then
+  pass "CA Certificate issued"
+else
+  fail_test "CA Certificate not ready (status=${CA_READY:-unknown})"
+fi
+
+show_cmd "$CLI get issuer hypershell-ca-issuer -n $INFRA_NAMESPACE"
+CAI_READY=$($CLI get issuer hypershell-ca-issuer -n "$INFRA_NAMESPACE" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "")
+if [[ "$CAI_READY" == "True" ]]; then
+  pass "CA Issuer is ready"
+else
+  fail_test "CA Issuer is not ready (status=${CAI_READY:-unknown})"
+fi
+
+show_cmd "$CLI get deployment keycloak -n $E2E_KEYCLOAK_NAMESPACE"
+KC_REPLICAS=$($CLI get deployment keycloak -n "$E2E_KEYCLOAK_NAMESPACE" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
+if [[ "${KC_REPLICAS:-0}" -ge 1 ]]; then
+  pass "Keycloak is ready"
+else
+  fail_test "Keycloak is not ready (readyReplicas=${KC_REPLICAS:-0})"
+fi
+
+show_cmd "$CLI get networkpolicy -n $INFRA_NAMESPACE"
+NP_COUNT=$($CLI get networkpolicy -n "$INFRA_NAMESPACE" --no-headers 2>/dev/null | wc -l | tr -d ' ')
+if [[ "${NP_COUNT:-0}" -ge 4 ]]; then
+  pass "NetworkPolicies present (${NP_COUNT} found)"
+else
+  fail_test "Expected at least 4 NetworkPolicies, found ${NP_COUNT:-0}"
+fi
+sep
+
+# ── 2. gateway provisioning ────────────────────────────────────────────────
+
+echo ""
+bold "2. Gateway Provisioning via HyperShell API"
+echo ""
+
+# JWT enforcement means every gateway CRUD call below needs a bearer token.
+# Refresh the token here so the full Keycloak access-token lifetime covers the
+# create plus the provisioning poll (up to E2E_PROVISION_TIMEOUT seconds).
+if ! acquire_oidc_token; then
+  fail_test "Could not acquire OIDC token for gateway provisioning"
+  exit 1
+fi
+
+show_cmd "api_curl ${API_HOST}/api/hypershell/v1/gateways?search=name%3D${GW_NAME}"
+EXISTING_GW=$(api_curl "${API_HOST}/api/hypershell/v1/gateways?search=name%3D${GW_NAME}" 2>/dev/null || true)
 EXISTING_ID=$(echo "$EXISTING_GW" | GW_NAME="$GW_NAME" python3 -c "
 import json, sys, os
 data = json.load(sys.stdin)
@@ -179,7 +337,7 @@ for gw in data.get('items', []):
 " 2>/dev/null || true)
   pass "Gateway already exists: ${GW_NAME} (${GW_ID}, phase=${GW_PHASE})"
 else
-  show_cmd "curl -sk -X POST ${API_HOST}/api/hypershell/v1/gateways -d '{name: ${GW_NAME}, oidc: ...}'"
+  show_cmd "api_curl -X POST ${API_HOST}/api/hypershell/v1/gateways -d '{name: ${GW_NAME}, oidc: ...}'"
   GW_CREATE_BODY=$(GW_NAME="$GW_NAME" E2E_OIDC_ISSUER="$E2E_OIDC_ISSUER" \
     E2E_OIDC_CLIENT_ID="$E2E_OIDC_CLIENT_ID" python3 -c "
 import json, os
@@ -202,17 +360,35 @@ body = {
 }
 print(json.dumps(body))
 ")
-  CREATE_RESPONSE=$(curl -sk -X POST "${API_HOST}/api/hypershell/v1/gateways" \
+  CREATE_RESPONSE=$(api_curl -X POST "${API_HOST}/api/hypershell/v1/gateways" \
     -H "Content-Type: application/json" \
     -d "${GW_CREATE_BODY}" 2>/dev/null || true)
 
-  GW_ID=$(echo "$CREATE_RESPONSE" | python3 -c "import json,sys; print(json.load(sys.stdin).get('id',''))" 2>/dev/null || true)
-  GW_NAMESPACE=$(echo "$CREATE_RESPONSE" | python3 -c "import json,sys; print(json.load(sys.stdin).get('namespace',''))" 2>/dev/null || true)
+  # A successful create returns kind="Gateway" with a ksuid id. A failure returns
+  # kind="Error" with a numeric id (e.g. "9"=ErrorGeneral/500, "17"=malformed/400).
+  # Detect the error case explicitly: otherwise the error object's id is mistaken
+  # for a gateway id and the provisioning poll spins on a nonexistent gateway until
+  # timeout, masking the real api-server failure.
+  IFS=$'\t' read -r CREATE_KIND CREATE_F1 CREATE_F2 <<< "$(echo "$CREATE_RESPONSE" | python3 -c "
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print('PARSE\t\t'); sys.exit(0)
+if d.get('kind') == 'Error':
+    print('ERROR\t%s\t%s' % (d.get('code', ''), d.get('reason', ''))); sys.exit(0)
+print('OK\t%s\t%s' % (d.get('id', ''), d.get('namespace', '')))
+" 2>/dev/null)" || true
 
-  if [[ -n "$GW_ID" ]]; then
+  if [[ "$CREATE_KIND" == "OK" && -n "$CREATE_F1" ]]; then
+    GW_ID="$CREATE_F1"
+    GW_NAMESPACE="$CREATE_F2"
     pass "Gateway created: ${GW_NAME} (${GW_ID})"
   else
     fail_test "Failed to create gateway"
+    if [[ "$CREATE_KIND" == "ERROR" ]]; then
+      dim "    api-server error ${CREATE_F1}: ${CREATE_F2}"
+    fi
     dim "    ${CREATE_RESPONSE:0:300}"
     exit 1
   fi
@@ -221,7 +397,7 @@ print(json.dumps(body))
   DEADLINE=$(($(date +%s) + E2E_PROVISION_TIMEOUT))
   GW_PHASE=""
   while [[ $(date +%s) -lt $DEADLINE ]]; do
-    GW_PHASE=$(curl -sk "${API_HOST}/api/hypershell/v1/gateways/${GW_ID}" 2>/dev/null | \
+    GW_PHASE=$(api_curl "${API_HOST}/api/hypershell/v1/gateways/${GW_ID}" 2>/dev/null | \
       python3 -c "import json,sys; print(json.load(sys.stdin).get('phase',''))" 2>/dev/null || true)
     if [[ "$GW_PHASE" == "Running" ]]; then
       break
@@ -233,7 +409,10 @@ print(json.dumps(body))
   if [[ "$GW_PHASE" == "Running" ]]; then
     pass "Gateway provisioned and running"
   else
-    fail_test "Gateway not running after ${E2E_PROVISION_TIMEOUT}s (phase=${GW_PHASE})"
+    fail_test "Gateway not running after ${E2E_PROVISION_TIMEOUT}s (phase=${GW_PHASE:-unknown})"
+    dim "    last gateway state:"
+    api_curl "${API_HOST}/api/hypershell/v1/gateways/${GW_ID}" 2>/dev/null \
+      | python3 -m json.tool 2>/dev/null | sed 's/^/      /' || true
     exit 1
   fi
 fi
@@ -245,10 +424,10 @@ fi
 dim "  Gateway namespace: ${GW_NAMESPACE}"
 sep
 
-# ── 2. gateway infrastructure ──────────────────────────────────────────────
+# ── 3. gateway infrastructure ──────────────────────────────────────────────
 
 echo ""
-bold "2. Gateway Infrastructure"
+bold "3. Gateway Infrastructure"
 echo ""
 
 show_cmd "$CLI get deployment openshell-gateway -n $GW_NAMESPACE"
@@ -268,6 +447,22 @@ if $CLI get deployment openshell-gateway -n "$GW_NAMESPACE" &>/dev/null; then
     pass "Gateway pod ready ($GW_IMAGE)"
   else
     fail_test "Gateway pod not ready after 90s (${GW_READY:-0} replicas)"
+    dim "  --- gateway diagnostics ($GW_NAMESPACE) ---"
+    dim "  Image: $GW_IMAGE"
+    dim "  Pods:"
+    $CLI get pods -n "$GW_NAMESPACE" -o wide 2>&1 | while IFS= read -r line; do dim "    $line"; done
+    dim "  Events:"
+    $CLI get events --sort-by=.lastTimestamp -n "$GW_NAMESPACE" 2>&1 | tail -20 | while IFS= read -r line; do dim "    $line"; done
+    for pod in $($CLI get pods -n "$GW_NAMESPACE" -l app.kubernetes.io/component=gateway -o name 2>/dev/null); do
+      dim "  Logs ${pod}:"
+      $CLI logs "${pod}" --all-containers --tail=40 -n "$GW_NAMESPACE" 2>&1 | while IFS= read -r line; do dim "    $line"; done
+      dim "  Previous logs ${pod}:"
+      $CLI logs "${pod}" --all-containers --previous --tail=40 -n "$GW_NAMESPACE" 2>&1 | while IFS= read -r line; do dim "    $line"; done
+    done
+    dim "  Describe:"
+    $CLI describe pods -l app.kubernetes.io/component=gateway -n "$GW_NAMESPACE" 2>&1 | while IFS= read -r line; do dim "    $line"; done
+    dim "  ConfigMap:"
+    $CLI get configmap openshell-gateway-config -n "$GW_NAMESPACE" -o yaml 2>&1 | while IFS= read -r line; do dim "    $line"; done
   fi
 else
   fail_test "Gateway Deployment not found in $GW_NAMESPACE"
@@ -296,12 +491,95 @@ if [[ "${CERTGEN_STATUS:-0}" -ge 1 ]]; then
 else
   dim "  - Certgen job status: ${CERTGEN_STATUS:-unknown}"
 fi
+
+show_cmd "$CLI get deployment openshell-gateway-db -n $GW_NAMESPACE"
+if $CLI get deployment openshell-gateway-db -n "$GW_NAMESPACE" &>/dev/null; then
+  dim "  Waiting for database pod to be ready (up to 120s)..."
+  DB_READY=0
+  DB_READY_DEADLINE=$(($(date +%s) + 120))
+  while [[ $(date +%s) -lt $DB_READY_DEADLINE ]]; do
+    DB_READY=$($CLI get deployment openshell-gateway-db -n "$GW_NAMESPACE" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo 0)
+    if [[ "${DB_READY:-0}" -ge 1 ]]; then
+      break
+    fi
+    sleep 5
+  done
+  DB_IMAGE=$($CLI get deployment openshell-gateway-db -n "$GW_NAMESPACE" -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || echo unknown)
+  if [[ "${DB_READY:-0}" -ge 1 ]]; then
+    pass "Database pod ready ($DB_IMAGE)"
+  else
+    fail_test "Database pod not ready after 120s (${DB_READY:-0} replicas)"
+  fi
+else
+  fail_test "Database Deployment not found in $GW_NAMESPACE"
+fi
+
+show_cmd "$CLI get service openshell-gateway-db -n $GW_NAMESPACE"
+DB_SVC=$($CLI get service openshell-gateway-db -n "$GW_NAMESPACE" -o jsonpath='{.spec.clusterIP}' 2>/dev/null || true)
+if [[ -n "$DB_SVC" ]]; then
+  pass "Database service: ${DB_SVC}:5432"
+else
+  fail_test "Database service not found"
+fi
+
+show_cmd "$CLI get pvc openshell-gateway-db-data -n $GW_NAMESPACE"
+PVC_PHASE=$($CLI get pvc openshell-gateway-db-data -n "$GW_NAMESPACE" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+if [[ "$PVC_PHASE" == "Bound" ]]; then
+  pass "Database PVC bound"
+else
+  fail_test "Database PVC not bound (phase=${PVC_PHASE:-unknown})"
+fi
+
+show_cmd "$CLI get secret openshell-gateway-db-credentials -n $GW_NAMESPACE"
+if $CLI get secret openshell-gateway-db-credentials -n "$GW_NAMESPACE" &>/dev/null; then
+  pass "Database credentials secret exists"
+else
+  fail_test "Database credentials secret not found"
+fi
+
+show_cmd "$CLI get secret openshell-client-tls -n $GW_NAMESPACE"
+if $CLI get secret openshell-client-tls -n "$GW_NAMESPACE" &>/dev/null; then
+  pass "Client TLS secret exists"
+else
+  fail_test "Client TLS secret not found"
+fi
+
+show_cmd "$CLI get configmap openshell-gateway-config -n $GW_NAMESPACE"
+if $CLI get configmap openshell-gateway-config -n "$GW_NAMESPACE" &>/dev/null; then
+  pass "Gateway config ConfigMap exists"
+else
+  fail_test "Gateway config ConfigMap not found"
+fi
+
+show_cmd "$CLI get certificate openshell-ca -n $GW_NAMESPACE"
+GW_CA_READY=$($CLI get certificate openshell-ca -n "$GW_NAMESPACE" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "")
+if [[ "$GW_CA_READY" == "True" ]]; then
+  pass "Gateway CA certificate issued"
+else
+  fail_test "Gateway CA certificate not ready (status=${GW_CA_READY:-unknown})"
+fi
+
+show_cmd "$CLI get certificate openshell-server -n $GW_NAMESPACE"
+GW_SRV_READY=$($CLI get certificate openshell-server -n "$GW_NAMESPACE" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "")
+if [[ "$GW_SRV_READY" == "True" ]]; then
+  pass "Gateway server certificate issued"
+else
+  fail_test "Gateway server certificate not ready (status=${GW_SRV_READY:-unknown})"
+fi
+
+show_cmd "$CLI get networkpolicy -n $GW_NAMESPACE"
+GW_NP_COUNT=$($CLI get networkpolicy -n "$GW_NAMESPACE" --no-headers 2>/dev/null | wc -l | tr -d ' ')
+if [[ "${GW_NP_COUNT:-0}" -ge 3 ]]; then
+  pass "Gateway NetworkPolicies present (${GW_NP_COUNT} found)"
+else
+  fail_test "Expected at least 3 gateway NetworkPolicies, found ${GW_NP_COUNT:-0}"
+fi
 sep
 
-# ── 3. OIDC token acquisition ─────────────────────────────────────────────
+# ── 4. OIDC token acquisition ─────────────────────────────────────────────
 
 echo ""
-bold "3. OIDC Token Acquisition"
+bold "4. OIDC Token Acquisition"
 echo ""
 
 show_cmd "# resource-owner password grant → ${E2E_OIDC_ISSUER}"
@@ -315,13 +593,20 @@ else
 fi
 sep
 
-# ── 4. route discovery + CLI registration ─────────────────────────────────
+# ── 5. route discovery + CLI registration ─────────────────────────────────
 
 echo ""
-bold "4. Route Discovery + CLI Registration"
+bold "5. Route Discovery + CLI Registration"
 echo ""
 
 GW_LOCAL_NAME="${GW_NAMESPACE}-openshell"
+
+if wait_for_gateway_route "$GW_NAME" "$GW_NAMESPACE"; then
+  pass "Gateway route is ready"
+else
+  fail_test "Gateway route not ready after timeout"
+  exit 1
+fi
 
 discover_gateway_endpoint "$GW_NAME" "$GW_NAMESPACE"
 GW_ENDPOINT="${_DISCOVER_GW_ENDPOINT}"
@@ -329,13 +614,6 @@ if [[ -n "$GW_ENDPOINT" ]]; then
   pass "Gateway endpoint: ${GW_ENDPOINT}"
 else
   fail_test "Could not discover gateway endpoint"
-  exit 1
-fi
-
-if wait_for_gateway_route "$GW_NAME" "$GW_NAMESPACE"; then
-  pass "Gateway route is ready"
-else
-  fail_test "Gateway route not ready after timeout"
   exit 1
 fi
 
@@ -382,10 +660,10 @@ else
 fi
 sep
 
-# ── 5. gateway connectivity ───────────────────────────────────────────────
+# ── 6. gateway connectivity ───────────────────────────────────────────────
 
 echo ""
-bold "5. Gateway Connectivity"
+bold "6. Gateway Connectivity"
 echo ""
 
 show_cmd "OPENSHELL_GATEWAY_INSECURE=true ${OPENSHELL_BIN} -g ${GW_LOCAL_NAME} status"
@@ -418,10 +696,10 @@ else
 fi
 sep
 
-# ── 6. sandbox lifecycle ──────────────────────────────────────────────────
+# ── 7. sandbox lifecycle ──────────────────────────────────────────────────
 
 echo ""
-bold "6. Sandbox Lifecycle"
+bold "7. Sandbox Lifecycle"
 echo ""
 
 RUN_ID=$(date +%s | tail -c5)
@@ -485,10 +763,10 @@ fi
 rm -f "${SB_CREATE_LOG}" 2>/dev/null || true
 sep
 
-# ── 7. sandbox interaction ────────────────────────────────────────────────
+# ── 8. sandbox interaction ────────────────────────────────────────────────
 
 echo ""
-bold "7. Sandbox Interaction"
+bold "8. Sandbox Interaction"
 echo ""
 
 GW_FLAG="-g ${GW_LOCAL_NAME}"

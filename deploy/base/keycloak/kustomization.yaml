@@ -1,0 +1,10 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: keycloak
+resources:
+  - namespace.yaml
+  - keycloak.yaml
+  # The login theme ConfigMaps live in their own base so they can be consumed
+  # standalone (e.g. remote-ref'd by an operator-managed Keycloak). Pulling it
+  # here keeps this base's rendered output unchanged.
+  - theme
