@@ -12,7 +12,7 @@ const gateway = {
   kind: "Gateway",
   name: "openshell-gateway-test",
   namespace: "openshell",
-  phase: "",
+  phase: "Running",
   release_id: "release-1",
   service_type: "",
   status: "Ready",
@@ -196,6 +196,11 @@ test("keeps unknown gateway status readable in every theme", async ({
   await expect(
     page.getByText("Future status", { exact: true }).first(),
   ).toBeVisible();
+  // Wait for the details page's level-one heading before scanning: axe flags a
+  // missing h1 if it runs while the route is still rendering.
+  await expect(
+    page.getByRole("heading", { level: 1, name: "openshell-gateway-test" }),
+  ).toBeFocused();
   results = await new AxeBuilder({ page }).analyze();
   expect(results.violations).toEqual([]);
 
@@ -280,31 +285,33 @@ test("keeps connection methods on gateway details", async ({
     page.getByRole("button", { name: "Actions", exact: true }),
   ).toBeVisible();
 
-  // Connection is the default tab and walks through login, provider, and sandbox.
+  // Connection is the default tab and consolidates the preamble into a single
+  // "One-time setup" block plus a re-runnable sandbox command.
   await expect(
     page.getByRole("tab", { name: "Connection", selected: true }),
   ).toBeVisible();
   await expect(
-    page.getByRole("heading", { level: 2, name: "Log in to the gateway" }),
+    page.getByRole("heading", { level: 2, name: "One-time setup" }),
   ).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "Copy the add-provider command" }),
+    page.getByRole("button", { name: "Copy the one-time setup commands" }),
   ).toBeVisible();
   await expect(
     page.getByRole("button", { name: "Copy the create-sandbox command" }),
   ).toBeVisible();
   await page
-    .getByRole("button", {
-      name: "Copy connection command for openshell-gateway-test",
-    })
+    .getByRole("button", { name: "Copy the one-time setup commands" })
     .click();
   await expect
     .poll(() => page.evaluate(() => navigator.clipboard.readText()))
-    .toBe(
-      `openshell gateway add \\
+    .toContain("openshell provider create");
+  const setupScript = await page.evaluate(() => navigator.clipboard.readText());
+  expect(setupScript).toContain(
+    `openshell gateway add \\
   --name openshell-gateway-test \\
   https://gateway.example.test:443`,
-    );
+  );
+  expect(setupScript).toContain("openshell inference set");
 
   // Operational configuration and copyable values live under the Details tab.
   await page.getByRole("tab", { name: "Details" }).click();
@@ -515,7 +522,7 @@ test("provisions a gateway on an existing managed cluster", async ({
   ).toBeVisible();
   await expect(
     page.getByRole("status", {
-      name: "Gateway login is unavailable until this gateway reports its endpoint and OIDC connection details.",
+      name: "This gateway is still provisioning. Its connection command becomes available once the gateway is running.",
     }),
   ).toBeVisible();
   // Operational values remain under the Details tab; the endpoint is unavailable.

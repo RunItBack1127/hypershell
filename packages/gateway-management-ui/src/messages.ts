@@ -76,68 +76,34 @@ export const messages = defineMessages({
     defaultMessage: "Region: {region}",
     description: "Region context that distinguishes a managed cluster option.",
   },
-  connectionLoginTitle: {
-    id: "app.gateway.connection.login.title",
-    defaultMessage: "Log in to the gateway",
-    description: "Title for the first gateway connection step.",
-  },
   connectionLoginUnavailable: {
     id: "app.gateway.connection.login.unavailable",
     defaultMessage:
-      "Gateway login is unavailable until this gateway reports its endpoint and OIDC connection details.",
+      "This gateway is still provisioning. Its connection command becomes available once the gateway is running.",
     description:
-      "Shown in the login step when the gateway lacks required connection values.",
-  },
-  connectionProviderAdcTitle: {
-    id: "app.gateway.connection.provider.adc.title",
-    defaultMessage: "Configure Application Default Credentials",
-    description: "Title for the ADC prerequisite within the provider step.",
-  },
-  connectionProviderCaveat: {
-    id: "app.gateway.connection.provider.caveat",
-    defaultMessage:
-      "Inside the sandbox, reach Vertex AI through inference.local. Do not set CLAUDE_CODE_USE_VERTEX=1, which makes Claude Code bypass the gateway and fail Google Cloud credential discovery.",
-    description: "Sandbox routing caveat shown in the provider step details.",
-  },
-  connectionProviderDetailsToggle: {
-    id: "app.gateway.connection.provider.detailsToggle",
-    defaultMessage: "Prerequisites and options",
-    description:
-      "Toggle label for the expandable provider prerequisites and options.",
-  },
-  connectionProviderFromEnvDescription: {
-    id: "app.gateway.connection.provider.fromEnv.description",
-    defaultMessage:
-      "Reads the credential plus VERTEX_AI_PROJECT_ID and VERTEX_AI_REGION from your shell. These OpenShell variables differ from Claude Code's ANTHROPIC_VERTEX_PROJECT_ID and CLOUD_ML_REGION.",
-    description:
-      "Explains the environment-variable alternative for creating the provider.",
-  },
-  connectionProviderFromEnvTitle: {
-    id: "app.gateway.connection.provider.fromEnv.title",
-    defaultMessage: "From environment variables",
-    description:
-      "Title for the environment-variable alternative in the provider step.",
-  },
-  connectionProviderRoutingDescription: {
-    id: "app.gateway.connection.provider.routing.description",
-    defaultMessage: "Replace {model} with a Vertex Claude model ID.",
-    description: "Explains the model-routing command in the provider step.",
-  },
-  connectionProviderTitle: {
-    id: "app.gateway.connection.provider.title",
-    defaultMessage: "Add a Claude on Vertex AI provider",
-    description: "Title for the second gateway connection step.",
+      "Shown in the login step while the gateway has not yet reached a running, ready-to-connect phase.",
   },
   connectionSandboxDescription: {
     id: "app.gateway.connection.sandbox.description",
     defaultMessage:
-      "Start a sandbox that runs Claude through this gateway. Replace {sandbox} with a name.",
+      "Once setup is done, run this whenever you want a fresh sandbox running Claude through this gateway.",
     description: "Supporting text for the create-sandbox connection step.",
   },
   connectionSandboxTitle: {
     id: "app.gateway.connection.sandbox.title",
     defaultMessage: "Create a sandbox",
-    description: "Title for the third gateway connection step.",
+    description: "Title for the create-sandbox connection step.",
+  },
+  connectionSetupDescription: {
+    id: "app.gateway.connection.setup.description",
+    defaultMessage:
+      "Run these once to log in, add the Claude on Vertex AI provider, and select the model.",
+    description: "Supporting text for the one-time setup connection step.",
+  },
+  connectionSetupTitle: {
+    id: "app.gateway.connection.setup.title",
+    defaultMessage: "One-time setup",
+    description: "Title for the consolidated one-time setup connection step.",
   },
   connectionTab: {
     id: "app.gateway.connection.tab",
@@ -159,11 +125,6 @@ export const messages = defineMessages({
     defaultMessage: "Copy",
     description: "Tooltip for a button that copies text to the clipboard.",
   },
-  copyAdcLoginCommand: {
-    id: "app.gateway.connection.copyAdcLoginCommand",
-    defaultMessage: "Copy the credentials login command",
-    description: "Accessible label for copying the ADC login command.",
-  },
   copyCliConnectionCommand: {
     id: "app.gateway.copyCliConnectionCommand",
     defaultMessage: "Copy CLI connection command",
@@ -181,21 +142,16 @@ export const messages = defineMessages({
     description:
       "Accessible label for copying a specific gateway's network endpoint.",
   },
-  copyProviderCommand: {
-    id: "app.gateway.connection.copyProviderCommand",
-    defaultMessage: "Copy the add-provider command",
-    description: "Accessible label for copying the add-provider command.",
-  },
-  copyProviderFromExistingCommand: {
-    id: "app.gateway.connection.copyProviderFromExistingCommand",
-    defaultMessage: "Copy the environment-based add-provider command",
-    description:
-      "Accessible label for copying the environment-based add-provider command.",
-  },
   copySandboxCommand: {
     id: "app.gateway.connection.copySandboxCommand",
     defaultMessage: "Copy the create-sandbox command",
     description: "Accessible label for copying the create-sandbox command.",
+  },
+  copySetupCommand: {
+    id: "app.gateway.connection.copySetupCommand",
+    defaultMessage: "Copy the one-time setup commands",
+    description:
+      "Accessible label for copying the consolidated one-time setup script.",
   },
   created: {
     id: "app.table.column.created",
@@ -227,6 +183,24 @@ export const messages = defineMessages({
     id: "app.gateway.detailsTab",
     defaultMessage: "Details",
     description: "Label for the gateway detail Details tab.",
+  },
+  editModel: {
+    id: "app.gateway.connection.editModel",
+    defaultMessage: "Model (editable)",
+    description:
+      "Accessible label for the inline-editable model name in the setup command.",
+  },
+  editProviderName: {
+    id: "app.gateway.connection.editProviderName",
+    defaultMessage: "Provider name (editable)",
+    description:
+      "Accessible label for the inline-editable provider name in the setup command.",
+  },
+  editSandboxName: {
+    id: "app.gateway.connection.editSandboxName",
+    defaultMessage: "Sandbox name (editable)",
+    description:
+      "Accessible label for the inline-editable sandbox name in the create-sandbox command.",
   },
   error: {
     id: "app.status.error",

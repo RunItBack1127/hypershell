@@ -1,69 +1,29 @@
-import {
-  ClipboardCopyButton,
-  CodeBlock,
-  CodeBlockAction,
-  CodeBlockCode,
-  Content,
-  ExpandableSection,
-  Skeleton,
-  Title,
-} from "@patternfly/react-core";
-import { type ReactNode, useId, useState } from "react";
+import { Content, Skeleton, Title } from "@patternfly/react-core";
+import { type ReactNode, useState } from "react";
 import { useIntl } from "react-intl";
 
 import { messages } from "../messages";
+import { EditableCommand } from "./editable-command";
 import {
-  buildProviderCreateCommand,
-  buildProviderFromExistingCommand,
   buildSandboxCreateCommand,
-  gcloudAdcLoginCommand,
+  buildSetupScript,
+  claudeModel,
   type GatewayConnection,
+  sandboxName as defaultSandboxName,
+  vertexProviderName,
 } from "./gateway-connections";
-import { GatewayCliCopy } from "./gateway-detail-header";
 import styles from "./gateway-connection-steps.module.css";
 
-function CommandCopy({
-  ariaLabel,
-  command,
-}: {
-  ariaLabel: string;
-  command: string;
-}) {
-  const intl = useIntl();
-  const id = useId();
-  const [copied, setCopied] = useState(false);
-
-  const handleCopy = () => {
-    void navigator.clipboard.writeText(command);
-    setCopied(true);
-  };
-
-  return (
-    <CodeBlock
-      actions={
-        <CodeBlockAction>
-          <ClipboardCopyButton
-            aria-label={ariaLabel}
-            exitDelay={copied ? 1500 : 600}
-            id={`${id}-copy-button`}
-            maxWidth="110px"
-            onClick={handleCopy}
-            onTooltipHidden={() => {
-              setCopied(false);
-            }}
-            variant="plain"
-          >
-            {copied
-              ? intl.formatMessage(messages.copied)
-              : intl.formatMessage(messages.copy)}
-          </ClipboardCopyButton>
-        </CodeBlockAction>
-      }
-    >
-      <CodeBlockCode id={id}>{command}</CodeBlockCode>
-    </CodeBlock>
-  );
-}
+// Unique, single-token placeholders substituted into the command templates where
+// an editable value goes. They are highlighted (tokenizing as ordinary argument
+// words) and then swapped for inline editors; letters-only keeps them to one
+// bash token and clear of any real command text. The provider marker appears
+// twice in the setup script, so both slots mirror the same value.
+const providerMarker = "OSPROVIDERNAMEZ";
+const modelMarker = "OSMODELNAMEZ";
+const sandboxMarker = "OSSANDBOXNAMEZ";
+const setupMarkers = [providerMarker, modelMarker];
+const sandboxMarkers = [sandboxMarker];
 
 function ConnectionStep({
   children,
@@ -85,42 +45,49 @@ function ConnectionStep({
   );
 }
 
-function ProviderStepDetail({
-  ariaLabel,
-  command,
-  description,
-  title,
-}: {
-  ariaLabel: string;
-  command: string;
-  description?: string;
-  title: string;
-}) {
-  return (
-    <div className={styles.detail}>
-      <Title headingLevel="h3" size="md">
-        {title}
-      </Title>
-      {description && <Content component="p">{description}</Content>}
-      <CommandCopy ariaLabel={ariaLabel} command={command} />
-    </div>
-  );
-}
-
 export function GatewayConnectionSteps({
   gateway,
 }: {
   gateway: GatewayConnection;
 }) {
   const intl = useIntl();
-  const [isDetailsExpanded, setIsDetailsExpanded] = useState(false);
-  const loginCommand = gateway.endpoint;
+  const [providerName, setProviderName] = useState(vertexProviderName);
+  const [model, setModel] = useState(claudeModel);
+  const [sandboxName, setSandboxName] = useState(defaultSandboxName);
+
+  // Marker form drives the (stable) highlight; the resolved form drives copy and
+  // matches a whole-block text selection exactly.
+  const setupTemplate = buildSetupScript(gateway, {
+    model: modelMarker,
+    providerName: providerMarker,
+  });
+  const setupCopy = buildSetupScript(gateway, { model, providerName });
 
   return (
     <ol className={styles.steps}>
-      <ConnectionStep title={intl.formatMessage(messages.connectionLoginTitle)}>
-        {loginCommand ? (
-          <GatewayCliCopy gateway={gateway} />
+      <ConnectionStep
+        description={intl.formatMessage(messages.connectionSetupDescription)}
+        title={intl.formatMessage(messages.connectionSetupTitle)}
+      >
+        {setupTemplate && setupCopy ? (
+          <EditableCommand
+            copyAriaLabel={intl.formatMessage(messages.copySetupCommand)}
+            copyText={setupCopy}
+            labels={{
+              [modelMarker]: intl.formatMessage(messages.editModel),
+              [providerMarker]: intl.formatMessage(messages.editProviderName),
+            }}
+            markers={setupMarkers}
+            onFieldChange={(marker, value) => {
+              if (marker === providerMarker) {
+                setProviderName(value);
+              } else if (marker === modelMarker) {
+                setModel(value);
+              }
+            }}
+            templateCommand={setupTemplate}
+            values={{ [modelMarker]: model, [providerMarker]: providerName }}
+          />
         ) : (
           <div
             aria-label={intl.formatMessage(messages.connectionLoginUnavailable)}
@@ -137,48 +104,21 @@ export function GatewayConnectionSteps({
       </ConnectionStep>
 
       <ConnectionStep
-        title={intl.formatMessage(messages.connectionProviderTitle)}
-      >
-        <CommandCopy
-          ariaLabel={intl.formatMessage(messages.copyProviderCommand)}
-          command={buildProviderCreateCommand()}
-        />
-        <ExpandableSection
-          isExpanded={isDetailsExpanded}
-          onToggle={(_event, expanded) => {
-            setIsDetailsExpanded(expanded);
-          }}
-          toggleText={intl.formatMessage(
-            messages.connectionProviderDetailsToggle,
-          )}
-        >
-          <ProviderStepDetail
-            ariaLabel={intl.formatMessage(messages.copyAdcLoginCommand)}
-            command={gcloudAdcLoginCommand}
-            title={intl.formatMessage(messages.connectionProviderAdcTitle)}
-          />
-          <ProviderStepDetail
-            ariaLabel={intl.formatMessage(
-              messages.copyProviderFromExistingCommand,
-            )}
-            command={buildProviderFromExistingCommand()}
-            description={intl.formatMessage(
-              messages.connectionProviderFromEnvDescription,
-            )}
-            title={intl.formatMessage(messages.connectionProviderFromEnvTitle)}
-          />
-          <Content component="p">
-            {intl.formatMessage(messages.connectionProviderCaveat)}
-          </Content>
-        </ExpandableSection>
-      </ConnectionStep>
-
-      <ConnectionStep
+        description={intl.formatMessage(messages.connectionSandboxDescription)}
         title={intl.formatMessage(messages.connectionSandboxTitle)}
       >
-        <CommandCopy
-          ariaLabel={intl.formatMessage(messages.copySandboxCommand)}
-          command={buildSandboxCreateCommand()}
+        <EditableCommand
+          copyAriaLabel={intl.formatMessage(messages.copySandboxCommand)}
+          copyText={buildSandboxCreateCommand(sandboxName)}
+          labels={{
+            [sandboxMarker]: intl.formatMessage(messages.editSandboxName),
+          }}
+          markers={sandboxMarkers}
+          onFieldChange={(_marker, value) => {
+            setSandboxName(value);
+          }}
+          templateCommand={buildSandboxCreateCommand(sandboxMarker)}
+          values={{ [sandboxMarker]: sandboxName }}
         />
       </ConnectionStep>
     </ol>

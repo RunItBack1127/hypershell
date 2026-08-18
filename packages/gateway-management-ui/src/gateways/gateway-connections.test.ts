@@ -2,12 +2,15 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildGatewayAddCommand,
+  buildInferenceSetCommand,
   buildProviderCreateCommand,
-  buildProviderFromExistingCommand,
   buildSandboxCreateCommand,
+  buildSetupScript,
+  claudeModel,
   gatewayStatusAppearance,
-  sandboxNamePlaceholder,
-  vertexClaudeProviderName,
+  isGatewayReadyToConnect,
+  sandboxName,
+  vertexProviderName,
   type GatewayConnection,
 } from "./gateway-connections";
 
@@ -20,7 +23,8 @@ const gateway: GatewayConnection = {
   oidcAudience: "openshell-cli",
   oidcClientId: "openshell-cli",
   oidcIssuer: "https://issuer.example.test/realms/openshell",
-  status: "Ready",
+  phase: "Running",
+  status: "Running",
 };
 
 describe("gateway connections", () => {
@@ -77,40 +81,116 @@ describe("gateway connections", () => {
     ).toBeUndefined();
   });
 
-  it("builds the Vertex AI provider command pulling ADC and gcloud project", () => {
+  it("does not construct a command until the phase is Running", () => {
+    // A populated endpoint (route address) may exist while the gateway is still
+    // provisioning; the command is withheld until phase reaches Running.
+    for (const phase of ["Provisioning", "Pending", "Degraded", "Failed", ""]) {
+      expect(buildGatewayAddCommand({ ...gateway, phase })).toBeUndefined();
+    }
+    expect(
+      buildGatewayAddCommand({ ...gateway, phase: undefined }),
+    ).toBeUndefined();
+  });
+
+  it("reports readiness only when phase is Running and an endpoint exists", () => {
+    expect(isGatewayReadyToConnect(gateway)).toBe(true);
+    expect(isGatewayReadyToConnect({ ...gateway, phase: "running" })).toBe(
+      true,
+    );
+    expect(isGatewayReadyToConnect({ ...gateway, phase: "Provisioning" })).toBe(
+      false,
+    );
+    expect(isGatewayReadyToConnect({ ...gateway, phase: undefined })).toBe(
+      false,
+    );
+    expect(isGatewayReadyToConnect({ ...gateway, endpoint: undefined })).toBe(
+      false,
+    );
+  });
+
+  it("builds the google-vertex-ai provider command pulling ADC and project id", () => {
     expect(buildProviderCreateCommand()).toBe(
       `openshell provider create \\
-  --name ${vertexClaudeProviderName} \\
+  --name ${vertexProviderName} \\
   --type google-vertex-ai \\
   --from-gcloud-adc \\
-  --config VERTEX_AI_PROJECT_ID="$(gcloud config get-value project)" \\
+  --config VERTEX_AI_PROJECT_ID="$ANTHROPIC_VERTEX_PROJECT_ID" \\
   --config VERTEX_AI_REGION=global`,
     );
   });
 
-  it("builds the environment-only provider command", () => {
-    expect(buildProviderFromExistingCommand()).toBe(
-      `openshell provider create \\
-  --name ${vertexClaudeProviderName} \\
-  --type google-vertex-ai \\
-  --from-existing`,
+  it("points inference at the Claude model through the provider", () => {
+    expect(buildInferenceSetCommand()).toBe(
+      `openshell inference set --provider ${vertexProviderName} --model ${claudeModel}`,
     );
   });
 
-  it("creates a sandbox that attaches the provider and launches claude", () => {
+  it("substitutes a chosen provider name into the provider command", () => {
+    expect(buildProviderCreateCommand("MARKER")).toContain("--name MARKER");
+  });
+
+  it("substitutes chosen provider and model names into inference set", () => {
+    expect(buildInferenceSetCommand("PROV", "MODEL")).toBe(
+      "openshell inference set --provider PROV --model MODEL",
+    );
+  });
+
+  it("threads provider and model overrides through the setup script", () => {
+    const script = buildSetupScript(gateway, {
+      model: "MODEL",
+      providerName: "PROV",
+    });
+
+    // The provider name is mirrored across both the create and inference steps.
+    expect(script).toContain("--name PROV");
+    expect(script).toContain("--provider PROV --model MODEL");
+    expect(script).not.toContain(vertexProviderName);
+    expect(script).not.toContain(claudeModel);
+  });
+
+  it("creates a sandbox that runs claude against the local inference endpoint", () => {
     expect(buildSandboxCreateCommand()).toBe(
       `openshell sandbox create \\
-  --name ${sandboxNamePlaceholder} \\
-  --provider ${vertexClaudeProviderName} \\
-  --no-auto-providers \\
-  -- claude`,
+  --name ${sandboxName} \\
+  --env=ANTHROPIC_BASE_URL=https://inference.local \\
+  --env=ANTHROPIC_API_KEY=unused \\
+  -- claude --bare`,
     );
     expect(buildSandboxCreateCommand("demo")).toBe(
       `openshell sandbox create \\
   --name demo \\
-  --provider ${vertexClaudeProviderName} \\
-  --no-auto-providers \\
-  -- claude`,
+  --env=ANTHROPIC_BASE_URL=https://inference.local \\
+  --env=ANTHROPIC_API_KEY=unused \\
+  -- claude --bare`,
+    );
+    // The model lives in the inference-set step, not the sandbox command.
+    expect(buildSandboxCreateCommand()).not.toContain("--model");
+  });
+
+  it("combines login, provider, and inference into one setup script when ready", () => {
+    const script = buildSetupScript(gateway);
+
+    // The three preamble commands are consolidated into a single copyable block.
+    expect(script).toContain("--oidc-issuer https://issuer.example.test");
+    expect(script).toContain(buildProviderCreateCommand());
+    expect(script).toContain(buildInferenceSetCommand());
+    // The policy heredoc is gone; the inference-based flow needs no policy file.
+    expect(script).not.toContain("cat >");
+    // Ordered login -> provider -> inference so it runs top to bottom.
+    const loginAt = script?.indexOf("openshell gateway add") ?? -1;
+    const providerAt = script?.indexOf("openshell provider create") ?? -1;
+    const inferenceAt = script?.indexOf("openshell inference set") ?? -1;
+    expect(loginAt).toBeGreaterThanOrEqual(0);
+    expect(loginAt).toBeLessThan(providerAt);
+    expect(providerAt).toBeLessThan(inferenceAt);
+  });
+
+  it("withholds the setup script until the gateway is ready to connect", () => {
+    expect(buildSetupScript({ ...gateway, phase: "Provisioning" })).toBe(
+      undefined,
+    );
+    expect(buildSetupScript({ ...gateway, endpoint: undefined })).toBe(
+      undefined,
     );
   });
 

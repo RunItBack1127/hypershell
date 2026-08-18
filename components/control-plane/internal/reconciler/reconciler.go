@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
 	pb "github.com/openshift-online/hypershell/components/api-server/pkg/api/grpc/hypershell/v1"
+	"github.com/openshift-online/hypershell/components/control-plane/internal/exposure"
 	"github.com/openshift-online/hypershell/components/control-plane/internal/gateway"
 	"github.com/openshift-online/hypershell/components/control-plane/internal/keycloak"
 	"github.com/openshift-online/hypershell/components/control-plane/internal/watcher"
@@ -138,10 +140,12 @@ type GatewayReconciler struct {
 	isOpenShift           bool
 	hasCertManager        bool
 	hasGatewayAPI         bool
+	skipNetworkPolicies   bool
 	manifestsDir          string
 	controlPlaneNamespace string
 	keycloakClient        *keycloak.Client
 	keycloakConfig        *gateway.KeycloakConfig
+	exposure              exposure.Port
 }
 
 func NewGatewayReconciler(
@@ -151,6 +155,7 @@ func NewGatewayReconciler(
 	manifestsDir string,
 	controlPlaneNamespace string,
 	keycloakConfig *gateway.KeycloakConfig,
+	exposurePort exposure.Port,
 ) (*GatewayReconciler, error) {
 	manifests, err := gateway.LoadGatewayManifests(manifestsDir)
 	if err != nil {
@@ -160,6 +165,11 @@ func NewGatewayReconciler(
 	isOpenShift := gateway.DetectOpenShift(clientset)
 	hasCertManager := gateway.DetectCertManager(clientset)
 	hasGatewayAPI := gateway.DetectGatewayAPI(clientset)
+	// Dev clusters (Kind) opt out of the per-tenant gateway NetworkPolicies:
+	// their out-of-cluster proxy source IP cannot be matched by the policies'
+	// selectors, so the policies would blackhole gateway ingress. Defaults to
+	// enforced (empty/unset) so production/OpenShift keeps tenant isolation.
+	skipNetworkPolicies := os.Getenv("GATEWAY_SKIP_NETWORK_POLICIES") == "true"
 
 	var kcClient *keycloak.Client
 	if keycloakConfig != nil {
@@ -172,8 +182,8 @@ func NewGatewayReconciler(
 		log.Printf("INFO keycloak integration enabled: server=%s realm=%s", keycloakConfig.ServerURL, keycloakConfig.Realm)
 	}
 
-	log.Printf("INFO gateway reconciler initialized: manifests=%d openshift=%v certmanager=%v gatewayapi=%v keycloak=%v",
-		len(manifests), isOpenShift, hasCertManager, hasGatewayAPI, kcClient != nil)
+	log.Printf("INFO gateway reconciler initialized: manifests=%d openshift=%v certmanager=%v gatewayapi=%v keycloak=%v netpol=%v",
+		len(manifests), isOpenShift, hasCertManager, hasGatewayAPI, kcClient != nil, !skipNetworkPolicies)
 
 	return &GatewayReconciler{
 		active:                make(map[string]struct{}),
@@ -184,10 +194,12 @@ func NewGatewayReconciler(
 		isOpenShift:           isOpenShift,
 		hasCertManager:        hasCertManager,
 		hasGatewayAPI:         hasGatewayAPI,
+		skipNetworkPolicies:   skipNetworkPolicies,
 		manifestsDir:          manifestsDir,
 		controlPlaneNamespace: controlPlaneNamespace,
 		keycloakClient:        kcClient,
 		keycloakConfig:        keycloakConfig,
+		exposure:              exposurePort,
 	}, nil
 }
 
@@ -219,6 +231,7 @@ func (r *GatewayReconciler) Handle(ctx context.Context, event watcher.Event[*pb.
 			IsOpenShift:           r.isOpenShift,
 			HasCertManager:        r.hasCertManager,
 			HasGatewayAPI:         r.hasGatewayAPI,
+			SkipNetworkPolicies:   r.skipNetworkPolicies,
 			ControlPlaneNamespace: r.controlPlaneNamespace,
 			KeycloakClient:        r.keycloakClient,
 			GatewayID:             event.ResourceID,
@@ -328,6 +341,7 @@ func (r *GatewayReconciler) Handle(ctx context.Context, event watcher.Event[*pb.
 		IsOpenShift:           r.isOpenShift,
 		HasCertManager:        r.hasCertManager,
 		HasGatewayAPI:         r.hasGatewayAPI,
+		SkipNetworkPolicies:   r.skipNetworkPolicies,
 		ControlPlaneNamespace: r.controlPlaneNamespace,
 		GatewayID:             event.ResourceID,
 		UpdateRouteAddress:    r.makeRouteAddressUpdater(event.ResourceID),
@@ -335,6 +349,7 @@ func (r *GatewayReconciler) Handle(ctx context.Context, event watcher.Event[*pb.
 		KeycloakClient:        r.keycloakClient,
 		GatewayName:           gw.Name,
 		UpdateOIDC:            r.makeOIDCUpdater(event.ResourceID),
+		Exposure:              r.exposure,
 	}
 
 	r.updateGatewayPhase(ctx, event.ResourceID, "Provisioning")
@@ -344,19 +359,42 @@ func (r *GatewayReconciler) Handle(ctx context.Context, event watcher.Event[*pb.
 		return fmt.Errorf("reconcile gateway %s: %w", gw.Name, err)
 	}
 
-	// Manifests are applied, but the gateway is not Running until its workload
-	// is observed Ready. Wait within the provisioning readiness window: on
-	// readiness set Running; otherwise set Degraded and record why. The
-	// continuous health reconciler keeps the phase synchronized thereafter.
+	// Manifests are applied, but the gateway is not Running until its workload is
+	// observed Ready. Wait within the provisioning readiness window; if the
+	// Deployment never becomes ready, set Degraded and record why.
 	ready, reason := gateway.WaitForGatewayReady(ctx, r.clientset, namespace, 2*time.Minute)
-	if ready {
-		r.updateGatewayHealth(ctx, event.ResourceID, "Running", "Healthy")
-		log.Printf("INFO gateway %s provisioned and ready in namespace %s", gw.Name, namespace)
-	} else {
+	if !ready {
 		r.updateGatewayHealth(ctx, event.ResourceID, "Degraded", reason)
 		log.Printf("WARN gateway %s applied but not ready in namespace %s: %s", gw.Name, namespace, reason)
+		return nil
+	}
+
+	// The Deployment is Ready. A routed gateway is not Running until its external
+	// exposure is also observed Ready, so leave it at Provisioning and let the
+	// continuous health reconciler promote it to Running once the exposure is
+	// programmed (or move it to Degraded after the route-readiness grace window).
+	// A non-routed gateway - or any gateway on a cluster without the exposure
+	// port - is Running on Deployment readiness alone. See
+	// openshell-gateway-health.spec.md § Phase Reflects Workload and Route Readiness.
+	if r.exposure != nil && isRoutedGateway(gw) {
+		r.updateGatewayHealth(ctx, event.ResourceID, "Provisioning", "Deployment ready; awaiting route readiness")
+		log.Printf("INFO gateway %s deployment ready in namespace %s; awaiting route readiness", gw.Name, namespace)
+	} else {
+		r.updateGatewayHealth(ctx, event.ResourceID, "Running", "Healthy")
+		log.Printf("INFO gateway %s provisioned and ready in namespace %s", gw.Name, namespace)
 	}
 	return nil
+}
+
+// isRoutedGateway reports whether a Gateway declares external route exposure
+// (a non-empty `route` configuration), and therefore requires its external
+// exposure to be observed Ready before it can be reported Running.
+func isRoutedGateway(gw *pb.Gateway) bool {
+	if gw.Route == nil {
+		return false
+	}
+	route := strings.TrimSpace(*gw.Route)
+	return route != "" && route != "null"
 }
 
 // gatewayNamespace returns the Kubernetes namespace for a Gateway, deriving the

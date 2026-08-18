@@ -9,7 +9,6 @@ import (
 	"time"
 
 	pb "github.com/openshift-online/hypershell/components/api-server/pkg/api/grpc/hypershell/v1"
-	"github.com/openshift-online/hypershell/components/control-plane/internal/gateway"
 	"github.com/openshift-online/hypershell/components/control-plane/internal/keycloak"
 	"github.com/openshift-online/hypershell/components/control-plane/internal/watcher"
 	"google.golang.org/grpc"
@@ -100,15 +99,14 @@ func (r *RoleBindingReconciler) Handle(ctx context.Context, event watcher.Event[
 }
 
 // resolveKeycloakClientID looks up the gateway by ID and returns the Keycloak
-// clientId (name-id format) that matches the client provisioned during gateway
-// reconciliation.
+// client ID in the {name}-{id} format specified by the Keycloak provisioning spec.
 func (r *RoleBindingReconciler) resolveKeycloakClientID(ctx context.Context, gatewayID string) (string, error) {
 	client := pb.NewGatewayServiceClient(r.grpcConn)
 	resp, err := client.GetGateway(ctx, &pb.GetGatewayRequest{Id: gatewayID})
 	if err != nil {
 		return "", fmt.Errorf("get gateway %s: %w", gatewayID, err)
 	}
-	return gateway.KeycloakClientID(resp.GetGateway().GetName(), gatewayID), nil
+	return fmt.Sprintf("%s-%s", resp.GetGateway().GetName(), gatewayID), nil
 }
 
 // assignClientRoleWithRetry retries AssignClientRole to handle the race where

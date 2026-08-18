@@ -25,6 +25,7 @@ const previewGateway: GatewayConnection = {
   oidcAudience: "openshell-cli",
   oidcClientId: "openshell-cli",
   oidcIssuer: "https://issuer.example.test/realms/openshell",
+  phase: "Running",
   status: "Ready",
 };
 const previewGateways = [previewGateway] as const;
@@ -72,7 +73,7 @@ function gatewayResponse(id: string, name: string) {
     id,
     name,
     namespace: "openshell",
-    phase: "",
+    phase: "Running",
     releaseId: "release-1",
     status: "Ready",
   };
@@ -137,7 +138,7 @@ describe("gateway shell pages", () => {
           oidcAudience: "openshell-cli",
           oidcClientId: "openshell-cli",
           oidcIssuer: "https://issuer.example.test/realms/openshell",
-          phase: "",
+          phase: "Running",
           releaseId: "release-1",
           status: "Ready",
         }}
@@ -250,8 +251,7 @@ describe("gateway shell pages", () => {
     expect(cliCmd.textContent).not.toContain("--oidc-");
   });
 
-  it("walks through gateway connection with provider and sandbox commands", async () => {
-    const user = userEvent.setup();
+  it("walks through gateway connection with provider and sandbox commands", () => {
     renderPage(() => (
       <GatewayPage
         gateway={{
@@ -265,7 +265,7 @@ describe("gateway shell pages", () => {
           oidcAudience: "openshell-cli",
           oidcClientId: "openshell-cli",
           oidcIssuer: "https://issuer.example.test/realms/openshell",
-          phase: "",
+          phase: "Running",
           releaseId: "release-1",
           status: "Ready",
         }}
@@ -273,36 +273,23 @@ describe("gateway shell pages", () => {
       />
     ));
 
+    // The preamble is consolidated into a single "One-time setup" block, with
+    // the re-runnable sandbox command in its own block.
     expect(
-      screen.getByRole("heading", { level: 2, name: "Log in to the gateway" }),
-    ).toBeTruthy();
-    expect(
-      screen.getByRole("heading", {
-        level: 2,
-        name: "Add a Claude on Vertex AI provider",
-      }),
+      screen.getByRole("heading", { level: 2, name: "One-time setup" }),
     ).toBeTruthy();
     expect(
       screen.getByRole("heading", { level: 2, name: "Create a sandbox" }),
     ).toBeTruthy();
-    expect(
-      screen.getByText(/--from-gcloud-adc/, { selector: "code" }),
-    ).toBeTruthy();
+
+    // The setup block carries login, provider, and inference selection together.
+    const setupCommand = screen.getByText(/openshell gateway add/, {
+      selector: "code",
+    });
+    expect(setupCommand.textContent).toContain("--from-gcloud-adc");
+    expect(setupCommand.textContent).toContain("openshell inference set");
     expect(
       screen.getByText(/openshell sandbox create/, { selector: "code" }),
-    ).toBeTruthy();
-
-    // Prerequisites and options are revealed on demand.
-    await user.click(
-      screen.getByRole("button", { name: "Prerequisites and options" }),
-    );
-    expect(
-      screen.getByText("gcloud auth application-default login", {
-        selector: "code",
-      }),
-    ).toBeTruthy();
-    expect(
-      screen.getByText(/Do not set CLAUDE_CODE_USE_VERTEX=1/u),
     ).toBeTruthy();
   });
 
@@ -319,10 +306,34 @@ describe("gateway shell pages", () => {
 
     expect(
       screen.getByRole("status", {
-        name: "Gateway login is unavailable until this gateway reports its endpoint and OIDC connection details.",
+        name: "This gateway is still provisioning. Its connection command becomes available once the gateway is running.",
       }),
     ).toBeTruthy();
     expect(screen.queryByDisplayValue(/openshell gateway add/u)).toBeNull();
+  });
+
+  it("withholds the connection command while the gateway is provisioning", () => {
+    // The route address may already be published while the gateway is still
+    // provisioning; the command must not surface until phase is Running.
+    renderPage(() => (
+      <GatewayPage
+        gateway={{
+          ...gatewayResponse("gateway-1", "Team gateway"),
+          phase: "Provisioning",
+          status: "",
+        }}
+        gatewayId="gateway-1"
+      />
+    ));
+
+    expect(
+      screen.getByRole("status", {
+        name: "This gateway is still provisioning. Its connection command becomes available once the gateway is running.",
+      }),
+    ).toBeTruthy();
+    expect(
+      screen.queryByText(/openshell gateway add/u, { selector: "code" }),
+    ).toBeNull();
   });
 
   it("encodes the active tab through its host", async () => {

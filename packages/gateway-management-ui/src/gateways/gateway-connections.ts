@@ -9,7 +9,26 @@ export interface GatewayConnection {
   oidcAudience?: string;
   oidcClientId?: string;
   oidcIssuer?: string;
+  phase?: string;
   status: string;
+}
+
+/**
+ * Whether the gateway should be presented as ready to connect. A published
+ * `endpoint` (route address) records *where* the gateway will be reachable but
+ * does not by itself assert readiness: the endpoint may be populated while the
+ * gateway is still `Provisioning` and not yet programmed/routable. The control
+ * plane only advances `phase` to `Running` once the workload and, for routed
+ * gateways, the external exposure are observed Ready, so `phase === "Running"`
+ * is the single readiness gate for surfacing the connection command. See
+ * specs/platform/openshell-gateway-health.spec.md § Connection Command Surfaced
+ * Only When Ready.
+ */
+export function isGatewayReadyToConnect(gateway: GatewayConnection): boolean {
+  return (
+    gateway.phase?.trim().toLocaleLowerCase() === "running" &&
+    Boolean(gateway.endpoint)
+  );
 }
 
 const safeShellArgument = /^[A-Za-z0-9_./:@%+=,-]+$/;
@@ -25,7 +44,7 @@ function shellArgument(value: string) {
 export function buildGatewayAddCommand(
   gateway: GatewayConnection,
 ): string | undefined {
-  if (!gateway.endpoint) {
+  if (!isGatewayReadyToConnect(gateway) || !gateway.endpoint) {
     return undefined;
   }
 
@@ -49,60 +68,95 @@ export function buildGatewayAddCommand(
 
 /**
  * Fixed OpenShell provider name used across the Vertex AI connection steps so
- * the create, inference-routing, and sandbox commands refer to the same provider.
+ * the provider, inference, and sandbox commands all refer to the same provider.
  */
-export const vertexClaudeProviderName = "vertex-claude";
+export const vertexProviderName = "my-gcp";
 
-/** Placeholder a user replaces with their sandbox name. */
-export const sandboxNamePlaceholder = "<sandbox-name>";
+/** Default sandbox name shown in the copyable create-sandbox command. */
+export const sandboxName = "mysand";
 
-/** One-time prerequisite that writes Application Default Credentials locally. */
-export const gcloudAdcLoginCommand = "gcloud auth application-default login";
+/** Claude model the sandbox runs, shared by the inference and sandbox commands. */
+export const claudeModel = "claude-haiku-4-5";
 
 /**
  * Primary "add a provider" command. Pulls credentials from Application Default
- * Credentials and the project from the user's active gcloud configuration, so no
- * secret or project value has to be pasted into the browser or edited by hand.
+ * Credentials (`--from-gcloud-adc`) and reads the project id from the shell, so
+ * no secret has to be pasted into the browser. `providerName` is parameterized so
+ * the caller can substitute an edit marker (for highlighting) or the operator's
+ * chosen name (for copy) without diverging from this single command template.
  */
-export function buildProviderCreateCommand(): string {
+export function buildProviderCreateCommand(
+  providerName: string = vertexProviderName,
+): string {
   return [
     "openshell provider create",
-    `--name ${vertexClaudeProviderName}`,
+    `--name ${providerName}`,
     "--type google-vertex-ai",
     "--from-gcloud-adc",
-    `--config VERTEX_AI_PROJECT_ID="$(gcloud config get-value project)"`,
+    '--config VERTEX_AI_PROJECT_ID="$ANTHROPIC_VERTEX_PROJECT_ID"',
     "--config VERTEX_AI_REGION=global",
   ].join(" \\\n  ");
 }
 
 /**
- * Alternative that reads every credential and config value from the shell
- * environment (`VERTEX_AI_PROJECT_ID`, `VERTEX_AI_REGION`, and the credential),
- * for users who already export the OpenShell Vertex variables.
+ * Points the provider's inference at the Claude model the sandbox runs, so
+ * `claude` inside the sandbox resolves to it without any extra flags at the
+ * provider level. `providerName` and `model` are parameterized so the same
+ * template drives both the highlighted (marker) and copyable (resolved) forms.
  */
-export function buildProviderFromExistingCommand(): string {
+export function buildInferenceSetCommand(
+  providerName: string = vertexProviderName,
+  model: string = claudeModel,
+): string {
+  return `openshell inference set --provider ${providerName} --model ${model}`;
+}
+
+/**
+ * Creates a sandbox that runs Claude against the gateway's local inference
+ * endpoint. `ANTHROPIC_BASE_URL` points at the in-sandbox inference proxy and
+ * the API key is unused because the provider supplies credentials, so nothing
+ * secret is pasted into the browser. The model is selected once in the
+ * `inference set` step, so `claude` needs no `--model` flag here.
+ */
+export function buildSandboxCreateCommand(name: string = sandboxName): string {
   return [
-    "openshell provider create",
-    `--name ${vertexClaudeProviderName}`,
-    "--type google-vertex-ai",
-    "--from-existing",
+    "openshell sandbox create",
+    `--name ${name}`,
+    "--env=ANTHROPIC_BASE_URL=https://inference.local",
+    "--env=ANTHROPIC_API_KEY=unused",
+    "-- claude --bare",
   ].join(" \\\n  ");
 }
 
 /**
- * Creates a sandbox that launches Claude through the Vertex AI provider. The
- * sandbox name is a template value the user substitutes before running.
+ * One-time setup script that logs in to the gateway, adds the Claude on Vertex AI
+ * provider, and selects the model, combined into a single copyable block so
+ * operators paste the whole preamble at once instead of stepping through three
+ * commands. Returns `undefined` until the gateway is ready to connect, because
+ * registration requires a running gateway endpoint; the caller renders a pending
+ * state in that case.
  */
-export function buildSandboxCreateCommand(
-  sandboxName: string = sandboxNamePlaceholder,
-): string {
+export function buildSetupScript(
+  gateway: GatewayConnection,
+  overrides: { model?: string; providerName?: string } = {},
+): string | undefined {
+  const gatewayAdd = buildGatewayAddCommand(gateway);
+  if (!gatewayAdd) {
+    return undefined;
+  }
+
+  const { model = claudeModel, providerName = vertexProviderName } = overrides;
+
   return [
-    "openshell sandbox create",
-    `--name ${sandboxName}`,
-    `--provider ${vertexClaudeProviderName}`,
-    "--no-auto-providers",
-    "-- claude",
-  ].join(" \\\n  ");
+    "# 1. Log in to the gateway",
+    gatewayAdd,
+    "",
+    "# 2. Add the Claude on Vertex AI provider",
+    buildProviderCreateCommand(providerName),
+    "",
+    "# 3. Select the model",
+    buildInferenceSetCommand(providerName, model),
+  ].join("\n");
 }
 
 export type GatewayStatusAppearance =
