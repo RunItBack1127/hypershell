@@ -35,6 +35,7 @@ describe("gateway connections", () => {
   --oidc-issuer https://issuer.example.test/realms/openshell \\
   --oidc-client-id openshell-cli \\
   --oidc-audience openshell-cli \\
+  --no-auto-providers \\
   https://gateway.example.test:443`,
     );
   });
@@ -61,6 +62,7 @@ describe("gateway connections", () => {
     expect(buildGatewayAddCommand(noAuth)).toBe(
       `openshell gateway add \\
   --name gateway-1 \\
+  --no-auto-providers \\
   https://gateway.example.test:443`,
     );
   });
@@ -71,6 +73,7 @@ describe("gateway connections", () => {
     ).toBe(
       `openshell gateway add \\
   --name gateway-1 \\
+  --no-auto-providers \\
   https://gateway.example.test:443`,
     );
   });
@@ -154,17 +157,21 @@ describe("gateway connections", () => {
   --name ${sandboxName} \\
   --env=ANTHROPIC_BASE_URL=https://inference.local \\
   --env=ANTHROPIC_API_KEY=unused \\
-  -- claude --bare`,
+  -- claude --bare --model ${claudeModel}`,
     );
     expect(buildSandboxCreateCommand("demo")).toBe(
       `openshell sandbox create \\
   --name demo \\
   --env=ANTHROPIC_BASE_URL=https://inference.local \\
   --env=ANTHROPIC_API_KEY=unused \\
-  -- claude --bare`,
+  -- claude --bare --model ${claudeModel}`,
     );
-    // The model lives in the inference-set step, not the sandbox command.
-    expect(buildSandboxCreateCommand()).not.toContain("--model");
+  });
+
+  it("passes a custom model to the sandbox command", () => {
+    expect(buildSandboxCreateCommand("mysand", "claude-opus-5")).toContain(
+      "-- claude --bare --model claude-opus-5",
+    );
   });
 
   it("combines login, provider, and inference into one setup script when ready", () => {

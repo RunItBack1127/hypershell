@@ -109,7 +109,7 @@ export function GatewayConnectionSteps({
       >
         <EditableCommand
           copyAriaLabel={intl.formatMessage(messages.copySandboxCommand)}
-          copyText={buildSandboxCreateCommand(sandboxName)}
+          copyText={buildSandboxCreateCommand(sandboxName, model)}
           labels={{
             [sandboxMarker]: intl.formatMessage(messages.editSandboxName),
           }}
@@ -117,7 +117,7 @@ export function GatewayConnectionSteps({
           onFieldChange={(_marker, value) => {
             setSandboxName(value);
           }}
-          templateCommand={buildSandboxCreateCommand(sandboxMarker)}
+          templateCommand={buildSandboxCreateCommand(sandboxMarker, model)}
           values={{ [sandboxMarker]: sandboxName }}
         />
       </ConnectionStep>
