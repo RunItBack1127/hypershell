@@ -373,7 +373,8 @@ The GatewayReconciler SHALL validate Gateway resource fields before applying K8s
 
 #### Scenario: Invalid image reference
 
-- GIVEN a Gateway with an image reference containing invalid characters
+- GIVEN a Gateway with an `image`, `supervisor_image`, or `sandbox_image` reference
+  containing invalid characters
 - WHEN the GatewayReconciler validates the configuration
 - THEN validation SHALL fail with a descriptive error
 - AND the Gateway SHALL not be reconciled until the configuration is corrected
@@ -634,8 +635,8 @@ health_bind_address      = "0.0.0.0:8081"
 metrics_bind_address     = "0.0.0.0:9090"
 log_level                = "info"
 sandbox_namespace        = "<tenant-namespace>"
-default_image            = "<sandbox-default-image>"
-supervisor_image         = "<supervisor-image>"
+default_image            = "<Gateway.sandbox_image or default ghcr.io/nvidia/openshell-community/sandboxes/base:latest>"
+supervisor_image         = "<Gateway.supervisor_image or default ghcr.io/nvidia/openshell/supervisor:0.0.101>"
 client_tls_secret_name   = "openshell-client-tls"
 enable_loopback_service_http = true
 policy_validation_failure_mode = "fail_closed"
@@ -788,6 +789,7 @@ Control Plane
 | `namespace` | No | API assigned | Read-only Kubernetes namespace derived from the Gateway identifier |
 | `image` | No | `ghcr.io/nvidia/openshell/gateway:0.0.101` | Gateway container image reference |
 | `supervisor_image` | No | `ghcr.io/nvidia/openshell/supervisor:0.0.101` | Supervisor sidecar container image |
+| `sandbox_image` | No | `ghcr.io/nvidia/openshell-community/sandboxes/base:latest` | Sandbox base image the gateway uses when launching sandboxes |
 | `serverDnsNames` | Yes | - | DNS names for TLS certificate generation |
 | `oidc` | No | - | OIDC authentication configuration (see OIDC spec) |
 | `oidc.issuer` | Yes (to enable OIDC) | `""` | OIDC issuer URL; empty disables OIDC |
@@ -804,6 +806,8 @@ Control Plane
 | `database.storageSize` | No | `5Gi` | PVC size for PostgreSQL data |
 | `database.image` | No | `registry.redhat.io/rhel9/postgresql-16:latest` | PostgreSQL container image (Red Hat hardened) |
 | `database.externalSecretRef` | No | - | Name of Secret with `url` key. Skips DB provisioning. Reserved (Phase 2) |
+| `dev_build` | No | `false` | Marks this as a dev/branch build. Control plane applies `hypershell.redhat.io/openshell-dev-build` label to K8s resources |
+| `dev_build_metadata` | No | - | Dev build provenance (JSONB): `{ref, sha, repo}`. Control plane copies to annotations on K8s resources |
 
 ### Control Plane Environment Variables
 
