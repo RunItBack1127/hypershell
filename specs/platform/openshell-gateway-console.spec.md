@@ -2,117 +2,40 @@
 
 **Date:** 2026-08-18
 **Status:** Draft
-**Parent:** `openshell-gateway.spec.md` - core gateway provisioning
-**Related:** `openshell-gateway-keycloak.spec.md` - per-gateway Keycloak client + OIDC Role Bridge; `openshell-gateway-oidc.spec.md` - gateway.toml OIDC validation; `openshell-gateway-routing.spec.md` - Gateway API exposure; `openshell-gateway-tls.spec.md` - gateway TLS materials; `security/security.spec.md` - secret handling and isolation
-**Upstream:** [OpenShell Dashboard](https://github.com/Gkrumbach07/openshell-dashboard) - Go BFF + React (PatternFly 6) console for a single OpenShell gateway; [oauth2-proxy](https://oauth2-proxy.github.io/oauth2-proxy/) - reverse proxy that performs the OIDC authorization-code flow
+**Parent:** `openshell-gateway.spec.md`
+**Related:** `openshell-gateway-keycloak.spec.md` (per-gateway client, OIDC Role Bridge); `openshell-gateway-routing.spec.md` (shared Gateway, hostnames, NetworkPolicy)
+**Upstream:** [OpenShell Dashboard](https://github.com/Gkrumbach07/openshell-dashboard); [oauth2-proxy](https://oauth2-proxy.github.io/oauth2-proxy/)
 
 ---
 
 ## Purpose
 
-When a gateway is exposed externally, the control plane SHALL also co-deploy a
-per-gateway **Gateway Console** -- the OpenShell dashboard UI, configured to talk
-only to that gateway -- fronted by an authenticating reverse proxy. The console
-is a data-plane companion to a single gateway: it lives in the gateway's
-API-assigned namespace (`openshell-<id-hex-8>`), reaches the gateway over the
-in-cluster Service, and is reachable by browsers under a per-gateway hostname.
+The Gateway Console is the OpenShell dashboard for one gateway. The control plane deploys a console with each gateway that has a route. The console runs in the gateway namespace (`openshell-<id-hex-8>`). The console connects to the gateway through the in-cluster Service. A user opens the console in a browser at a per-gateway hostname.
 
-Authentication reuses the same Keycloak realm and per-gateway isolation model
-already established for the gateway itself. A browser session is authenticated by
-an oauth2-proxy sidecar against a dedicated per-gateway Keycloak client; the
-resulting access token carries the gateway's audience (`aud = {name}-{id}`) and
-the user's per-gateway roles (`hypershell.roles`), so the gateway validates
-console traffic with exactly the same rules it already applies to the `openshell`
-CLI. Authorization is governed by the existing Gateway OIDC Role Bridge -- a user
-sees and operates the console only where they hold a `gateway:owner` or
-`gateway:viewer` RoleBinding.
+An oauth2-proxy sidecar authenticates the browser against a dedicated Keycloak client. The access token carries the gateway audience (`aud = {name}-{id}`) and the user roles (`hypershell.roles`). The dashboard sends this token to the gateway. The gateway validates the token with the rules that it applies to the CLI. The OIDC Role Bridge controls access. A user operates the console only where a `gateway:owner` or `gateway:viewer` RoleBinding exists.
 
-This spec is scoped to **Option 1**: one oauth2-proxy per gateway, using real
-IdP-issued tokens with the correct audience, no token exchange, and no shared
-console credential across gateways. A future central-console option
-(single sign-on across all gateways via token exchange) is out of scope here.
+This spec covers Option 1: one oauth2-proxy for each gateway, real tokens with the correct audience, no token exchange, and no shared credential across gateways.
 
-> **Terminology.** "Gateway Console" is the per-gateway OpenShell dashboard
-> defined by this spec. It is distinct from the HyperShell **management
-> web-console** (`components/web-console/`), which is the fleet-wide control
-> plane UI. The two are separate deployments with separate lifecycles.
+> **Terminology.** The Gateway Console is the per-gateway dashboard in this spec. It is not the management web-console (`components/web-console/`), which is the fleet-wide UI. The two are separate deployments.
 
 ---
 
-## Architecture
+## Token flow
 
-### Deployment topology (per gateway, in the tenant namespace)
+1. The browser opens `console-<ns>.<base-domain>`. oauth2-proxy finds no session.
+2. oauth2-proxy starts an authorization-code flow with PKCE for the client `{name}-{id}-console`.
+3. The user signs in to the shared realm.
+4. Keycloak issues an access token with these claims:
+   - `aud`: `{name}-{id}`
+   - `hypershell.roles`: `openshell-admin` or `openshell-user`
+   - `sub`: the user
+5. oauth2-proxy stores the session in an encrypted cookie. oauth2-proxy sends the request to the dashboard with the header `X-Forwarded-Access-Token`.
+6. The dashboard sends the token to the gateway over gRPC.
+7. The gateway validates the issuer and `aud = {name}-{id}`. The gateway maps `hypershell.roles` to admin or user access. The gateway denies a user who has no role for this gateway.
 
-```
-                       Browser
-                          │  HTTPS  https://console-<ns>.<base-domain>
-                          ▼
-   Shared Gateway (openshift-ingress, wildcard *.<base-domain> cert)
-                          │  HTTPRoute (tenant ns) matches console hostname
-                          ▼
-   ┌──────────────────────────────────────────────────────────────┐
-   │ Pod: openshell-console  (tenant namespace openshell-<hash>)    │
-   │                                                                │
-   │   [oauth2-proxy sidecar]  :4180                                │
-   │      · OIDC auth-code + PKCE against Keycloak client           │
-   │        {name}-{id}-console (confidential)                      │
-   │      · sets X-Forwarded-Access-Token, X-Forwarded-User         │
-   │      · upstream → 127.0.0.1:8000                               │
-   │                          │ localhost                           │
-   │                          ▼                                     │
-   │   [openshell-dashboard]  :8000  (Go BFF + React)               │
-   │      · trusts X-Forwarded-Access-Token                         │
-   │      · relays token to the gateway over gRPC/TLS               │
-   └──────────────────────────────────────────────────────────────┘
-                          │  grpcs://openshell-gateway.<ns>.svc:8080
-                          ▼
-              openshell-gateway Service → Pod
-              · validates aud = {name}-{id}
-              · reads roles from hypershell.roles (admin/user)
-```
+The console client is a second Keycloak client. It is not the CLI client (`{name}-{id}`). Its mappers target the gateway client. The gateway accepts console tokens like CLI tokens. The CLI client stays unchanged.
 
-### Token flow
-
-```
-1. Browser hits console-<ns>.<base-domain>; oauth2-proxy has no session.
-2. oauth2-proxy → Keycloak authorization-code + PKCE, client_id={name}-{id}-console.
-3. User authenticates in the shared `hypershell` realm.
-4. Keycloak issues an access token with:
-     aud            : {name}-{id}          (audience mapper → the gateway client)
-     hypershell.roles: [openshell-admin|openshell-user]  (client-role mapper → gateway client roles)
-     sub            : <user>
-5. oauth2-proxy stores the session (encrypted cookie) and forwards the request
-   to the dashboard BFF with header X-Forwarded-Access-Token: <access token>.
-6. Dashboard BFF relays that token to the gateway over gRPC.
-7. Gateway validates issuer + aud={name}-{id}, maps hypershell.roles → admin/user,
-   and authorizes the call. A user with no per-gateway role is denied by the
-   gateway (defense in depth), even though oauth2-proxy authenticated them.
-```
-
-The console token is produced by a **second, dedicated** Keycloak client
-(`{name}-{id}-console`), not the gateway's CLI client (`{name}-{id}`). The
-console client's audience and client-role protocol mappers **target the gateway
-client** (`{name}-{id}`), so its tokens are indistinguishable to the gateway from
-CLI tokens with respect to `aud` and `hypershell.roles`. This keeps the existing
-public CLI client (loopback redirect URIs, PKCE, no secret) untouched while the
-console client is confidential with a browser redirect URI.
-
-### Relationship to existing gateway resources
-
-The console is additive. It does not alter the gateway Deployment, Service,
-gateway.toml, or the gateway's own Keycloak client. It consumes:
-
-- the gateway's in-cluster Service (`openshell-gateway:8080`) for gRPC traffic;
-- the gateway's server CA (`ca.crt` from the `openshell-server-tls` Secret) to
-  verify the in-cluster TLS connection;
-- the shared realm and per-gateway roles established by
-  `openshell-gateway-keycloak.spec.md`.
-
-Because the console is only deployed when `route` is enabled (see enablement
-requirement), and a routed gateway has `client_ca_path` stripped from its config
-(see `openshell-gateway-routing.spec.md` / `openshell-gateway-tls.spec.md`), the
-gateway does not require the console to present a client certificate. The console
-still verifies the gateway's server certificate.
+A console needs a route. A routed gateway has `client_ca_path` removed (see `openshell-gateway-routing.spec.md`). The gateway does not request a client certificate from the console. The console still verifies the gateway server certificate.
 
 ---
 
@@ -120,449 +43,305 @@ still verifies the gateway's server certificate.
 
 ### Requirement: Console Enablement Tied to Routing
 
-The GatewayReconciler SHALL provision the Gateway Console for a gateway when, and
-only when, the gateway has `route` enabled, the cluster supports the Gateway API,
-and Keycloak integration is configured. The console is not independently
-configurable; it follows the gateway's external-exposure lifecycle.
+The reconciler must deploy the console when all of these conditions are true:
+
+- The gateway has a route.
+- The cluster supports the Gateway API.
+- Keycloak is configured.
+
+The console has no separate configuration field. The console follows the route lifecycle.
 
 #### Scenario: Routed gateway gets a console
 
-- GIVEN a Gateway with `route` enabled on a cluster with Gateway API + Keycloak configured
-- WHEN the GatewayReconciler reconciles the gateway
-- THEN it SHALL provision all console resources (Keycloak console client, console Secret, Deployment with dashboard + oauth2-proxy sidecar, Service, HTTPRoute, NetworkPolicies)
-- AND the console SHALL be reachable at `https://console-<tenant-namespace>.<base-domain>`
+- GIVEN a gateway with a route, on a cluster with the Gateway API and Keycloak
+- WHEN the reconciler reconciles the gateway
+- THEN it must create all console resources: the console client, the console Secret, the Deployment, the Service, the HTTPRoute, and the NetworkPolicies
+- AND the console must answer at `https://console-<ns>.<base-domain>`
 
 #### Scenario: Non-routed gateway gets no console
 
-- GIVEN a Gateway with no `route` configuration
-- WHEN the GatewayReconciler reconciles the gateway
-- THEN it SHALL NOT create any console resources
-- AND it SHALL NOT create a console Keycloak client
+- GIVEN a gateway with no route
+- WHEN the reconciler reconciles the gateway
+- THEN it must not create console resources
+- AND it must not create a console client
 
-#### Scenario: Gateway API or Keycloak unavailable
+#### Scenario: Prerequisites absent
 
-- GIVEN a routed Gateway on a cluster where the Gateway API is not available OR Keycloak is not configured
-- WHEN the GatewayReconciler reconciles the gateway
-- THEN it SHALL log a warning that the console cannot be provisioned
-- AND it SHALL skip console resource creation without failing the gateway reconciliation
+- GIVEN a routed gateway on a cluster with no Gateway API, or with no Keycloak
+- WHEN the reconciler reconciles the gateway
+- THEN it must write a warning
+- AND it must skip the console
+- AND it must not fail the gateway reconciliation
 
 ---
 
-### Requirement: Per-Gateway Confidential Console Keycloak Client
+### Requirement: Confidential Console Keycloak Client
 
-When provisioning the console, the GatewayReconciler SHALL create a dedicated
-confidential OIDC client in the configured Keycloak realm via the Admin REST API.
-This client is separate from the gateway's CLI client and exists solely for the
-browser-based console session.
+The reconciler must create one confidential OIDC client for each console. It uses the Keycloak Admin REST API. This client is separate from the CLI client.
 
-#### Client Properties
+#### Client properties
 
-| Property | Value | Notes |
+| Property | Value | Note |
 |---|---|---|
-| `clientId` | `{name}-{id}-console` | Unique within the realm; distinct from the gateway client `{name}-{id}` |
-| `name` | `{name}-{id}-console` | Display name in Keycloak admin console |
-| `publicClient` | `false` | Confidential; oauth2-proxy requires a client secret |
+| `clientId` | `{name}-{id}-console` | Unique in the realm; different from the CLI client `{name}-{id}` |
+| `publicClient` | `false` | Confidential; oauth2-proxy needs a client secret |
 | `standardFlowEnabled` | `true` | Authorization-code flow for the browser |
-| `directAccessGrantsEnabled` | `false` | No password grant; browser flow only |
-| `serviceAccountsEnabled` | `false` | Not a service account client |
-| `fullScopeAllowed` | `false` | **CRITICAL** -- prevents cross-gateway role/audience leakage |
-| `redirectUris` | `["https://console-<tenant-namespace>.<base-domain>/oauth2/callback"]` | oauth2-proxy callback |
-| `webOrigins` | `["https://console-<tenant-namespace>.<base-domain>"]` | Same-origin |
-| `attributes.pkce.code.challenge.method` | `S256` | PKCE enforced even for the confidential client (defense in depth) |
-| `defaultClientScopes` | `["openid", "profile", "email", "roles", "gateway-roles", "web-origins", "acr"]` | Includes `gateway-roles` so the client-role mapper runs |
+| `directAccessGrantsEnabled` | `false` | Browser flow only |
+| `serviceAccountsEnabled` | `false` | Not a service account |
+| `fullScopeAllowed` | `false` | Keeps per-gateway isolation |
+| `redirectUris` | `["https://console-<ns>.<base-domain>/oauth2/callback"]` | oauth2-proxy callback |
+| `webOrigins` | `["https://console-<ns>.<base-domain>"]` | Same origin |
+| `attributes.pkce.code.challenge.method` | `S256` | PKCE on the confidential client |
+| `defaultClientScopes` | `["openid", "profile", "email", "roles", "gateway-roles", "web-origins", "acr"]` | `gateway-roles` runs the client-role mapper |
 
-> **`fullScopeAllowed` MUST be `false`.** As with the gateway client, leaving it
-> `true` combined with the built-in `oidc-audience-resolve-mapper` would inject
-> every gateway's client ID and roles into the console token, breaking per-gateway
-> isolation. The console token MUST carry only this gateway's audience and roles.
+> `fullScopeAllowed` must be `false`. A `true` value, together with the built-in audience-resolve mapper, adds every gateway audience and role to the token. This breaks per-gateway isolation.
 
-#### Protocol Mappers (target the gateway client)
+#### Protocol mappers
 
-The console client SHALL be created with three protocol mappers whose targets are
-the **gateway** client (`{name}-{id}`), not the console client:
+The console client must have three protocol mappers. Each mapper targets the gateway client (`{name}-{id}`), not the console client:
 
-1. **Audience** -- `oidc-audience-mapper`, `included.client.audience = {name}-{id}`,
-   `access.token.claim = true`, `id.token.claim = false`. Sets `aud = {name}-{id}`.
-2. **Client roles** -- `oidc-usermodel-client-role-mapper`,
-   `claim.name = hypershell.roles`, `multivalued = true`, `jsonType.label = String`,
-   `access.token.claim = true`, `usermodel.clientRoleMapping.clientId = {name}-{id}`.
-   Emits the user's gateway-client roles into `hypershell.roles`.
-3. **Sub** -- `oidc-sub-mapper`, `access.token.claim = true`. Ensures `sub` is present.
+1. **Audience** -- `oidc-audience-mapper`, `included.client.audience = {name}-{id}`, `access.token.claim = true`, `id.token.claim = false`. Sets `aud = {name}-{id}`.
+2. **Client roles** -- `oidc-usermodel-client-role-mapper`, `claim.name = hypershell.roles`, `multivalued = true`, `access.token.claim = true`, `usermodel.clientRoleMapping.clientId = {name}-{id}`. Adds the user gateway-client roles to `hypershell.roles`.
+3. **Sub** -- `oidc-sub-mapper`, `access.token.claim = true`. Adds `sub`.
 
-Because the client-role mapper reads the user's role mappings for a named client
-directly, it emits the gateway's roles into the console token even though the
-token is issued by the console client. No additional role assignment is required:
-the existing OIDC Role Bridge (`openshell-gateway-keycloak.spec.md`) already
-assigns `openshell-admin` / `openshell-user` on the gateway client per RoleBinding.
+The client-role mapper reads the user roles for the named client. It adds the gateway roles to the token, although the console client issues the token. The OIDC Role Bridge already assigns `openshell-admin` and `openshell-user` on the gateway client (see `openshell-gateway-keycloak.spec.md`). The reconciler adds no roles.
 
-#### Scenario: Console client provisioned with gateway-targeted mappers
+#### Scenario: Console token has the gateway audience and roles
 
-- GIVEN a routed Gateway `my-gateway` (id=`2FhMpQzXBz`) with gateway client `my-gateway-2FhMpQzXBz`
-- WHEN the GatewayReconciler provisions the console
-- THEN it SHALL create a confidential Keycloak client `my-gateway-2FhMpQzXBz-console`
-- AND the client SHALL have `fullScopeAllowed = false` and PKCE `S256`
-- AND its audience mapper SHALL set `aud = my-gateway-2FhMpQzXBz`
-- AND its client-role mapper SHALL emit `resource_access.my-gateway-2FhMpQzXBz.roles` into `hypershell.roles`
+- GIVEN a routed gateway `my-gateway` (id `2FhMpQzXBz`) with gateway client `my-gateway-2FhMpQzXBz`
+- AND user-a has `gateway:owner` on the gateway, which gives `openshell-admin`
+- WHEN user-a signs in through oauth2-proxy
+- THEN the access token must contain `aud: "my-gateway-2FhMpQzXBz"` and `hypershell.roles: ["openshell-admin"]`
+- AND the token must not contain any other gateway audience or role
+- AND the gateway must give admin access
 
-#### Scenario: Console token accepted by the gateway
+#### Scenario: User without a RoleBinding is denied
 
-- GIVEN user-a has `gateway:owner` on `my-gateway` (→ `openshell-admin` on `my-gateway-2FhMpQzXBz`)
-- WHEN user-a authenticates through the console's oauth2-proxy
-- THEN the access token SHALL contain `aud: "my-gateway-2FhMpQzXBz"` and `hypershell.roles: ["openshell-admin"]`
-- AND the gateway SHALL authorize the relayed token with admin access
-- AND the token SHALL NOT contain any other gateway's audience or roles
-
-#### Scenario: User without a RoleBinding is denied at the gateway
-
-- GIVEN user-c is a valid realm user with no RoleBinding on `my-gateway`
-- WHEN user-c authenticates through the console's oauth2-proxy
-- THEN the access token SHALL NOT contain `openshell-admin` or `openshell-user` in `hypershell.roles` for this gateway
-- AND the gateway SHALL deny the relayed requests (the gateway runs with `allow_unauthenticated_users = false`)
+- GIVEN user-c is a realm user with no RoleBinding on the gateway
+- WHEN user-c signs in through oauth2-proxy
+- THEN the token must not contain `openshell-admin` or `openshell-user` for this gateway
+- AND the gateway must deny the requests, because it runs with `allow_unauthenticated_users = false`
 
 ---
 
 ### Requirement: Console Credential Secret
 
-The GatewayReconciler SHALL store the console client secret and the oauth2-proxy
-cookie-encryption secret in a single Kubernetes Secret in the tenant namespace,
-named `openshell-console-oauth2`.
+The reconciler must store two values in one Secret named `openshell-console-oauth2` in the gateway namespace.
 
-| Key | Source | Description |
+| Key | Source | Use |
 |---|---|---|
-| `client-secret` | Keycloak console client (`GET /admin/realms/{realm}/clients/{uuid}/client-secret`) | Confidential client secret used by oauth2-proxy |
-| `cookie-secret` | Generated by the control plane (cryptographically random, 32 bytes, base64) | Encrypts the oauth2-proxy session cookie |
+| `client-secret` | Keycloak (`GET /admin/realms/{realm}/clients/{uuid}/client-secret`) | Confidential client secret for oauth2-proxy |
+| `cookie-secret` | The control plane generates 32 random bytes, base64 | Encrypts the oauth2-proxy session cookie |
 
-The Secret SHALL be created before the console Deployment and reconciled with
-update-or-create semantics. The control plane SHALL never log either value.
+The reconciler must create the Secret before the Deployment. The reconciler must use update-or-create. The control plane must not write either value to a log.
 
-#### Scenario: Secret materialized from Keycloak + generated cookie secret
+#### Scenario: Cookie secret is stable
 
-- GIVEN the console Keycloak client `my-gateway-2FhMpQzXBz-console` has been provisioned
-- WHEN the GatewayReconciler prepares console credentials
-- THEN it SHALL read the client secret from Keycloak and generate a random cookie secret
-- AND it SHALL store both in the `openshell-console-oauth2` Secret in the tenant namespace
-- AND neither value SHALL appear in control-plane logs
-
-#### Scenario: Cookie secret is stable across reconciliations
-
-- GIVEN an `openshell-console-oauth2` Secret already exists with a `cookie-secret`
-- WHEN the GatewayReconciler reconciles the gateway again
-- THEN it SHALL preserve the existing `cookie-secret` (not regenerate it each cycle)
-- AND it SHALL refresh `client-secret` only if the Keycloak client secret has changed
-- AND existing browser sessions SHALL NOT be invalidated by an unrelated reconciliation
+- GIVEN an `openshell-console-oauth2` Secret with a `cookie-secret`
+- WHEN the reconciler reconciles the gateway again
+- THEN it must keep the current `cookie-secret`
+- AND it must update `client-secret` only when the Keycloak secret changed
+- AND active browser sessions must stay valid
 
 ---
 
-### Requirement: Console Deployment (Dashboard + oauth2-proxy Sidecar)
+### Requirement: Console Deployment
 
-The GatewayReconciler SHALL deploy a single Deployment named `openshell-console`
-in the tenant namespace containing two containers: the OpenShell dashboard and an
-oauth2-proxy sidecar. The dashboard listens on loopback; only oauth2-proxy is
-exposed by the Service.
+The reconciler must create one Deployment named `openshell-console` in the gateway namespace. The Deployment has two containers: the dashboard and the oauth2-proxy sidecar. The dashboard listens on loopback. The Service exposes only oauth2-proxy.
 
-All console resources SHALL carry the standard labels used by gateway resources,
-with `app.kubernetes.io/component = console` and
-`app.kubernetes.io/instance = openshell-console`:
-
-- `app.kubernetes.io/name=openshell`
-- `app.kubernetes.io/component=console`
-- `app.kubernetes.io/instance=openshell-console`
-- `app.kubernetes.io/managed-by=hypershell-control-plane`
-- `hypershell.redhat.io/managed=true`
+Every console resource must carry the standard gateway labels, with `app.kubernetes.io/component = console` and `app.kubernetes.io/instance = openshell-console`.
 
 #### Dashboard container
 
-- **Image:** control-plane default (see ImageDefaults), overridable per gateway.
-- **Listen address:** loopback only (e.g. `127.0.0.1:8000`).
-- **Environment:**
-  - `OPENSHELL_GATEWAY_URL = grpcs://openshell-gateway.<tenant-namespace>.svc.cluster.local:8080`
+- Image: the control-plane default (see ImageDefaults); a per-gateway value can override it.
+- Listen address: loopback only (for example `127.0.0.1:8000`).
+- Environment:
+  - `OPENSHELL_GATEWAY_URL = grpcs://openshell-gateway.<ns>.svc.cluster.local:8080`
   - `GATEWAY_CA_CERT = /etc/openshell-tls/gateway/ca.crt`
   - `AUTH_DISABLED = false`
   - `AUTH_TOKEN_HEADER = X-Forwarded-Access-Token`
   - `AUTH_USER_HEADER = X-Forwarded-User`
   - `LOGOUT_URL = /oauth2/sign_out`
-- **Volume mounts:** `openshell-server-tls` Secret `ca.crt` at `/etc/openshell-tls/gateway` (readOnly), to verify the gateway's in-cluster server certificate.
+- Volume mount: the `openshell-server-tls` Secret key `ca.crt` at `/etc/openshell-tls/gateway` (read only), to verify the gateway server certificate.
 
 #### oauth2-proxy sidecar container
 
-- **Image:** control-plane default (see ImageDefaults), overridable.
-- **Listen address:** `0.0.0.0:4180` (the Service target).
-- **Configuration (via `OAUTH2_PROXY_*` env / args):**
+- Image: the control-plane default (see ImageDefaults); a value can override it.
+- Listen address: `0.0.0.0:4180` (the Service target).
+- Configuration (through `OAUTH2_PROXY_*` variables):
   - `provider = oidc`
-  - `oidc-issuer-url = {server-url}/realms/{realm}` (gateway's issuer)
+  - `oidc-issuer-url = {server-url}/realms/{realm}`
   - `client-id = {name}-{id}-console`
-  - `client-secret` from Secret `openshell-console-oauth2` key `client-secret`
-  - `cookie-secret` from Secret `openshell-console-oauth2` key `cookie-secret`
+  - `client-secret` from Secret key `client-secret`
+  - `cookie-secret` from Secret key `cookie-secret`
   - `code-challenge-method = S256`
-  - `redirect-url = https://console-<tenant-namespace>.<base-domain>/oauth2/callback`
+  - `redirect-url = https://console-<ns>.<base-domain>/oauth2/callback`
   - `upstream = http://127.0.0.1:8000`
   - `http-address = 0.0.0.0:4180`
   - `reverse-proxy = true`
-  - `pass-access-token = true` (adds `X-Forwarded-Access-Token` to the upstream request)
-  - `pass-user-headers = true` (adds `X-Forwarded-User`, `X-Forwarded-Email`, `X-Forwarded-Preferred-Username`)
+  - `pass-access-token = true` (adds `X-Forwarded-Access-Token`)
+  - `pass-user-headers = true` (adds `X-Forwarded-User` and related headers)
   - `skip-provider-button = true`
   - `cookie-secure = true`
-  - `email-domain = *` (any authenticated realm user; the gateway enforces per-gateway authorization)
+  - `email-domain = *` (any realm user; the gateway controls access)
   - `scope = "openid profile email roles gateway-roles"`
 
-#### SecurityContext (both containers)
+#### SecurityContext
 
-Per the platform's restricted-SecurityContext convention, both containers SHALL set:
-`runAsNonRoot: true`, `allowPrivilegeEscalation: false`, `readOnlyRootFilesystem: true`,
-`seccompProfile.type: RuntimeDefault`, and `capabilities.drop: [ALL]`. Because
-`readOnlyRootFilesystem` is `true`, each container that needs scratch space SHALL
-mount a writable `emptyDir` at `/tmp` (mirroring the gateway Deployment's `tmp`
-volume). Resource requests/limits SHALL be modest (e.g. requests `cpu: 50m`,
-`memory: 64Mi`; limits `cpu: 250m`, `memory: 256Mi` per container). OpenShift
-UID/fsGroup handling SHALL follow the same rules as the gateway Deployment (see
-`openshell-gateway.spec.md` § OpenShift-Specific Gateway Provisioning).
+Each container must set `runAsNonRoot: true`, `allowPrivilegeEscalation: false`, `readOnlyRootFilesystem: true`, `seccompProfile.type: RuntimeDefault`, and `capabilities.drop: [ALL]`. Because the root filesystem is read only, each container must mount a writable `emptyDir` at `/tmp`. The Deployment must follow the gateway rules for the OpenShift UID and `fsGroup` (see `openshell-gateway.spec.md`). Each container must request modest resources.
 
 #### Health probes
 
-The oauth2-proxy container SHALL expose readiness/liveness probes on its
-`/ready` and `/ping` endpoints (port `4180`). The dashboard container SHALL expose
-a readiness probe on its HTTP listener so the pod does not receive traffic before
-the BFF is serving. Probe cadence SHALL follow the gateway Deployment's pattern.
-
-#### Scenario: Console pod runs dashboard behind oauth2-proxy
-
-- GIVEN a routed Gateway with console provisioning enabled
-- WHEN the GatewayReconciler applies the console Deployment
-- THEN the pod SHALL contain a dashboard container listening on loopback and an oauth2-proxy sidecar listening on `4180`
-- AND oauth2-proxy SHALL be configured with the console client id and the secrets from `openshell-console-oauth2`
-- AND both containers SHALL run with the restricted SecurityContext
-
-#### Scenario: Dashboard reaches the gateway over TLS
-
-- GIVEN the console Deployment is running
-- WHEN the dashboard establishes its gRPC connection
-- THEN it SHALL connect to `grpcs://openshell-gateway.<tenant-namespace>.svc.cluster.local:8080`
-- AND it SHALL verify the gateway's server certificate against the mounted `ca.crt`
+oauth2-proxy must expose readiness and liveness probes on `/ready` and `/ping` (port `4180`). The dashboard must expose a readiness probe on its HTTP listener.
 
 ---
 
 ### Requirement: Console Service and HTTP Exposure
 
-The GatewayReconciler SHALL create a `ClusterIP` Service `openshell-console`
-targeting the oauth2-proxy port (`4180`), and an `HTTPRoute` that attaches to the
-shared Gateway so browsers can reach the console under a per-gateway hostname.
-
-#### Service
-
-- Name: `openshell-console`, `ClusterIP`, port `4180` → target `4180`, selector `app.kubernetes.io/instance: openshell-console`.
-
-#### HTTPRoute
+The reconciler must create a `ClusterIP` Service `openshell-console` on port `4180`. The reconciler must create an HTTPRoute that attaches to the shared Gateway.
 
 ```yaml
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
   name: openshell-console
-  namespace: <tenant-namespace>
+  namespace: <ns>
 spec:
   parentRefs:
   - name: <GATEWAY_API_GATEWAY_NAME>
     namespace: <GATEWAY_API_GATEWAY_NAMESPACE>
     sectionName: <GATEWAY_API_HTTP_LISTENER_NAME>
   hostnames:
-  - console-<tenant-namespace>.<base-domain>
+  - console-<ns>.<base-domain>
   rules:
   - backendRefs:
     - name: openshell-console
       port: 4180
 ```
 
-The console hostname `console-<tenant-namespace>.<base-domain>` is a subdomain of
-`<base-domain>` and is therefore covered by the shared Gateway's wildcard TLS
-certificate, requiring no per-console certificate issuance. The console hostname
-is distinct from the gateway's gRPC hostname (`gw-<tenant-namespace>.<base-domain>`)
-so the two attach to different Gateway listeners (HTTP for the console, gRPC for
-the gateway).
+The hostname `console-<ns>.<base-domain>` is a subdomain of `<base-domain>`. The shared Gateway wildcard certificate covers it, so the console needs no separate certificate. This hostname differs from the gateway gRPC hostname (`gw-<ns>.<base-domain>`), so the two attach to different listeners.
 
-#### Scenario: Console reachable at its hostname
+#### Scenario: HTTP listener absent on the shared Gateway
 
-- GIVEN a routed Gateway in namespace `openshell-a1b2c3d4e5f67890` with base domain `apps.cluster.example.com`
-- WHEN the GatewayReconciler provisions the console
-- THEN it SHALL create an HTTPRoute for hostname `console-openshell-a1b2c3d4e5f67890.apps.cluster.example.com`
-- AND the route SHALL forward to the `openshell-console` Service on port `4180`
-- AND the hostname SHALL be served by the shared Gateway's wildcard certificate
-
-#### Scenario: HTTP listener missing on the shared Gateway
-
-- GIVEN the shared Gateway has no listener matching `GATEWAY_API_HTTP_LISTENER_NAME`
-- WHEN the GatewayReconciler creates the HTTPRoute
-- THEN the HTTPRoute SHALL fail to attach and report a not-accepted condition
-- AND the reconciler SHALL log a warning identifying the missing listener
-- AND it SHALL NOT fail the gateway reconciliation
+- GIVEN a shared Gateway with no listener that matches `GATEWAY_API_HTTP_LISTENER_NAME`
+- WHEN the reconciler creates the HTTPRoute
+- THEN the HTTPRoute must report a not-accepted condition
+- AND the reconciler must write a warning that names the missing listener
+- AND it must not fail the gateway reconciliation
 
 ---
 
 ### Requirement: Console NetworkPolicies
 
-The GatewayReconciler SHALL create NetworkPolicies that (a) allow the shared
-Gateway proxy to reach the console pod, and (b) allow the console pod to reach the
-gateway pod on the gRPC port. Both are required because existing gateway
-NetworkPolicies select the gateway pod for ingress, making the namespace
-default-deny for any source not explicitly allowed.
+The reconciler must create two NetworkPolicies. Existing gateway policies already select the gateway pod for ingress, so the namespace denies traffic by default from any other source.
 
-1. **`openshell-console-allow-router`** -- selects the console pod
-   (`app.kubernetes.io/instance: openshell-console`); allows ingress on TCP `4180`
-   from the shared Gateway namespace (`GATEWAY_API_GATEWAY_NAMESPACE`).
+1. **`openshell-console-allow-router`** -- selects the console pod (`app.kubernetes.io/instance: openshell-console`); allows ingress on TCP `4180` from the shared Gateway namespace (`GATEWAY_API_GATEWAY_NAMESPACE`).
+2. **`openshell-gateway-allow-console`** -- selects the gateway pod (`app.kubernetes.io/instance: openshell-gateway`); allows ingress on TCP `8080` from the console pod in the same namespace.
 
-2. **`openshell-gateway-allow-console`** -- selects the gateway pod
-   (`app.kubernetes.io/instance: openshell-gateway`); allows ingress on TCP `8080`
-   from console pods (`app.kubernetes.io/instance: openshell-console`) in the same
-   namespace.
+#### Scenario: Console reaches the gateway
 
-#### Scenario: Console-to-gateway traffic permitted
-
-- GIVEN a routed Gateway with the console deployed
+- GIVEN a routed gateway with the console deployed
 - WHEN the dashboard connects to `openshell-gateway:8080`
-- THEN the `openshell-gateway-allow-console` NetworkPolicy SHALL permit the connection
-- AND without it the gRPC connection would be blocked by the namespace's default-deny posture
-
-#### Scenario: Router-to-console traffic permitted
-
-- GIVEN a routed Gateway with the console deployed
-- WHEN the shared Gateway proxy forwards a browser request to the console
-- THEN the `openshell-console-allow-router` NetworkPolicy SHALL permit ingress on `4180`
+- THEN `openshell-gateway-allow-console` must allow the connection
+- AND without this policy the namespace default-deny posture would block it
 
 ---
 
 ### Requirement: Console Lifecycle and Cleanup
 
-The console SHALL be reconciled and torn down together with the gateway's routing
-configuration and the gateway resource itself, using update-or-create semantics
-throughout.
+The reconciler must reconcile and remove the console together with the route and the gateway. The reconciler must use update-or-create for all console resources.
 
-#### Scenario: Routing removed from an existing gateway
+#### Scenario: Route removed from a gateway
 
-- GIVEN a gateway that previously had `route` and an associated console
-- WHEN the `route` field is removed
-- THEN the GatewayReconciler SHALL delete all console resources (Deployment, Service, HTTPRoute, NetworkPolicies, `openshell-console-oauth2` Secret)
-- AND it SHALL delete the console Keycloak client `{name}-{id}-console`
-- AND it SHALL clear the `consoleAddress` field on the Gateway resource
+- GIVEN a gateway that had a route and a console
+- WHEN the route field is removed
+- THEN the reconciler must delete all console resources: the Deployment, the Service, the HTTPRoute, the NetworkPolicies, and the `openshell-console-oauth2` Secret
+- AND it must delete the console client `{name}-{id}-console`
+- AND it must clear the `consoleAddress` field on the gateway
 
 #### Scenario: Gateway deleted
 
 - GIVEN a gateway with a console
-- WHEN the GatewayReconciler receives a Gateway DELETED event
-- THEN it SHALL delete the console Keycloak client (in addition to the gateway client)
-- AND the console's namespaced resources SHALL be removed with the rest of the gateway resources
-- AND Keycloak client deletion SHALL cascade the console client's mappers automatically
+- WHEN the reconciler gets a Gateway DELETED event
+- THEN it must delete the console client
+- AND the console namespaced resources go away with the other gateway resources
+- AND Keycloak deletes the console mappers with the client
 
-#### Scenario: Console cleanup failure is non-blocking
+#### Scenario: Cleanup failure does not block
 
-- GIVEN the GatewayReconciler is tearing down a console
-- WHEN deleting the console Keycloak client fails (e.g. Keycloak unavailable)
-- THEN the reconciler SHALL log an error with the orphaned `clientId` for manual cleanup
-- AND it SHALL continue removing the remaining console and gateway resources
+- GIVEN the reconciler removes a console
+- WHEN it cannot delete the console client, because Keycloak is unavailable
+- THEN it must log the error and the orphan `clientId`
+- AND it must continue to remove the other resources
 
 ---
 
 ### Requirement: Console Provisioning Atomicity and Idempotency
 
-Console Keycloak provisioning (client, mappers, secret retrieval) SHALL be treated
-as an atomic operation within the reconciliation cycle. If any step fails, the
-GatewayReconciler SHALL roll back the created console Keycloak client and retry on
-the next cycle. Repeated reconciliation SHALL NOT create duplicate resources.
+The reconciler must treat the console Keycloak work (client, mappers, secret) as one atomic step. When a step fails, the reconciler must delete the console client and retry on the next cycle. Repeated reconciliation must not create duplicate resources.
 
-#### Scenario: Mapper creation fails mid-provisioning
+#### Scenario: Mapper creation fails
 
-- GIVEN the GatewayReconciler has created the console Keycloak client
-- WHEN a protocol-mapper creation fails
-- THEN the reconciler SHALL delete the created console client (cascading its mappers)
-- AND it SHALL log the error and retry on the next reconciliation cycle
-- AND the console workload SHALL NOT be deployed until console provisioning succeeds
-
-#### Scenario: Reconcile is idempotent
-
-- GIVEN a gateway whose console is already fully provisioned
-- WHEN the GatewayReconciler reconciles again
-- THEN it SHALL apply the latest console configuration using update-or-create semantics
-- AND it SHALL NOT create a duplicate Keycloak client, Deployment, Service, HTTPRoute, or Secret
+- GIVEN the reconciler created the console client
+- WHEN a mapper fails
+- THEN it must delete the console client, which removes its mappers
+- AND it must log the error and retry on the next cycle
+- AND it must not deploy the console workload until the Keycloak work succeeds
 
 ---
 
 ### Requirement: Console Address Discovery
 
-The GatewayReconciler SHALL PATCH the console URL into a read-only
-`consoleAddress` field on the Gateway resource via the API server, so the
-HyperShell management web-console and CLI can link users to the per-gateway
-console.
+The reconciler must PATCH the console URL into a read-only `consoleAddress` field on the gateway. The management web-console and the CLI use this field to link to the console.
 
-- Format: `https://console-<tenant-namespace>.<base-domain>`
-- Published during the reconciliation that creates the console resources
-- Cleared when the console is torn down
-- If the base domain cannot be resolved (e.g. `GATEWAY_API_BASE_DOMAIN` unset), `consoleAddress` SHALL remain empty
-
-#### Scenario: Console address published
-
-- GIVEN a routed Gateway whose console is provisioned in namespace `openshell-a1b2c3d4e5f67890`
-- WHEN the GatewayReconciler reconciles
-- THEN it SHALL set `consoleAddress = https://console-openshell-a1b2c3d4e5f67890.<base-domain>` on the Gateway resource
+- Format: `https://console-<ns>.<base-domain>`.
+- The reconciler sets it when it creates the console.
+- The reconciler clears it when it removes the console.
+- The field stays empty when the base domain is unknown (for example, `GATEWAY_API_BASE_DOMAIN` is unset).
 
 ---
 
 ## Configuration
 
-### Gateway Resource Schema Additions
+### Gateway resource
 
-| Field | Required | Default | Description |
-|---|---|---|---|
-| `consoleAddress` | - | - | Read-only. External console URL populated by the control plane; empty when no console is deployed |
+| Field | Description |
+|---|---|
+| `consoleAddress` | Read-only. The control plane sets the console URL. Empty when no console runs. |
 
-No user-settable console field is introduced: console provisioning follows the
-`route` configuration automatically.
+The gateway has no user field for the console. The console follows the route.
 
-### Control Plane Environment Variables
+### Control-plane variables
 
 | Variable | Default | Description |
 |---|---|---|
-| `GATEWAY_API_HTTP_LISTENER_NAME` | `https` | `sectionName` of the shared Gateway's HTTP-capable listener that console HTTPRoutes attach to |
-| `HYPERSHELL_CONSOLE_IMAGE` | *(ImageDefaults default)* | OpenShell dashboard image |
-| `HYPERSHELL_OAUTH2_PROXY_IMAGE` | *(ImageDefaults default)* | oauth2-proxy image |
+| `GATEWAY_API_HTTP_LISTENER_NAME` | `https` | The `sectionName` of the shared Gateway HTTP listener for console HTTPRoutes |
+| `HYPERSHELL_CONSOLE_IMAGE` | *(ImageDefaults default)* | The OpenShell dashboard image |
+| `HYPERSHELL_OAUTH2_PROXY_IMAGE` | *(ImageDefaults default)* | The oauth2-proxy image |
 
-`GATEWAY_API_BASE_DOMAIN` (already defined in `openshell-gateway-routing.spec.md`)
-is reused to derive the console hostname.
+The reconciler reuses `GATEWAY_API_BASE_DOMAIN` (see `openshell-gateway-routing.spec.md`) for the console hostname.
 
-### ImageDefaults Additions
+### ImageDefaults
 
-The `ImageDefaults` interface (`internal/gateway/config.go`) SHALL gain
-`DefaultConsoleImage()` and `DefaultOAuth2ProxyImage()`, resolved with the same
-override precedence as existing images (env var → per-namespace override →
-static default).
+The `ImageDefaults` interface (`internal/gateway/config.go`) must add `DefaultConsoleImage()` and `DefaultOAuth2ProxyImage()`. They use the same override order as the other images.
 
 ---
 
-## Data Model Changes
+## Data model
 
-The Gateway kind SHALL include a read-only `consoleAddress` field:
-
-```
-Gateway {
-    ...existing fields...
-    text consoleAddress "nullable - read-only external console URL populated by control plane"
-}
-```
-
-Migration:
+The gateway kind must add a read-only `consoleAddress` field.
 
 ```sql
 ALTER TABLE gateways ADD COLUMN console_address TEXT;
 ```
 
-The `consoleAddress` field SHALL be read-only -- not settable or updatable via the
-REST or gRPC API.
+The REST API and the gRPC API must not let a user set or update `consoleAddress`.
 
 ---
 
-## RBAC Requirements
+## RBAC
 
-The control-plane ServiceAccount already holds create/update/patch/delete on
-`services`, `secrets`, `deployments`, and `networkpolicies` (see
-`openshell-gateway.spec.md`). Provisioning the console additionally requires, in
-tenant namespaces:
+The control-plane ServiceAccount already has create, update, patch, and delete on `services`, `secrets`, `deployments`, and `networkpolicies`. The console needs one more rule in gateway namespaces:
 
 ```yaml
 - apiGroups: ["gateway.networking.k8s.io"]
@@ -570,75 +349,32 @@ tenant namespaces:
   verbs: ["get", "list", "create", "update", "patch", "delete"]
 ```
 
-No new Keycloak permissions are required: the existing `hypershell-keycloak-admin`
-service account already manages clients, roles, and mappers.
+The console needs no new Keycloak permission. The `hypershell-keycloak-admin` account already manages clients, roles, and mappers.
 
 ---
 
 ## Prerequisites
 
-1. **Shared Gateway HTTP listener.** The admin-provisioned shared Gateway (see
-   `openshell-gateway-routing.spec.md`) MUST expose an HTTP-capable listener
-   (HTTPS/Terminate, port 443, wildcard `*.<base-domain>` cert) that accepts
-   `HTTPRoute` attachments from tenant namespaces. Its `sectionName` MUST match
-   `GATEWAY_API_HTTP_LISTENER_NAME`. This is the HTTP analogue of the existing
-   `grpc` listener used by gateway GRPCRoutes.
-
-2. **Dashboard image availability.** The OpenShell dashboard image
-   ([Gkrumbach07/openshell-dashboard](https://github.com/Gkrumbach07/openshell-dashboard),
-   published to `quay.io/gkrumbach07/openshell-dashboard`) MUST be reachable from
-   the cluster. The image and its `X-Forwarded-Access-Token` / gateway-URL
-   contract are an upstream dependency; a pinned tag SHALL be used.
-
-3. **Keycloak realm.** The same realm prerequisites as
-   `openshell-gateway-keycloak.spec.md` apply. No new realm-level objects are
-   required (the console client and its mappers are created per gateway).
+1. **Shared Gateway HTTP listener.** The admin must add an HTTP listener to the shared Gateway (HTTPS/Terminate, port 443, wildcard `*.<base-domain>` certificate). The listener must accept HTTPRoutes from gateway namespaces. Its `sectionName` must match `GATEWAY_API_HTTP_LISTENER_NAME`.
+2. **Dashboard image.** The cluster must reach the OpenShell dashboard image ([Gkrumbach07/openshell-dashboard](https://github.com/Gkrumbach07/openshell-dashboard)). The deployment must use a pinned tag. The image contract (the gateway URL and the `X-Forwarded-Access-Token` header) is an upstream dependency.
+3. **Keycloak realm.** The realm prerequisites in `openshell-gateway-keycloak.spec.md` apply. The console adds no realm-level object.
 
 ---
 
-## Security Considerations
+## Out of scope
 
-- **Per-gateway isolation preserved.** `fullScopeAllowed = false` on the console
-  client, with audience/role mappers scoped to a single gateway client, ensures a
-  console token is valid only for its own gateway -- no skeleton-key token across
-  gateways.
-- **Authorization at the gateway.** oauth2-proxy authenticates any realm user;
-  effective authorization is enforced by the gateway from `hypershell.roles`.
-  Users without a RoleBinding on the gateway can reach the console shell but
-  cannot perform gateway operations. Restricting oauth2-proxy to role-holders is a
-  possible future hardening but is not required for correctness.
-- **Confidential client secret handling.** The console client secret is fetched by
-  the control plane from Keycloak and stored only in the tenant-namespace
-  `openshell-console-oauth2` Secret; it is never logged and never leaves the
-  cluster.
-- **Cookie secret.** oauth2-proxy's cookie-encryption secret is generated in-cluster
-  and is independent of Keycloak; it is preserved across reconciliations to avoid
-  invalidating active sessions.
-- **TLS everywhere.** Browser→shared Gateway is HTTPS (wildcard cert);
-  console→gateway is gRPC/TLS with server-certificate verification.
-
----
-
-## Out of Scope
-
-- **Central single-console SSO across all gateways** (one login, per-request token
-  exchange to `aud={name}-{id}`). That is the alternative "global proxy" option and
-  is deliberately excluded here.
-- **Embedding the dashboard inside the HyperShell management web-console.** This
-  spec deploys a standalone per-gateway console; deep integration into
-  `components/web-console/` is separate work.
-- **Changes to the OpenShell dashboard image itself.** The dashboard is consumed
-  as a published upstream artifact via its documented runtime configuration.
+- A central console with single sign-on across all gateways (one login, token exchange for each `aud`).
+- The dashboard inside the management web-console.
+- Changes to the OpenShell dashboard image.
 
 ---
 
 ## References
 
-- [OpenShell Dashboard](https://github.com/Gkrumbach07/openshell-dashboard) -- Go BFF + React console; runtime `OPENSHELL_GATEWAY_URL` and `X-Forwarded-Access-Token` relay contract
-- [oauth2-proxy documentation](https://oauth2-proxy.github.io/oauth2-proxy/) -- OIDC provider, PKCE (`code-challenge-method=S256`), `pass-access-token`, `reverse-proxy`
-- [oauth2-proxy #1714](https://github.com/oauth2-proxy/oauth2-proxy/issues/1714) / [#2929](https://github.com/oauth2-proxy/oauth2-proxy/issues/2929) -- client-secret is required even with PKCE (rationale for a confidential console client)
-- [Gateway API HTTPRoute](https://gateway-api.sigs.k8s.io/api-types/httproute/) -- HTTP routing attachment to a shared Gateway
-- [Keycloak Admin REST API](https://www.keycloak.org/docs-api/latest/rest-api/) -- client, mapper, and client-secret endpoints
-- [Keycloak Protocol Mappers](https://www.keycloak.org/docs/latest/server_admin/#_protocol-mappers) -- audience and client-role mappers targeting another client
-- `openshell-gateway-keycloak.spec.md` -- per-gateway client, roles, and OIDC Role Bridge reused by the console
-- `openshell-gateway-routing.spec.md` -- shared Gateway, base-domain hostname derivation, NetworkPolicy pattern
+- [OpenShell Dashboard](https://github.com/Gkrumbach07/openshell-dashboard) -- the gateway URL and `X-Forwarded-Access-Token` contract
+- [oauth2-proxy](https://oauth2-proxy.github.io/oauth2-proxy/) -- OIDC provider, PKCE, `pass-access-token`, `reverse-proxy`
+- [oauth2-proxy #1714](https://github.com/oauth2-proxy/oauth2-proxy/issues/1714) -- a client secret is required with PKCE
+- [Gateway API HTTPRoute](https://gateway-api.sigs.k8s.io/api-types/httproute/)
+- [Keycloak Admin REST API](https://www.keycloak.org/docs-api/latest/rest-api/)
+- `openshell-gateway-keycloak.spec.md` -- the per-gateway client and the OIDC Role Bridge
+- `openshell-gateway-routing.spec.md` -- the shared Gateway, hostnames, and NetworkPolicy pattern
