@@ -390,8 +390,6 @@ components:
             type: string
         route_address:
           type: string
-        console_address:
-          type: string
         oidc:
           type: string
         route:

@@ -2684,7 +2684,6 @@ components:
         server_dns_names:
         - server_dns_names
         - server_dns_names
-        console_address: console_address
         credential_driver: credential_driver
         route_address: route_address
         oidc: oidc
@@ -2729,8 +2728,6 @@ components:
             type: string
           type: array
         route_address:
-          type: string
-        console_address:
           type: string
         oidc:
           type: string

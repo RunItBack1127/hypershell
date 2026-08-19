@@ -33,7 +33,6 @@ type GatewayPatchRequest struct {
 	SupervisorImage  *string  `json:"supervisor_image,omitempty"`
 	ServerDnsNames   []string `json:"server_dns_names,omitempty"`
 	RouteAddress     *string  `json:"route_address,omitempty"`
-	ConsoleAddress   *string  `json:"console_address,omitempty"`
 	Oidc             *string  `json:"oidc,omitempty"`
 	Route            *string  `json:"route,omitempty"`
 	DatabaseConfig   *string  `json:"database_config,omitempty"`
@@ -505,38 +504,6 @@ func (o *GatewayPatchRequest) SetRouteAddress(v string) {
 	o.RouteAddress = &v
 }
 
-// GetConsoleAddress returns the ConsoleAddress field value if set, zero value otherwise.
-func (o *GatewayPatchRequest) GetConsoleAddress() string {
-	if o == nil || IsNil(o.ConsoleAddress) {
-		var ret string
-		return ret
-	}
-	return *o.ConsoleAddress
-}
-
-// GetConsoleAddressOk returns a tuple with the ConsoleAddress field value if set, nil otherwise
-// and a boolean to check if the value has been set.
-func (o *GatewayPatchRequest) GetConsoleAddressOk() (*string, bool) {
-	if o == nil || IsNil(o.ConsoleAddress) {
-		return nil, false
-	}
-	return o.ConsoleAddress, true
-}
-
-// HasConsoleAddress returns a boolean if a field has been set.
-func (o *GatewayPatchRequest) HasConsoleAddress() bool {
-	if o != nil && !IsNil(o.ConsoleAddress) {
-		return true
-	}
-
-	return false
-}
-
-// SetConsoleAddress gets a reference to the given string and assigns it to the ConsoleAddress field.
-func (o *GatewayPatchRequest) SetConsoleAddress(v string) {
-	o.ConsoleAddress = &v
-}
-
 // GetOidc returns the Oidc field value if set, zero value otherwise.
 func (o *GatewayPatchRequest) GetOidc() string {
 	if o == nil || IsNil(o.Oidc) {
@@ -716,9 +683,6 @@ func (o GatewayPatchRequest) ToMap() (map[string]interface{}, error) {
 	}
 	if !IsNil(o.RouteAddress) {
 		toSerialize["route_address"] = o.RouteAddress
-	}
-	if !IsNil(o.ConsoleAddress) {
-		toSerialize["console_address"] = o.ConsoleAddress
 	}
 	if !IsNil(o.Oidc) {
 		toSerialize["oidc"] = o.Oidc

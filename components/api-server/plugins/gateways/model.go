@@ -73,7 +73,6 @@ type GatewayPatchRequest struct {
 	SupervisorImage  *string `json:"supervisor_image,omitempty"`
 	ServerDnsNames   *string `json:"server_dns_names,omitempty"`
 	RouteAddress     *string `json:"route_address,omitempty"`
-	ConsoleAddress   *string `json:"console_address,omitempty"`
 	Oidc             *string `json:"oidc,omitempty"`
 	Route            *string `json:"route,omitempty"`
 	DatabaseConfig   *string `json:"database_config,omitempty"`
