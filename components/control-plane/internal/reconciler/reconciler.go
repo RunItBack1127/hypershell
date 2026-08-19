@@ -389,6 +389,10 @@ func (r *GatewayReconciler) Handle(ctx context.Context, event watcher.Event[*pb.
 			r.updateGatewayHealth(ctx, event.ResourceID, "Provisioning", "Deployment ready; awaiting route readiness")
 			log.Printf("INFO gateway %s deployment ready in namespace %s; awaiting route readiness", gw.Name, namespace)
 		}
+		// Publish the console address now if the console pod is already serving so
+		// the button appears promptly on warm clusters; the health reconciler
+		// publishes (and retracts) it as the console's readiness changes otherwise.
+		syncConsoleAddress(ctx, r.clientset, pb.NewGatewayServiceClient(r.grpcConn), event.ResourceID, gw, r.exposure != nil)
 	} else {
 		r.updateGatewayHealth(ctx, event.ResourceID, "Running", "Healthy")
 		log.Printf("INFO gateway %s provisioned and ready in namespace %s", gw.Name, namespace)
@@ -490,6 +494,52 @@ func (r *GatewayReconciler) updateGatewayPhase(ctx context.Context, gatewayID st
 	if err != nil {
 		log.Printf("WARN failed to update gateway %s phase to %s: %v", gatewayID, phase, err)
 	}
+}
+
+// consoleAddressFor returns the console_address a gateway should carry given
+// whether its console Deployment is Ready: the console URL when Ready, empty
+// otherwise. Publishing empty until the console pod can serve keeps the web UI's
+// console button hidden, and retracts it if the pod later goes unready.
+func consoleAddressFor(ready bool, url string) string {
+	if ready {
+		return url
+	}
+	return ""
+}
+
+// syncConsoleAddress publishes the gateway's console_address once its console
+// Deployment is observed Ready and clears it when the console is absent or not
+// Ready, so the web UI only offers the console button when the console pod can
+// serve. It is a no-op for gateways without a console (no exposure port, or not
+// routed) and when the base domain is unconfigured, and it leaves the address
+// untouched on a transient readiness-observation error rather than flapping the
+// button.
+func syncConsoleAddress(ctx context.Context, clientset *kubernetes.Clientset, client pb.GatewayServiceClient, gatewayID string, gw *pb.Gateway, hasExposure bool) {
+	if gatewayID == "" || !hasExposure || !isRoutedGateway(gw) {
+		return
+	}
+	namespace := gatewayNamespace(gw)
+	url, ok := gateway.ConsoleURL(namespace)
+	if !ok {
+		return
+	}
+	ready, _, err := gateway.DeploymentReadiness(ctx, clientset, namespace, gateway.ConsoleDeploymentName)
+	if err != nil {
+		log.Printf("WARN console readiness for %s: %v", namespace, err)
+		return
+	}
+	desired := consoleAddressFor(ready, url)
+	if gw.GetConsoleAddress() == desired {
+		return
+	}
+	if _, err := client.UpdateGateway(ctx, &pb.UpdateGatewayRequest{
+		Id:             gatewayID,
+		ConsoleAddress: &desired,
+	}); err != nil {
+		log.Printf("WARN failed to set console address for %s to %q: %v", gatewayID, desired, err)
+		return
+	}
+	log.Printf("INFO console address for %s set to %q (consoleReady=%v)", gatewayID, desired, ready)
 }
 
 // makeRouteAddressUpdater returns a RouteAddressUpdater callback that PATCHes

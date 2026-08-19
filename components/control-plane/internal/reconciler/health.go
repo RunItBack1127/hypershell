@@ -120,6 +120,11 @@ func (h *GatewayHealthReconciler) reconcileGatewayHealth(ctx context.Context, cl
 		return
 	}
 
+	// Keep the console_address in sync with the console pod's readiness so the web
+	// UI's console button only appears once the console can serve (and disappears
+	// if it later goes unready). Independent of the gateway workload's own phase.
+	syncConsoleAddress(ctx, h.clientset, client, gatewayID, gw, h.exposure != nil)
+
 	namespace := gatewayNamespace(gw)
 	ready, reason, err := gateway.DeploymentReadiness(ctx, h.clientset, namespace, gateway.GatewayDeploymentName)
 	if err != nil {

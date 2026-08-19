@@ -74,6 +74,24 @@ func deriveConsoleHost(namespace string) (string, bool) {
 	return fmt.Sprintf("console-%s.%s", namespace, baseDomain), true
 }
 
+// ConsoleDeploymentName is the name of the per-gateway console Deployment
+// (dashboard + oauth2-proxy sidecar). It is exported so the reconciler can
+// observe the console pod's readiness before publishing the gateway's
+// console_address, gating the web UI's console button on a servable console.
+const ConsoleDeploymentName = consoleName
+
+// ConsoleURL returns the external URL of the per-gateway console, mirroring the
+// address reconcileConsole builds, or ok=false when GATEWAY_API_BASE_DOMAIN is
+// unset (console disabled). The reconciler publishes this address only once the
+// console Deployment is Ready.
+func ConsoleURL(namespace string) (string, bool) {
+	host, ok := deriveConsoleHost(namespace)
+	if !ok {
+		return "", false
+	}
+	return "https://" + host, true
+}
+
 // consoleListenerName returns the sectionName of the shared Gateway HTTP
 // listener that console HTTPRoutes attach to (GATEWAY_API_HTTP_LISTENER_NAME,
 // default "https").
@@ -197,13 +215,12 @@ func reconcileConsole(ctx context.Context, dynamicClient dynamic.Interface, clie
 		}
 	}
 
-	if opts.UpdateConsoleAddress != nil {
-		if err := opts.UpdateConsoleAddress(ctx, consoleURL); err != nil {
-			log.Printf("WARN failed to publish consoleAddress %s in %s: %v", consoleURL, namespace, err)
-		} else {
-			log.Printf("INFO published consoleAddress %s for gateway in %s", consoleURL, namespace)
-		}
-	}
+	// The console_address is deliberately NOT published here. Publishing it at
+	// apply time surfaces the web UI's console button before the oauth2-proxy and
+	// dashboard pod can serve, so a user clicking it hits a not-ready console. The
+	// reconciler package publishes console_address only once this Deployment is
+	// observed Ready (and retracts it if the pod later goes unready), gating the
+	// button on a servable console. See openshell-gateway-console.spec.md.
 
 	log.Printf("INFO console reconciled in namespace %s (host=%s)", namespace, host)
 	return nil

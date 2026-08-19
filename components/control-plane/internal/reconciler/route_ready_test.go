@@ -85,3 +85,17 @@ func TestPollRouteReady(t *testing.T) {
 		}
 	})
 }
+
+func TestConsoleAddressFor(t *testing.T) {
+	const url = "https://console-openshell-abc.gw.example.com"
+
+	// Ready console publishes its URL so the web UI's console button appears.
+	if got := consoleAddressFor(true, url); got != url {
+		t.Errorf("consoleAddressFor(ready) = %q, want %q", got, url)
+	}
+	// A not-ready console clears the address so the button stays hidden (or is
+	// retracted if the pod later goes unready).
+	if got := consoleAddressFor(false, url); got != "" {
+		t.Errorf("consoleAddressFor(not ready) = %q, want empty", got)
+	}
+}

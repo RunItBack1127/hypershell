@@ -155,6 +155,25 @@ func TestBuildConsoleDeployment_NoTrustedCAOmitsOAuth2ProxyCA(t *testing.T) {
 // padding, URL-base64-decode, and land on 16/24/32 bytes. A standard-base64
 // value (44 chars, +/ alphabet) is rejected and used verbatim, crashing the
 // sidecar with "cookie_secret must be 16, 24, or 32 bytes".
+func TestConsoleURL(t *testing.T) {
+	// With a base domain configured, the URL is https://console-<ns>.<domain>,
+	// matching the address reconcileConsole builds and the reconciler publishes.
+	t.Setenv("GATEWAY_API_BASE_DOMAIN", "gw.example.com")
+	got, ok := ConsoleURL("openshell-abc")
+	if !ok {
+		t.Fatal("ConsoleURL: expected ok with base domain set")
+	}
+	if want := "https://console-openshell-abc.gw.example.com"; got != want {
+		t.Errorf("ConsoleURL = %q, want %q", got, want)
+	}
+
+	// Without a base domain the console is disabled and the URL is unresolvable.
+	t.Setenv("GATEWAY_API_BASE_DOMAIN", "")
+	if _, ok := ConsoleURL("openshell-abc"); ok {
+		t.Error("ConsoleURL: expected ok=false when base domain unset")
+	}
+}
+
 func TestGenerateConsoleCookieSecret_DecodesTo32Bytes(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		s, err := generateConsoleCookieSecret()

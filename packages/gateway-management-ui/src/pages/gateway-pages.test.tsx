@@ -975,7 +975,7 @@ describe("gateway shell pages", () => {
     );
     expect(consoleMenuItem.getAttribute("target")).toBe("_blank");
     expect(
-      consoleMenuItem.querySelector(".pf-v6-c-menu__item-icon svg"),
+      consoleMenuItem.querySelector(".pf-v6-c-menu__item-external-icon svg"),
     ).toBeTruthy();
     await user.click(
       screen.getByRole("menuitem", {

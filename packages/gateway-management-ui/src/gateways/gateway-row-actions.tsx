@@ -7,7 +7,7 @@ import {
   DropdownList,
   MenuToggle,
 } from "@patternfly/react-core";
-import { EllipsisVIcon, ExternalLinkAltIcon } from "@patternfly/react-icons";
+import { EllipsisVIcon } from "@patternfly/react-icons";
 import { useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 
@@ -18,6 +18,7 @@ import {
 } from "./gateway-connections";
 import { GatewayDeleteDialog } from "./gateway-delete-dialog";
 import { GatewayRenameDialog } from "./gateway-rename-dialog";
+import styles from "./gateway-row-actions.module.css";
 
 export function GatewayRowActions({
   gateway,
@@ -76,9 +77,9 @@ export function GatewayRowActions({
         <DropdownList>
           {gateway.consoleUrl ? (
             <DropdownItem
-              icon={<ExternalLinkAltIcon />}
+              className={styles.consoleLink}
+              isExternalLink
               rel="noreferrer"
-              target="_blank"
               to={gateway.consoleUrl}
             >
               <FormattedMessage {...messages.openGatewayConsole} />

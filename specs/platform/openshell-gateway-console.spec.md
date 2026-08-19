@@ -301,9 +301,16 @@ The reconciler must treat the console Keycloak work (client, mappers, secret) as
 The reconciler must PATCH the console URL into a read-only `consoleAddress` field on the gateway. The management web-console and the CLI use this field to link to the console.
 
 - Format: `https://console-<ns>.<base-domain>`.
-- The reconciler sets it when it creates the console.
-- The reconciler clears it when it removes the console.
-- The field stays empty when the base domain is unknown (for example, `GATEWAY_API_BASE_DOMAIN` is unset).
+- The reconciler sets it only once the console Deployment (dashboard + oauth2-proxy) is observed Ready, so the web-console's console button never appears before the console pod can serve.
+- The reconciler clears it when the console pod is not Ready, when the console is removed, or when the base domain is unknown (for example, `GATEWAY_API_BASE_DOMAIN` is unset). A console that later goes unready has its address retracted, hiding the button.
+- Readiness is observed both during provisioning (a prompt check once the gateway's route is ready) and continuously by the health reconciler, so the field self-heals as the console pod's readiness changes.
+
+#### Scenario: Console button gated on console readiness
+
+- GIVEN a routed gateway whose console resources are applied but whose console pod is not yet Ready
+- THEN `consoleAddress` stays empty and the web-console does not offer the console button
+- WHEN the console Deployment becomes Ready
+- THEN the reconciler sets `consoleAddress` to `https://console-<ns>.<base-domain>` and the button appears
 
 ---
 
