@@ -77,7 +77,7 @@ The console has no separate configuration field. The console follows the route l
 
 ### Requirement: Confidential Console Keycloak Client
 
-The reconciler must create one confidential OIDC client for each console. It uses the Keycloak Admin REST API. This client is separate from the CLI client.
+The reconciler must create one confidential OIDC client for each console. The reconciler creates this client in the same reconciliation pass that provisions the gateway CLI client, and it reuses the same Keycloak Admin REST API access. This client is separate from the CLI client.
 
 #### Client properties
 
@@ -154,13 +154,15 @@ Every console resource must carry the standard gateway labels, with `app.kuberne
 #### Dashboard container
 
 - Image: the control-plane default (see ImageDefaults); a per-gateway value can override it.
-- Listen address: loopback only (for example `127.0.0.1:8000`).
-- Environment:
-  - `OPENSHELL_GATEWAY_URL = grpcs://openshell-gateway.<ns>.svc.cluster.local:8080`
-  - `GATEWAY_CA_CERT = /etc/openshell-tls/gateway/ca.crt`
+- Listen port: `8000`. The dashboard binds all interfaces, so the kubelet can run the probe. The Service does not expose port `8000`. The NetworkPolicies do not allow ingress to port `8000`, so only the in-pod oauth2-proxy reaches the dashboard.
+- Environment (the dashboard BFF reads these; see the upstream contract):
+  - `PORT = 8000`
+  - `OPENSHELL_GATEWAY_URL = openshell-gateway.<ns>.svc.cluster.local:8080` (host:port, no scheme)
+  - `GATEWAY_CA_CERT = /etc/openshell-tls/gateway/ca.crt` (its presence enables TLS to the gateway)
   - `AUTH_DISABLED = false`
   - `AUTH_TOKEN_HEADER = X-Forwarded-Access-Token`
   - `AUTH_USER_HEADER = X-Forwarded-User`
+  - `ADMIN_ROLE = openshell-admin`
   - `LOGOUT_URL = /oauth2/sign_out`
 - Volume mount: the `openshell-server-tls` Secret key `ca.crt` at `/etc/openshell-tls/gateway` (read only), to verify the gateway server certificate.
 
@@ -192,7 +194,7 @@ Each container must set `runAsNonRoot: true`, `allowPrivilegeEscalation: false`,
 
 #### Health probes
 
-oauth2-proxy must expose readiness and liveness probes on `/ready` and `/ping` (port `4180`). The dashboard must expose a readiness probe on its HTTP listener.
+oauth2-proxy must expose readiness and liveness probes on `/ready` and `/ping` (port `4180`). The dashboard must expose a readiness probe on port `8000`. A TCP probe is sufficient when the dashboard has no health path.
 
 ---
 
@@ -356,7 +358,7 @@ The console needs no new Keycloak permission. The `hypershell-keycloak-admin` ac
 ## Prerequisites
 
 1. **Shared Gateway HTTP listener.** The admin must add an HTTP listener to the shared Gateway (HTTPS/Terminate, port 443, wildcard `*.<base-domain>` certificate). The listener must accept HTTPRoutes from gateway namespaces. Its `sectionName` must match `GATEWAY_API_HTTP_LISTENER_NAME`.
-2. **Dashboard image.** The cluster must reach the OpenShell dashboard image ([Gkrumbach07/openshell-dashboard](https://github.com/Gkrumbach07/openshell-dashboard)). The deployment must use a pinned tag. The image contract (the gateway URL and the `X-Forwarded-Access-Token` header) is an upstream dependency.
+2. **Dashboard image.** The upstream project ([Gkrumbach07/openshell-dashboard](https://github.com/Gkrumbach07/openshell-dashboard)) builds `openshell-dashboard:latest` from source and publishes no registry image today. The platform must build the image and push it to the platform registry, or load it into Kind for local testing, and then pin the digest. The image contract (`OPENSHELL_GATEWAY_URL` as `host:port`, TLS through `GATEWAY_CA_CERT`, and the `X-Forwarded-Access-Token` relay) is an upstream dependency.
 3. **Keycloak realm.** The realm prerequisites in `openshell-gateway-keycloak.spec.md` apply. The console adds no realm-level object.
 
 ---
