@@ -336,6 +336,30 @@ describe("gateway shell pages", () => {
     ).toBeNull();
   });
 
+  it("withholds the console button until the gateway is ready to connect", () => {
+    // The console address is published while the gateway is still provisioning,
+    // before the route is programmed and the connection command appears. The
+    // button must gate on the same readiness signal as the command so the two
+    // surface together, not seconds apart.
+    renderPage(() => (
+      <GatewayPage
+        gateway={{
+          ...gatewayResponse("gateway-1", "Team gateway"),
+          consoleUrl: "https://console.example.test",
+          phase: "Provisioning",
+          status: "",
+        }}
+        gatewayId="gateway-1"
+      />
+    ));
+
+    expect(
+      screen.queryByRole("link", {
+        name: "Open console for Team gateway in a new tab",
+      }),
+    ).toBeNull();
+  });
+
   it("encodes the active tab through its host", async () => {
     const user = userEvent.setup();
     const onTabChange = vi.fn();

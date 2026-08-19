@@ -25,6 +25,7 @@ import { messages } from "../messages";
 import {
   buildGatewayAddCommand,
   type GatewayConnection,
+  isGatewayReadyToConnect,
 } from "./gateway-connections";
 import { GatewayDeleteDialog } from "./gateway-delete-dialog";
 import { GatewayRenameDialog } from "./gateway-rename-dialog";
@@ -117,7 +118,7 @@ function GatewayDetailActions({
   return (
     <>
       <ActionList>
-        {gateway.consoleUrl ? (
+        {gateway.consoleUrl && isGatewayReadyToConnect(gateway) ? (
           <ActionListItem>
             <Button
               aria-label={intl.formatMessage(messages.openGatewayConsoleFor, {
