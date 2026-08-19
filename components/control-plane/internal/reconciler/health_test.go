@@ -8,6 +8,7 @@ import (
 
 	pb "github.com/openshift-online/hypershell/components/api-server/pkg/api/grpc/hypershell/v1"
 	"github.com/openshift-online/hypershell/components/control-plane/internal/exposure"
+	"github.com/openshift-online/hypershell/components/control-plane/internal/gateway"
 	"google.golang.org/grpc"
 )
 
@@ -37,6 +38,38 @@ func newHealthRec(exp exposure.Port, now func() time.Time, timeout time.Duration
 
 func fixedClock(t time.Time) func() time.Time {
 	return func() time.Time { return t }
+}
+
+func routedGateway(id, namespace string) *pb.Gateway {
+	route := `{"host":"gw.example.com"}`
+	return &pb.Gateway{
+		Metadata:  &pb.ObjectReference{Id:id},
+		Namespace: namespace,
+		Route:     &route,
+	}
+}
+
+// selfHealConsole must be bounded: it re-reconciles the console only for routed
+// gateways when Keycloak is configured. Outside those conditions it must be a
+// pure no-op that never touches the (here nil) Kubernetes clients -- if it did,
+// it would panic. The nil-client no-panic is the assertion.
+func TestSelfHealConsole_NoOpWhenUnconfigured(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("no keycloak config", func(t *testing.T) {
+		h := &GatewayHealthReconciler{exposure: fakeExposure{}} // keycloakConfig nil
+		h.selfHealConsole(ctx, "gw-1", routedGateway("gw-1", "openshell-abc"))
+	})
+
+	t.Run("no exposure port", func(t *testing.T) {
+		h := &GatewayHealthReconciler{keycloakConfig: &gateway.KeycloakConfig{}} // exposure nil
+		h.selfHealConsole(ctx, "gw-1", routedGateway("gw-1", "openshell-abc"))
+	})
+
+	t.Run("not a routed gateway", func(t *testing.T) {
+		h := &GatewayHealthReconciler{exposure: fakeExposure{}, keycloakConfig: &gateway.KeycloakConfig{}}
+		h.selfHealConsole(ctx, "gw-1", &pb.Gateway{Metadata: &pb.ObjectReference{Id:"gw-1"}, Namespace: "openshell-abc"})
+	})
 }
 
 func TestEvaluateRouteReadiness_ReadyBecomesRunning(t *testing.T) {

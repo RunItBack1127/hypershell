@@ -38,12 +38,15 @@ const defaultListGatewaysPageSize = 100
 // moved to Degraded, and a Degraded gateway whose workload and exposure recover
 // is moved back to Running. See openshell-gateway-health.spec.md.
 type GatewayHealthReconciler struct {
-	clientset         *kubernetes.Clientset
-	dynamicClient     dynamic.Interface
-	grpcConn          *grpc.ClientConn
-	interval          time.Duration
-	exposure          exposure.Port
-	routeReadyTimeout time.Duration
+	clientset           *kubernetes.Clientset
+	dynamicClient       dynamic.Interface
+	grpcConn            *grpc.ClientConn
+	interval            time.Duration
+	exposure            exposure.Port
+	routeReadyTimeout   time.Duration
+	keycloakConfig      *gateway.KeycloakConfig
+	isOpenShift         bool
+	skipNetworkPolicies bool
 
 	// now is the clock, overridable in tests.
 	now func() time.Time
@@ -57,16 +60,21 @@ type GatewayHealthReconciler struct {
 	routeNotReadySince map[string]time.Time
 }
 
-func NewGatewayHealthReconciler(clientset *kubernetes.Clientset, dynamicClient dynamic.Interface, grpcConn *grpc.ClientConn, exposurePort exposure.Port) *GatewayHealthReconciler {
+func NewGatewayHealthReconciler(clientset *kubernetes.Clientset, dynamicClient dynamic.Interface, grpcConn *grpc.ClientConn, exposurePort exposure.Port, keycloakConfig *gateway.KeycloakConfig) *GatewayHealthReconciler {
+	// Mirror GatewayReconciler's environment detection so the health loop's
+	// console self-heal produces the same resources the provisioning path would.
 	return &GatewayHealthReconciler{
-		clientset:          clientset,
-		dynamicClient:      dynamicClient,
-		grpcConn:           grpcConn,
-		interval:           defaultHealthInterval,
-		exposure:           exposurePort,
-		routeReadyTimeout:  routeReadyTimeout(),
-		now:                time.Now,
-		routeNotReadySince: make(map[string]time.Time),
+		clientset:           clientset,
+		dynamicClient:       dynamicClient,
+		grpcConn:            grpcConn,
+		interval:            defaultHealthInterval,
+		exposure:            exposurePort,
+		routeReadyTimeout:   routeReadyTimeout(),
+		keycloakConfig:      keycloakConfig,
+		isOpenShift:         gateway.DetectOpenShift(clientset),
+		skipNetworkPolicies: os.Getenv("GATEWAY_SKIP_NETWORK_POLICIES") == "true",
+		now:                 time.Now,
+		routeNotReadySince:  make(map[string]time.Time),
 	}
 }
 
@@ -160,7 +168,18 @@ func (h *GatewayHealthReconciler) reconcileGatewayHealth(ctx context.Context, cl
 	// Keep the console_address in sync with the console pod's readiness so the web
 	// UI's console button only appears once the console can serve (and disappears
 	// if it later goes unready). Independent of the gateway workload's own phase.
-	syncConsoleAddress(ctx, h.clientset, h.dynamicClient, client, gatewayID, gw, h.exposure != nil)
+	consoleServable := syncConsoleAddress(ctx, h.clientset, h.dynamicClient, client, gatewayID, gw, h.exposure != nil)
+
+	// Self-heal the console. A console failure is deliberately non-fatal to the
+	// gateway, so once the gateway reaches Running the provisioning path never runs
+	// again and a transient console failure -- or later drift, e.g. a deleted
+	// console HTTPRoute or Deployment -- would otherwise never be retried. Re-run
+	// the (idempotent) console reconcile here only when the console is observed not
+	// servable, so a healthy console adds no steady-state Keycloak or apply
+	// traffic. Errors are logged and never affect the gateway phase.
+	if !consoleServable {
+		h.selfHealConsole(ctx, gatewayID, gw)
+	}
 
 	namespace, err := gatewayNamespace(gw)
 	if err != nil {
@@ -214,6 +233,35 @@ func (h *GatewayHealthReconciler) reconcileGatewayHealth(ctx context.Context, cl
 	}
 
 	log.Printf("INFO gateway health: %s %s -> %s (%s)", gatewayID, phase, desiredPhase, desiredStatus)
+}
+
+// selfHealConsole re-reconciles the per-gateway console when it is observed not
+// servable, so a console that failed to provision or has since drifted is
+// recreated without a gateway spec change. It is a no-op unless the gateway is
+// routed (its console lifecycle follows the route) and Keycloak is configured.
+// The reconcile is idempotent and its failures are logged, never propagated:
+// they must not perturb the gateway's own health phase.
+func (h *GatewayHealthReconciler) selfHealConsole(ctx context.Context, gatewayID string, gw *pb.Gateway) {
+	if h.exposure == nil || !isRoutedGateway(gw) || h.keycloakConfig == nil {
+		return
+	}
+	namespace, err := gatewayNamespace(gw)
+	if err != nil {
+		log.Printf("WARN console self-heal for %s: %v", gatewayID, err)
+		return
+	}
+	opts := gateway.ReconcileOpts{
+		IsOpenShift:         h.isOpenShift,
+		SkipNetworkPolicies: h.skipNetworkPolicies,
+		Keycloak:            h.keycloakConfig,
+		GatewayID:           gatewayID,
+		GatewayName:         gw.GetName(),
+	}
+	if err := gateway.ReconcileConsole(ctx, h.dynamicClient, h.clientset, gateway.NamespaceConfig{Name: namespace}, opts); err != nil {
+		log.Printf("WARN console self-heal in %s: %v", namespace, err)
+		return
+	}
+	log.Printf("INFO console self-heal reconciled in %s", namespace)
 }
 
 // evaluateRouteReadiness decides the phase for a routed gateway whose Deployment

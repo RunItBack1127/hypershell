@@ -178,6 +178,24 @@ func consoleListenerName() string {
 	return "https"
 }
 
+// ReconcileConsole idempotently reconciles the per-gateway console (Keycloak
+// client, credential Secret, Deployment, Service, HTTPRoute, NetworkPolicies)
+// for an already-provisioned routed gateway. It exists so the continuous health
+// reconciler can self-heal the console independently of the provisioning phase
+// gate: a console failure is deliberately non-fatal to the gateway, so once the
+// gateway reaches Running the provisioning path never runs again and a transient
+// console failure (or later drift, e.g. a deleted HTTPRoute) would otherwise
+// never be retried. It is a thin, exported wrapper over reconcileConsole using
+// the default image set; callers pass the same ReconcileOpts fields the console
+// reads (Keycloak, GatewayName, GatewayID, IsOpenShift, SkipNetworkPolicies).
+func ReconcileConsole(ctx context.Context, dynamicClient dynamic.Interface, clientset *kubernetes.Clientset, nsConfig NamespaceConfig, opts ReconcileOpts) error {
+	images := opts.Images
+	if images == nil {
+		images = StaticImageDefaults{}
+	}
+	return reconcileConsole(ctx, dynamicClient, clientset, nsConfig, opts, images)
+}
+
 // reconcileConsole deploys the per-gateway OpenShell dashboard and its
 // oauth2-proxy sidecar. It runs only from the Gateway API pass (route enabled +
 // Gateway API available), so console lifecycle follows the route. Missing
