@@ -92,6 +92,82 @@ func ConsoleURL(namespace string) (string, bool) {
 	return "https://" + host, true
 }
 
+// consoleHTTPRouteGVR is the GroupVersionResource for the console HTTPRoute.
+var consoleHTTPRouteGVR = schema.GroupVersionResource{
+	Group:    "gateway.networking.k8s.io",
+	Version:  "v1",
+	Resource: "httproutes",
+}
+
+// ConsoleRouteReady reports whether the per-gateway console HTTPRoute is actually
+// serving: at least one parent (the shared Gateway listener) must report both
+// Accepted=True and ResolvedRefs=True. A Ready console Deployment does not prove
+// the public route works -- a missing or misnamed HTTP listener leaves the
+// HTTPRoute rejected while the Deployment stays Ready -- so the reconciler gates
+// console_address on this too, to avoid publishing a dead "Open console" link.
+// When not ready, reason carries the parent/listener rejection descriptor.
+func ConsoleRouteReady(ctx context.Context, dynamicClient dynamic.Interface, namespace string) (ready bool, reason string, err error) {
+	route, err := dynamicClient.Resource(consoleHTTPRouteGVR).Namespace(namespace).Get(ctx, consoleName, metav1.GetOptions{})
+	if err != nil {
+		if k8serrors.IsNotFound(err) {
+			return false, "console HTTPRoute not found", nil
+		}
+		return false, "", fmt.Errorf("get console HTTPRoute %s/%s: %w", namespace, consoleName, err)
+	}
+
+	parents, found, err := unstructured.NestedSlice(route.Object, "status", "parents")
+	if err != nil {
+		return false, "", fmt.Errorf("read console HTTPRoute %s/%s status: %w", namespace, consoleName, err)
+	}
+	if !found || len(parents) == 0 {
+		return false, "console HTTPRoute has no parent status yet", nil
+	}
+
+	// Report ready as soon as any parent has fully accepted the route. Track the
+	// most specific rejection reason across parents for the not-ready case.
+	reason = "console HTTPRoute not accepted"
+	for _, p := range parents {
+		parent, ok := p.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		conditions, _, _ := unstructured.NestedSlice(parent, "conditions")
+		accepted, acceptedReason := routeConditionState(conditions, "Accepted")
+		resolved, resolvedReason := routeConditionState(conditions, "ResolvedRefs")
+		if accepted && resolved {
+			return true, "", nil
+		}
+		if !accepted && acceptedReason != "" {
+			reason = fmt.Sprintf("console HTTPRoute not accepted: %s", acceptedReason)
+		} else if !resolved && resolvedReason != "" {
+			reason = fmt.Sprintf("console HTTPRoute backend refs unresolved: %s", resolvedReason)
+		}
+	}
+	return false, reason, nil
+}
+
+// routeConditionState returns whether the named HTTPRoute parent condition is
+// True, along with its Reason when it is not True (empty when the condition is
+// absent).
+func routeConditionState(conditions []interface{}, condType string) (isTrue bool, reason string) {
+	for _, c := range conditions {
+		cond, ok := c.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if t, _, _ := unstructured.NestedString(cond, "type"); t != condType {
+			continue
+		}
+		status, _, _ := unstructured.NestedString(cond, "status")
+		if status == "True" {
+			return true, ""
+		}
+		r, _, _ := unstructured.NestedString(cond, "reason")
+		return false, r
+	}
+	return false, ""
+}
+
 // consoleListenerName returns the sectionName of the shared Gateway HTTP
 // listener that console HTTPRoutes attach to (GATEWAY_API_HTTP_LISTENER_NAME,
 // default "https").

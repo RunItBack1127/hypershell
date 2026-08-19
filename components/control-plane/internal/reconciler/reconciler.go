@@ -493,7 +493,7 @@ func (r *GatewayReconciler) pollRouteReady(ctx context.Context, namespace string
 func (r *GatewayReconciler) publishConsoleAddressWhenReady(ctx context.Context, gatewayID string, gw *pb.Gateway) {
 	client := pb.NewGatewayServiceClient(r.grpcConn)
 	poll(ctx, provisioningConsoleReadyInterval, provisioningConsoleReadyWait, func() bool {
-		return syncConsoleAddress(ctx, r.clientset, client, gatewayID, gw, r.exposure != nil)
+		return syncConsoleAddress(ctx, r.clientset, r.dynamicClient, client, gatewayID, gw, r.exposure != nil)
 	})
 }
 
@@ -616,15 +616,18 @@ func consoleAddressFor(ready bool, url string) string {
 	return ""
 }
 
-// syncConsoleAddress publishes the gateway's console_address once its console
-// Deployment is observed Ready and clears it when the console is absent or not
-// Ready, so the web UI only offers the console button when the console pod can
-// serve. It is a no-op for gateways without a console (no exposure port, or not
-// routed) and when the base domain is unconfigured, and it leaves the address
-// untouched on a transient readiness-observation error rather than flapping the
-// button. It returns whether the console is currently Ready, so a caller polling
-// during provisioning can stop once the address has been published.
-func syncConsoleAddress(ctx context.Context, clientset *kubernetes.Clientset, client pb.GatewayServiceClient, gatewayID string, gw *pb.Gateway, hasExposure bool) bool {
+// syncConsoleAddress publishes the gateway's console_address once its console is
+// observed servable and clears it otherwise, so the web UI only offers the
+// console button when the console can actually serve. "Servable" requires both
+// the console Deployment to be Ready AND the console HTTPRoute to be accepted
+// (Accepted + ResolvedRefs on the shared Gateway listener) -- a Ready Deployment
+// alone does not prove the public route works, and publishing the address then
+// would enable a dead link. It is a no-op for gateways without a console (no
+// exposure port, or not routed) and when the base domain is unconfigured, and it
+// leaves the address untouched on a transient readiness-observation error rather
+// than flapping the button. It returns whether the console is currently servable,
+// so a caller polling during provisioning can stop once the address is published.
+func syncConsoleAddress(ctx context.Context, clientset *kubernetes.Clientset, dynamicClient dynamic.Interface, client pb.GatewayServiceClient, gatewayID string, gw *pb.Gateway, hasExposure bool) bool {
 	if gatewayID == "" || !hasExposure || !isRoutedGateway(gw) {
 		return false
 	}
@@ -641,6 +644,20 @@ func syncConsoleAddress(ctx context.Context, clientset *kubernetes.Clientset, cl
 	if err != nil {
 		log.Printf("WARN console readiness for %s: %v", namespace, err)
 		return false
+	}
+	if ready {
+		// The Deployment is Ready; require the public route to be accepted too
+		// before publishing the address, logging the listener rejection reason
+		// otherwise so a misconfigured HTTP listener is diagnosable.
+		routeReady, reason, routeErr := gateway.ConsoleRouteReady(ctx, dynamicClient, namespace)
+		if routeErr != nil {
+			log.Printf("WARN console route readiness for %s: %v", namespace, routeErr)
+			return false
+		}
+		if !routeReady {
+			log.Printf("INFO console for %s not servable yet: %s", namespace, reason)
+			ready = false
+		}
 	}
 	desired := consoleAddressFor(ready, url)
 	if gw.GetConsoleAddress() == desired {

@@ -9,6 +9,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/fake"
 )
 
@@ -153,6 +156,122 @@ func TestConsoleDeployment_OpenShiftOverrideStripsFsGroup(t *testing.T) {
 	if v, found, _ := unstructured.NestedBool(dep.Object, "spec", "template", "spec", "securityContext", "runAsNonRoot"); !found || !v {
 		t.Error("expected runAsNonRoot to remain true after the OpenShift override")
 	}
+}
+
+// consoleRouteWithConditions builds a console HTTPRoute unstructured object whose
+// single parent reports the given Accepted/ResolvedRefs condition statuses.
+func consoleRouteWithConditions(namespace string, conditions []interface{}) *unstructured.Unstructured {
+	route := &unstructured.Unstructured{}
+	route.SetGroupVersionKind(consoleHTTPRouteGVR.GroupVersion().WithKind("HTTPRoute"))
+	route.SetNamespace(namespace)
+	route.SetName(consoleName)
+	if conditions != nil {
+		_ = unstructured.SetNestedSlice(route.Object, []interface{}{
+			map[string]interface{}{
+				"controllerName": "gateway.example/controller",
+				"conditions":     conditions,
+			},
+		}, "status", "parents")
+	}
+	return route
+}
+
+func routeCondition(condType, status, reason string) map[string]interface{} {
+	return map[string]interface{}{
+		"type":   condType,
+		"status": status,
+		"reason": reason,
+	}
+}
+
+func newConsoleRouteDynamicClient(objs ...runtime.Object) *dynamicfake.FakeDynamicClient {
+	scheme := runtime.NewScheme()
+	gvrToListKind := map[schema.GroupVersionResource]string{
+		consoleHTTPRouteGVR: "HTTPRouteList",
+	}
+	return dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, gvrToListKind, objs...)
+}
+
+// The console Deployment can be Ready while its HTTPRoute is rejected (e.g. a
+// missing or misnamed HTTP listener on the shared Gateway). Publishing
+// console_address then yields a dead "Open console" link, so readiness must
+// require the route to be Accepted AND its backend refs resolved.
+func TestConsoleRouteReady(t *testing.T) {
+	ctx := context.Background()
+	const ns = "openshell-abc"
+
+	t.Run("accepted and resolved is ready", func(t *testing.T) {
+		client := newConsoleRouteDynamicClient(consoleRouteWithConditions(ns, []interface{}{
+			routeCondition("Accepted", "True", "Accepted"),
+			routeCondition("ResolvedRefs", "True", "ResolvedRefs"),
+		}))
+		ready, reason, err := ConsoleRouteReady(ctx, client, ns)
+		if err != nil {
+			t.Fatalf("ConsoleRouteReady: %v", err)
+		}
+		if !ready {
+			t.Errorf("expected ready; reason=%q", reason)
+		}
+	})
+
+	t.Run("rejected listener is not ready and reports reason", func(t *testing.T) {
+		client := newConsoleRouteDynamicClient(consoleRouteWithConditions(ns, []interface{}{
+			routeCondition("Accepted", "False", "NoMatchingListenerHostname"),
+			routeCondition("ResolvedRefs", "True", "ResolvedRefs"),
+		}))
+		ready, reason, err := ConsoleRouteReady(ctx, client, ns)
+		if err != nil {
+			t.Fatalf("ConsoleRouteReady: %v", err)
+		}
+		if ready {
+			t.Error("expected not ready when the route is not Accepted")
+		}
+		if !strings.Contains(reason, "NoMatchingListenerHostname") {
+			t.Errorf("reason = %q, want it to carry the listener rejection reason", reason)
+		}
+	})
+
+	t.Run("unresolved backend refs is not ready", func(t *testing.T) {
+		client := newConsoleRouteDynamicClient(consoleRouteWithConditions(ns, []interface{}{
+			routeCondition("Accepted", "True", "Accepted"),
+			routeCondition("ResolvedRefs", "False", "BackendNotFound"),
+		}))
+		ready, reason, err := ConsoleRouteReady(ctx, client, ns)
+		if err != nil {
+			t.Fatalf("ConsoleRouteReady: %v", err)
+		}
+		if ready {
+			t.Error("expected not ready when backend refs are unresolved")
+		}
+		if !strings.Contains(reason, "BackendNotFound") {
+			t.Errorf("reason = %q, want it to carry the unresolved-refs reason", reason)
+		}
+	})
+
+	t.Run("no parent status yet is not ready", func(t *testing.T) {
+		client := newConsoleRouteDynamicClient(consoleRouteWithConditions(ns, nil))
+		ready, _, err := ConsoleRouteReady(ctx, client, ns)
+		if err != nil {
+			t.Fatalf("ConsoleRouteReady: %v", err)
+		}
+		if ready {
+			t.Error("expected not ready when the route has no parent status")
+		}
+	})
+
+	t.Run("missing route is not ready without error", func(t *testing.T) {
+		client := newConsoleRouteDynamicClient()
+		ready, reason, err := ConsoleRouteReady(ctx, client, ns)
+		if err != nil {
+			t.Fatalf("ConsoleRouteReady on missing route should not error: %v", err)
+		}
+		if ready {
+			t.Error("expected not ready when the console HTTPRoute is absent")
+		}
+		if reason == "" {
+			t.Error("expected a reason describing the missing route")
+		}
+	})
 }
 
 // In production the issuer is publicly trusted and the trusted-CA ConfigMap is

@@ -12,6 +12,7 @@ import (
 	"github.com/openshift-online/hypershell/components/control-plane/internal/exposure"
 	"github.com/openshift-online/hypershell/components/control-plane/internal/gateway"
 	"google.golang.org/grpc"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -38,6 +39,7 @@ const defaultListGatewaysPageSize = 100
 // is moved back to Running. See openshell-gateway-health.spec.md.
 type GatewayHealthReconciler struct {
 	clientset         *kubernetes.Clientset
+	dynamicClient     dynamic.Interface
 	grpcConn          *grpc.ClientConn
 	interval          time.Duration
 	exposure          exposure.Port
@@ -55,9 +57,10 @@ type GatewayHealthReconciler struct {
 	routeNotReadySince map[string]time.Time
 }
 
-func NewGatewayHealthReconciler(clientset *kubernetes.Clientset, grpcConn *grpc.ClientConn, exposurePort exposure.Port) *GatewayHealthReconciler {
+func NewGatewayHealthReconciler(clientset *kubernetes.Clientset, dynamicClient dynamic.Interface, grpcConn *grpc.ClientConn, exposurePort exposure.Port) *GatewayHealthReconciler {
 	return &GatewayHealthReconciler{
 		clientset:          clientset,
+		dynamicClient:      dynamicClient,
 		grpcConn:           grpcConn,
 		interval:           defaultHealthInterval,
 		exposure:           exposurePort,
@@ -157,7 +160,7 @@ func (h *GatewayHealthReconciler) reconcileGatewayHealth(ctx context.Context, cl
 	// Keep the console_address in sync with the console pod's readiness so the web
 	// UI's console button only appears once the console can serve (and disappears
 	// if it later goes unready). Independent of the gateway workload's own phase.
-	syncConsoleAddress(ctx, h.clientset, client, gatewayID, gw, h.exposure != nil)
+	syncConsoleAddress(ctx, h.clientset, h.dynamicClient, client, gatewayID, gw, h.exposure != nil)
 
 	namespace, err := gatewayNamespace(gw)
 	if err != nil {
