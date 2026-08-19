@@ -58,6 +58,16 @@ require_cluster() {
   fi
 }
 
+# Reports 0 if an image whose repository matches the given substring is already
+# present in the Kind node's containerd, so callers can skip an expensive
+# rebuild+load. `kind load` imports into the node's runtime (not the host
+# engine), so this queries the node via crictl rather than the host CONTAINER_ENGINE.
+node_has_image() {
+  local match="$1"
+  ${CONTAINER_ENGINE} exec "${KIND_CLUSTER_NAME}-control-plane" \
+    crictl images 2>/dev/null | grep -q "${match}"
+}
+
 kctx() {
   echo "kind-${KIND_CLUSTER_NAME}"
 }

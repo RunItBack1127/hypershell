@@ -35,8 +35,9 @@ patches:
                   - name: GATEWAY_API_HTTP_LISTENER_NAME
                     value: grpc
                   # OpenShell dashboard image, built from the upstream project and
-                  # loaded into Kind by scripts/kind/build-images.sh. IfNotPresent
-                  # pull policy uses the loaded image (there is no registry image).
+                  # loaded into Kind by scripts/kind/build-console-image.sh (invoked
+                  # from kind-up). IfNotPresent pull policy uses the loaded image
+                  # (there is no registry image).
                   - name: HYPERSHELL_CONSOLE_IMAGE
                     value: "openshell-dashboard:latest"
                   # oauth2-proxy sidecar image, loaded into Kind alongside the
