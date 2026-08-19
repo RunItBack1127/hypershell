@@ -181,6 +181,16 @@ func (h *GatewayHealthReconciler) reconcileGatewayHealth(ctx context.Context, cl
 		h.selfHealConsole(ctx, gatewayID, gw)
 	}
 
+	// Reconcile the console's desired absence. A gateway whose route was removed
+	// keeps its console (Deployment, Service, HTTPRoute, Keycloak client) and its
+	// published console_address until torn down. syncConsoleAddress and
+	// selfHealConsole both no-op for a non-routed gateway, and the provisioning
+	// path never runs again for a gateway the health loop owns (phase gate), so
+	// this is the only place an un-routed gateway's console is cleaned up.
+	if !isRoutedGateway(gw) {
+		h.teardownConsole(ctx, client, gatewayID, gw)
+	}
+
 	namespace, err := gatewayNamespace(gw)
 	if err != nil {
 		log.Printf("WARN gateway health: %s: %v", gatewayID, err)
@@ -262,6 +272,51 @@ func (h *GatewayHealthReconciler) selfHealConsole(ctx context.Context, gatewayID
 		return
 	}
 	log.Printf("INFO console self-heal reconciled in %s", namespace)
+}
+
+// teardownConsole reconciles the console's desired absence for a gateway the
+// health loop owns that is no longer routed, mirroring the provisioning path's
+// route-disabled branch (which the phase gate prevents from running again once
+// the gateway is Running). It removes the console resources and Keycloak client
+// and clears the published console_address. It is gated on there actually being
+// something to remove -- a live console Deployment or a still-published
+// console_address -- so a settled, never-routed gateway adds no per-tick delete
+// or Keycloak traffic. Failures are logged inside DeleteConsole, never
+// propagated: console teardown must not perturb the gateway's own health phase.
+func (h *GatewayHealthReconciler) teardownConsole(ctx context.Context, client pb.GatewayServiceClient, gatewayID string, gw *pb.Gateway) {
+	namespace, err := gatewayNamespace(gw)
+	if err != nil {
+		log.Printf("WARN console teardown for %s: %v", gatewayID, err)
+		return
+	}
+	// Only act when there is drift to clean: a console Deployment still present,
+	// or a console_address still published. A NotFound Deployment with an empty
+	// address means the console is already absent, so skip to keep the steady
+	// state quiet.
+	_, reason, err := gateway.DeploymentReadiness(ctx, h.clientset, namespace, gateway.ConsoleDeploymentName)
+	if err != nil {
+		log.Printf("WARN console teardown readiness for %s: %v", namespace, err)
+		return
+	}
+	if reason == "deployment not found" && gw.GetConsoleAddress() == "" {
+		return
+	}
+	opts := gateway.ReconcileOpts{
+		IsOpenShift:         h.isOpenShift,
+		SkipNetworkPolicies: h.skipNetworkPolicies,
+		Keycloak:            h.keycloakConfig,
+		GatewayID:           gatewayID,
+		GatewayName:         gw.GetName(),
+		UpdateConsoleAddress: func(ctx context.Context, consoleAddress string) error {
+			_, uerr := client.UpdateGateway(ctx, &pb.UpdateGatewayRequest{
+				Id:             gatewayID,
+				ConsoleAddress: &consoleAddress,
+			})
+			return uerr
+		},
+	}
+	gateway.DeleteConsole(ctx, h.dynamicClient, h.clientset, namespace, opts)
+	log.Printf("INFO console torn down in %s (gateway no longer routed)", namespace)
 }
 
 // evaluateRouteReadiness decides the phase for a routed gateway whose Deployment

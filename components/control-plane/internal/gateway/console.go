@@ -196,6 +196,19 @@ func ReconcileConsole(ctx context.Context, dynamicClient dynamic.Interface, clie
 	return reconcileConsole(ctx, dynamicClient, clientset, nsConfig, opts, images)
 }
 
+// DeleteConsole removes the per-gateway console (Keycloak client, credential
+// Secret, Deployment, Service, HTTPRoute, NetworkPolicies) and clears the stored
+// console_address via opts.UpdateConsoleAddress. It is the exported counterpart
+// to ReconcileConsole, letting the continuous health reconciler reconcile the
+// console's desired *absence* independently of the provisioning phase gate: when
+// a Running gateway's route is removed the provisioning path never runs again
+// (see the reconciler's phase gate), so without this the console and its
+// Keycloak client would leak. Best-effort and idempotent -- absent resources are
+// ignored -- so it is safe to call on every health tick.
+func DeleteConsole(ctx context.Context, dynamicClient dynamic.Interface, clientset *kubernetes.Clientset, namespace string, opts ReconcileOpts) {
+	deleteConsole(ctx, dynamicClient, clientset, namespace, opts)
+}
+
 // reconcileConsole deploys the per-gateway OpenShell dashboard and its
 // oauth2-proxy sidecar. It runs only from the Gateway API pass (route enabled +
 // Gateway API available), so console lifecycle follows the route. Missing

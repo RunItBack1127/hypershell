@@ -72,6 +72,18 @@ func TestSelfHealConsole_NoOpWhenUnconfigured(t *testing.T) {
 	})
 }
 
+// teardownConsole reconciles the console's desired absence for a non-routed
+// gateway. It must return before touching the (here nil) Kubernetes clients when
+// the gateway carries no namespace, so a malformed gateway can never panic the
+// health loop. The nil-client no-panic is the assertion.
+func TestTeardownConsole_NoOpWithoutNamespace(t *testing.T) {
+	h := &GatewayHealthReconciler{keycloakConfig: &gateway.KeycloakConfig{}}
+	// No Namespace set: gatewayNamespace errors, so teardownConsole must return
+	// before dereferencing the nil clientset/dynamicClient.
+	h.teardownConsole(context.Background(), &fakeGatewayClient{}, "gw-1",
+		&pb.Gateway{Metadata: &pb.ObjectReference{Id: "gw-1"}})
+}
+
 func TestEvaluateRouteReadiness_ReadyBecomesRunning(t *testing.T) {
 	h := newHealthRec(fakeExposure{readiness: exposure.Readiness{Ready: true}}, fixedClock(time.Unix(0, 0)), 10*time.Minute)
 	for _, phase := range []string{"Provisioning", "Degraded"} {
