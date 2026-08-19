@@ -80,7 +80,7 @@ jobs:
         uses: lewagon/wait-on-check-action@369769072fe522a3a8a85c03c96af1e5242a1994 # v1.9.1
         with:
           ref: ${{ github.sha }}
-          check-regexp: hypershell-api-server-main-on-push$
+          check-regexp: Red Hat Konflux / hypershell-api-server-main-on-push$
           repo-token: ${{ github.token }}
           wait-interval: 30
           checks-discovery-timeout: 900
@@ -91,7 +91,7 @@ jobs:
         uses: lewagon/wait-on-check-action@369769072fe522a3a8a85c03c96af1e5242a1994 # v1.9.1
         with:
           ref: ${{ github.sha }}
-          check-regexp: hypershell-control-plane-main-on-push$
+          check-regexp: Red Hat Konflux / hypershell-control-plane-main-on-push$
           repo-token: ${{ github.token }}
           wait-interval: 30
           checks-discovery-timeout: 900
@@ -102,7 +102,7 @@ jobs:
         uses: lewagon/wait-on-check-action@369769072fe522a3a8a85c03c96af1e5242a1994 # v1.9.1
         with:
           ref: ${{ github.sha }}
-          check-regexp: hypershell-web-console-main-on-push$
+          check-regexp: Red Hat Konflux / hypershell-web-console-main-on-push$
           repo-token: ${{ github.token }}
           wait-interval: 30
           checks-discovery-timeout: 900
@@ -262,7 +262,7 @@ jobs:
         uses: lewagon/wait-on-check-action@369769072fe522a3a8a85c03c96af1e5242a1994 # v1.9.1
         with:
           ref: ${{ github.event.pull_request.head.sha }}
-          check-regexp: hypershell-api-server-main-on-pull-request$
+          check-regexp: Red Hat Konflux / hypershell-api-server-main-on-pull-request$
           repo-token: ${{ github.token }}
           wait-interval: 30
           checks-discovery-timeout: 900
@@ -276,7 +276,7 @@ jobs:
         uses: lewagon/wait-on-check-action@369769072fe522a3a8a85c03c96af1e5242a1994 # v1.9.1
         with:
           ref: ${{ github.event.pull_request.head.sha }}
-          check-regexp: hypershell-control-plane-main-on-pull-request$
+          check-regexp: Red Hat Konflux / hypershell-control-plane-main-on-pull-request$
           repo-token: ${{ github.token }}
           wait-interval: 30
           checks-discovery-timeout: 900
@@ -290,7 +290,7 @@ jobs:
         uses: lewagon/wait-on-check-action@369769072fe522a3a8a85c03c96af1e5242a1994 # v1.9.1
         with:
           ref: ${{ github.event.pull_request.head.sha }}
-          check-regexp: hypershell-web-console-main-on-pull-request$
+          check-regexp: Red Hat Konflux / hypershell-web-console-main-on-pull-request$
           repo-token: ${{ github.token }}
           wait-interval: 30
           checks-discovery-timeout: 900
