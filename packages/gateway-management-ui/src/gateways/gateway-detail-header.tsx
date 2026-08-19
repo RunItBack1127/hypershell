@@ -16,6 +16,7 @@ import {
   FlexItem,
   MenuToggle,
   Title,
+  Tooltip,
 } from "@patternfly/react-core";
 import { ExternalLinkAltIcon } from "@patternfly/react-icons";
 import { type ReactNode, useId, useState } from "react";
@@ -118,22 +119,43 @@ function GatewayDetailActions({
   return (
     <>
       <ActionList>
-        {gateway.consoleUrl && isGatewayReadyToConnect(gateway) ? (
+        {isGatewayReadyToConnect(gateway) ? (
           <ActionListItem>
-            <Button
-              aria-label={intl.formatMessage(messages.openGatewayConsoleFor, {
-                gatewayName: gateway.name,
-              })}
-              component="a"
-              href={gateway.consoleUrl}
-              icon={<ExternalLinkAltIcon />}
-              iconPosition="end"
-              rel="noreferrer"
-              target="_blank"
-              variant="primary"
-            >
-              <FormattedMessage {...messages.openGatewayConsole} />
-            </Button>
+            {gateway.consoleUrl ? (
+              <Button
+                aria-label={intl.formatMessage(messages.openGatewayConsoleFor, {
+                  gatewayName: gateway.name,
+                })}
+                component="a"
+                href={gateway.consoleUrl}
+                icon={<ExternalLinkAltIcon />}
+                iconPosition="end"
+                rel="noreferrer"
+                target="_blank"
+                variant="primary"
+              >
+                <FormattedMessage {...messages.openGatewayConsole} />
+              </Button>
+            ) : (
+              <Tooltip
+                content={intl.formatMessage(
+                  messages.provisioningGatewayConsole,
+                )}
+              >
+                <Button
+                  aria-label={intl.formatMessage(
+                    messages.openGatewayConsoleFor,
+                    { gatewayName: gateway.name },
+                  )}
+                  icon={<ExternalLinkAltIcon />}
+                  iconPosition="end"
+                  isAriaDisabled
+                  variant="primary"
+                >
+                  <FormattedMessage {...messages.openGatewayConsole} />
+                </Button>
+              </Tooltip>
+            )}
           </ActionListItem>
         ) : null}
         <ActionListItem>

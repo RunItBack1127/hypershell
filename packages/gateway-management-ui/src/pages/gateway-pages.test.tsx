@@ -337,10 +337,9 @@ describe("gateway shell pages", () => {
   });
 
   it("withholds the console button until the gateway is ready to connect", () => {
-    // The console address is published while the gateway is still provisioning,
-    // before the route is programmed and the connection command appears. The
-    // button must gate on the same readiness signal as the command so the two
-    // surface together, not seconds apart.
+    // The console button gates on the same readiness signal as the connection
+    // command, so while the gateway is still provisioning neither the enabled
+    // link nor the disabled placeholder button is rendered.
     renderPage(() => (
       <GatewayPage
         gateway={{
@@ -353,6 +352,40 @@ describe("gateway shell pages", () => {
       />
     ));
 
+    expect(
+      screen.queryByRole("link", {
+        name: "Open console for Team gateway in a new tab",
+      }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("button", {
+        name: "Open console for Team gateway in a new tab",
+      }),
+    ).toBeNull();
+  });
+
+  it("shows a disabled console button while the console is still provisioning", () => {
+    // Once the gateway is ready to connect the button appears, but until the
+    // control plane publishes the console address it stays disabled (with a
+    // "Provisioning console..." tooltip) rather than hidden, so its eventual
+    // availability is discoverable.
+    renderPage(() => (
+      <GatewayPage
+        gateway={{
+          ...gatewayResponse("gateway-1", "Team gateway"),
+          consoleUrl: undefined,
+          phase: "Running",
+          status: "Ready",
+        }}
+        gatewayId="gateway-1"
+      />
+    ));
+
+    const consoleButton = screen.getByRole("button", {
+      name: "Open console for Team gateway in a new tab",
+    });
+    expect(consoleButton.getAttribute("aria-disabled")).toBe("true");
+    // It is a disabled button, not an actionable link, so it has no destination.
     expect(
       screen.queryByRole("link", {
         name: "Open console for Team gateway in a new tab",
@@ -413,11 +446,12 @@ describe("gateway shell pages", () => {
     view.unmount();
   });
 
-  it("reveals the console button once the console address arrives without a refresh", async () => {
+  it("enables the console button once the console address arrives without a refresh", async () => {
     vi.useFakeTimers();
     // A routed gateway reaches Running before its console pod can serve, so the
-    // first fetch has no console URL. The control plane publishes it a moment
-    // later; the page must keep polling and surface the button on its own.
+    // first fetch has no console URL and the button renders disabled. The control
+    // plane publishes it a moment later; the page must keep polling and enable
+    // the button on its own.
     gatewayOperations.getGateway
       .mockResolvedValueOnce({
         ...gatewayResponse("gateway-1", "Team gateway"),
@@ -436,6 +470,14 @@ describe("gateway shell pages", () => {
     await act(async () => vi.advanceTimersByTimeAsync(0));
 
     expect(gatewayOperations.getGateway).toHaveBeenCalledOnce();
+    // Disabled placeholder button, not yet an actionable link.
+    expect(
+      screen
+        .getByRole("button", {
+          name: "Open console for Team gateway in a new tab",
+        })
+        .getAttribute("aria-disabled"),
+    ).toBe("true");
     expect(
       screen.queryByRole("link", {
         name: "Open console for Team gateway in a new tab",
@@ -450,6 +492,7 @@ describe("gateway shell pages", () => {
     });
 
     expect(gatewayOperations.getGateway).toHaveBeenCalledTimes(2);
+    // The console URL is published, so the button becomes an actionable link.
     expect(
       screen.getByRole("link", {
         name: "Open console for Team gateway in a new tab",

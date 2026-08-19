@@ -412,6 +412,12 @@ export const messages = defineMessages({
     defaultMessage: "Provisioning gateway",
     description: "Accessible progress text while a gateway is provisioning.",
   },
+  provisioningGatewayConsole: {
+    id: "app.gateway.provisioningConsole",
+    defaultMessage: "Provisioning console...",
+    description:
+      "Tooltip on the disabled console button while the console is not yet ready.",
+  },
   refreshGateways: {
     id: "app.gateways.refresh",
     defaultMessage: "Refresh gateways",
