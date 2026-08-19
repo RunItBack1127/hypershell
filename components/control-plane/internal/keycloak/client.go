@@ -223,6 +223,20 @@ func (c *Client) GetClientUUID(ctx context.Context, gatewayName string) (string,
 	return uuid, nil
 }
 
+// GetConsoleClientSecret returns the client secret for an existing console
+// client by clientId. The console reconciler calls it when the console client
+// already exists and the secret must be written into the console Secret again.
+func (c *Client) GetConsoleClientSecret(ctx context.Context, consoleClientID string) (string, error) {
+	clientUUID, err := c.getClientUUID(ctx, consoleClientID)
+	if err != nil {
+		return "", err
+	}
+	if clientUUID == "" {
+		return "", &ClientNotFoundError{ClientID: consoleClientID}
+	}
+	return c.getClientSecret(ctx, clientUUID)
+}
+
 func (c *Client) createClient(ctx context.Context, gatewayName string) (string, error) {
 	payload := map[string]interface{}{
 		"clientId":                  gatewayName,
@@ -470,4 +484,166 @@ func (c *Client) doRequestRaw(ctx context.Context, method, path string, body []b
 	}
 
 	return c.httpClient.Do(req)
+}
+
+// ProvisionConsoleClient creates a confidential Keycloak OIDC client for the
+// web console, wires it to the given gateway client for audience and role
+// mappers, and returns the new client's UUID and generated client secret.
+func (c *Client) ProvisionConsoleClient(ctx context.Context, consoleClientID, gatewayClientID, redirectURI, webOrigin string) (clientUUID string, clientSecret string, err error) {
+	log.Printf("INFO keycloak: creating confidential console client %s in realm %s", consoleClientID, c.realm)
+	clientUUID, err = c.createConsoleClient(ctx, consoleClientID, gatewayClientID, redirectURI, webOrigin)
+	if err != nil {
+		return "", "", fmt.Errorf("create console keycloak client: %w", err)
+	}
+	log.Printf("INFO keycloak: created console client %s (uuid=%s)", consoleClientID, clientUUID)
+
+	log.Printf("INFO keycloak: creating protocol mappers on console client %s", consoleClientID)
+	if err = c.createConsoleProtocolMappers(ctx, clientUUID, gatewayClientID); err != nil {
+		log.Printf("WARN keycloak: protocol mapper creation failed for %s, rolling back client: %v", consoleClientID, err)
+		if rollbackErr := c.deleteClientByUUID(ctx, clientUUID); rollbackErr != nil {
+			log.Printf("WARN keycloak: failed to rollback console client %s after mapper creation failure: %v", consoleClientID, rollbackErr)
+		}
+		return "", "", fmt.Errorf("create console protocol mappers: %w", err)
+	}
+	log.Printf("INFO keycloak: created protocol mappers on console client %s", consoleClientID)
+
+	log.Printf("INFO keycloak: fetching client secret for console client %s", consoleClientID)
+	clientSecret, err = c.getClientSecret(ctx, clientUUID)
+	if err != nil {
+		log.Printf("WARN keycloak: secret fetch failed for %s, rolling back client: %v", consoleClientID, err)
+		if rollbackErr := c.deleteClientByUUID(ctx, clientUUID); rollbackErr != nil {
+			log.Printf("WARN keycloak: failed to rollback console client %s after secret fetch failure: %v", consoleClientID, rollbackErr)
+		}
+		return "", "", fmt.Errorf("get console client secret: %w", err)
+	}
+	log.Printf("INFO keycloak: provisioned console client %s (uuid=%s)", consoleClientID, clientUUID)
+
+	return clientUUID, clientSecret, nil
+}
+
+// DeleteConsoleClient removes the Keycloak client for a web console.
+// Returns nil if the client does not exist.
+func (c *Client) DeleteConsoleClient(ctx context.Context, consoleClientID string) error {
+	log.Printf("INFO keycloak: looking up console client %s for deletion", consoleClientID)
+	clientUUID, err := c.getClientUUID(ctx, consoleClientID)
+	if err != nil {
+		return err
+	}
+	if clientUUID == "" {
+		log.Printf("INFO keycloak: console client %s not found, nothing to delete", consoleClientID)
+		return nil
+	}
+	log.Printf("INFO keycloak: deleting console client %s (uuid=%s)", consoleClientID, clientUUID)
+	if err := c.deleteClientByUUID(ctx, clientUUID); err != nil {
+		return err
+	}
+	log.Printf("INFO keycloak: deleted console client %s", consoleClientID)
+	return nil
+}
+
+func (c *Client) createConsoleClient(ctx context.Context, consoleClientID, gatewayClientID, redirectURI, webOrigin string) (string, error) {
+	payload := map[string]interface{}{
+		"clientId":                  consoleClientID,
+		"name":                      consoleClientID,
+		"publicClient":              false,
+		"standardFlowEnabled":       true,
+		"directAccessGrantsEnabled": false,
+		"serviceAccountsEnabled":    false,
+		"fullScopeAllowed":          false,
+		"redirectUris":              []string{redirectURI},
+		"webOrigins":                []string{webOrigin},
+		"attributes": map[string]string{
+			"pkce.code.challenge.method": "S256",
+		},
+		"defaultClientScopes": []string{
+			"openid", "profile", "email", "roles", "gateway-roles", "web-origins", "acr",
+		},
+	}
+
+	body, _ := json.Marshal(payload)
+	path := fmt.Sprintf("/admin/realms/%s/clients", c.realm)
+	resp, err := c.doRequestRaw(ctx, http.MethodPost, path, body)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode == http.StatusConflict {
+		return "", fmt.Errorf("keycloak client %s already exists", consoleClientID)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		respBody, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("create console client returned %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	location := resp.Header.Get("Location")
+	parts := strings.Split(location, "/")
+	if len(parts) == 0 {
+		return "", fmt.Errorf("no client UUID in Location header")
+	}
+	return parts[len(parts)-1], nil
+}
+
+func (c *Client) createConsoleProtocolMappers(ctx context.Context, clientUUID, gatewayClientID string) error {
+	mappers := []map[string]interface{}{
+		{
+			"name":           "audience",
+			"protocol":       "openid-connect",
+			"protocolMapper": "oidc-audience-mapper",
+			"config": map[string]string{
+				"included.client.audience": gatewayClientID,
+				"id.token.claim":           "false",
+				"access.token.claim":       "true",
+			},
+		},
+		{
+			"name":           "client-roles",
+			"protocol":       "openid-connect",
+			"protocolMapper": "oidc-usermodel-client-role-mapper",
+			"config": map[string]string{
+				"claim.name":                           "hypershell.roles",
+				"multivalued":                          "true",
+				"jsonType.label":                       "String",
+				"id.token.claim":                       "true",
+				"access.token.claim":                   "true",
+				"usermodel.clientRoleMapping.clientId": gatewayClientID,
+			},
+		},
+		{
+			"name":           "sub",
+			"protocol":       "openid-connect",
+			"protocolMapper": "oidc-sub-mapper",
+			"config": map[string]string{
+				"access.token.claim": "true",
+			},
+		},
+	}
+
+	path := fmt.Sprintf("/admin/realms/%s/clients/%s/protocol-mappers/models", c.realm, clientUUID)
+	for _, mapper := range mappers {
+		body, _ := json.Marshal(mapper)
+		if _, err := c.doRequest(ctx, http.MethodPost, path, body); err != nil {
+			return fmt.Errorf("create console mapper %s: %w", mapper["name"], err)
+		}
+	}
+	return nil
+}
+
+func (c *Client) getClientSecret(ctx context.Context, clientUUID string) (string, error) {
+	path := fmt.Sprintf("/admin/realms/%s/clients/%s/client-secret", c.realm, clientUUID)
+	respBody, err := c.doRequest(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return "", err
+	}
+
+	var secret struct {
+		Value string `json:"value"`
+	}
+	if err := json.Unmarshal(respBody, &secret); err != nil {
+		return "", fmt.Errorf("parse client secret response: %w", err)
+	}
+	if secret.Value == "" {
+		return "", fmt.Errorf("empty client secret returned for client uuid %s", clientUUID)
+	}
+	return secret.Value, nil
 }
