@@ -222,6 +222,34 @@ data:
           ]
         }
       ],
+      "clientScopes": [
+        {
+          "name": "gateway-roles",
+          "description": "Emits a user's gateway client roles under resource_access.${client_id}.roles. Realm prerequisite for per-gateway OpenShell console clients (openshell-gateway-keycloak.spec.md).",
+          "protocol": "openid-connect",
+          "attributes": {
+            "include.in.token.scope": "true",
+            "display.on.consent.screen": "false"
+          },
+          "protocolMappers": [
+            {
+              "name": "gateway-client-roles",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-usermodel-client-role-mapper",
+              "consentRequired": false,
+              "config": {
+                "multivalued": "true",
+                "claim.name": "resource_access.${client_id}.roles",
+                "jsonType.label": "String",
+                "id.token.claim": "false",
+                "access.token.claim": "true",
+                "userinfo.token.claim": "true",
+                "introspection.token.claim": "true"
+              }
+            }
+          ]
+        }
+      ],
       "roles": {
         "realm": [
           { "name": "hypershell-admins", "description": "HyperShell administrators" },
