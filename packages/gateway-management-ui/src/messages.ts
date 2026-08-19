@@ -500,4 +500,10 @@ export const messages = defineMessages({
     defaultMessage: "Status",
     description: "Heading for a resource status column.",
   },
+  unavailableGatewayConsole: {
+    id: "app.gateway.unavailableConsole",
+    defaultMessage: "Console unavailable for this gateway",
+    description:
+      "Tooltip on the disabled console button once the console failed to become available within the expected time.",
+  },
 });

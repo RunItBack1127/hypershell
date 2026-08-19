@@ -299,6 +299,10 @@
     "defaultMessage": "Gateway",
     "description": "Fallback breadcrumb label while a gateway is loading."
   },
+  "app.gateway.unavailableConsole": {
+    "defaultMessage": "Console unavailable for this gateway",
+    "description": "Tooltip on the disabled console button once the console failed to become available within the expected time."
+  },
   "app.gateways.refresh": {
     "defaultMessage": "Refresh gateways",
     "description": "Accessible label for refreshing the gateway list."

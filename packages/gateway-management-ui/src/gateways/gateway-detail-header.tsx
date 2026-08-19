@@ -28,6 +28,7 @@ import {
   type GatewayConnection,
   isGatewayReadyToConnect,
 } from "./gateway-connections";
+import { isGatewayConsolePastDeadline } from "./gateway-data";
 import { GatewayDeleteDialog } from "./gateway-delete-dialog";
 import { GatewayRenameDialog } from "./gateway-rename-dialog";
 import { GatewayStatus } from "./gateway-status";
@@ -140,7 +141,9 @@ function GatewayDetailActions({
             ) : (
               <Tooltip
                 content={intl.formatMessage(
-                  messages.provisioningGatewayConsole,
+                  isGatewayConsolePastDeadline(gateway.createdAt)
+                    ? messages.unavailableGatewayConsole
+                    : messages.provisioningGatewayConsole,
                 )}
               >
                 <Button

@@ -448,6 +448,10 @@ describe("gateway shell pages", () => {
 
   it("enables the console button once the console address arrives without a refresh", async () => {
     vi.useFakeTimers();
+    // Console polling is bounded by the gateway's createdAt, so pin the clock
+    // just inside the console-ready window to exercise the still-provisioning
+    // path (a gateway created moments ago whose console is about to arrive).
+    vi.setSystemTime(new Date("2026-08-10T14:31:00Z"));
     // A routed gateway reaches Running before its console pod can serve, so the
     // first fetch has no console URL and the button renders disabled. The control
     // plane publishes it a moment later; the page must keep polling and enable

@@ -3,16 +3,25 @@ import { describe, expect, it } from "vitest";
 import { normalizeGatewayPlacementClusterIds } from "../application/gateway-placement";
 import type { GatewayRecord } from "../application/gateway-types";
 import {
+  gatewayConsoleReadyDeadlineMilliseconds,
+  gatewayConsoleUnavailable,
   gatewayNeedsStatusPolling,
   gatewayPlacementBatchQueryKey,
   gatewayStatusPollMilliseconds,
   toGatewayConnection,
 } from "./gateway-data";
 
+const CREATED_AT = "2026-08-10T14:30:00Z";
+// A poll time inside the console-ready window (just after creation) and one past
+// it, used to exercise the bounded console polling.
+const WITHIN_CONSOLE_WINDOW = Date.parse(CREATED_AT) + 60_000;
+const PAST_CONSOLE_WINDOW =
+  Date.parse(CREATED_AT) + gatewayConsoleReadyDeadlineMilliseconds + 1;
+
 function gateway(overrides: Partial<GatewayRecord> = {}): GatewayRecord {
   return {
     clusterId: "",
-    createdAt: "2026-08-10T14:30:00Z",
+    createdAt: CREATED_AT,
     databaseId: "database-1",
     externalDns: "gateway.example.com",
     id: "gateway-1",
@@ -98,7 +107,12 @@ describe("gateway presentation data", () => {
     // A routed gateway reaches Running before its console pod can serve; the
     // control plane publishes console_address only once the pod is Ready. Keep
     // polling so the console button appears without a manual page refresh.
-    expect(gatewayNeedsStatusPolling(gateway({ phase: "Running" }))).toBe(true);
+    expect(
+      gatewayNeedsStatusPolling(
+        gateway({ phase: "Running" }),
+        WITHIN_CONSOLE_WINDOW,
+      ),
+    ).toBe(true);
 
     // Once the console URL is published, the button can render and polling stops.
     expect(
@@ -107,6 +121,7 @@ describe("gateway presentation data", () => {
           consoleUrl: "https://console.example.com",
           phase: "Running",
         }),
+        WITHIN_CONSOLE_WINDOW,
       ),
     ).toBe(false);
 
@@ -114,6 +129,57 @@ describe("gateway presentation data", () => {
     expect(
       gatewayNeedsStatusPolling(
         gateway({ externalDns: undefined, phase: "Running" }),
+        WITHIN_CONSOLE_WINDOW,
+      ),
+    ).toBe(false);
+  });
+
+  it("stops polling and reports the console unavailable past the deadline", () => {
+    // A routed gateway can be settled without ever becoming console-eligible
+    // (console provisioning disabled/stuck). Polling must not run forever: once
+    // the console-ready window elapses, stop polling and surface a terminal
+    // "console unavailable" state instead of an indefinite provisioning spinner.
+    const settledNoConsole = gateway({ phase: "Running" });
+
+    expect(
+      gatewayNeedsStatusPolling(settledNoConsole, WITHIN_CONSOLE_WINDOW),
+    ).toBe(true);
+    expect(
+      gatewayConsoleUnavailable(settledNoConsole, WITHIN_CONSOLE_WINDOW),
+    ).toBe(false);
+
+    expect(
+      gatewayNeedsStatusPolling(settledNoConsole, PAST_CONSOLE_WINDOW),
+    ).toBe(false);
+    expect(
+      gatewayConsoleUnavailable(settledNoConsole, PAST_CONSOLE_WINDOW),
+    ).toBe(true);
+
+    // A still-transitional gateway past the window keeps polling on lifecycle
+    // state and is not reported as unavailable.
+    const provisioning = gateway({ phase: "Provisioning" });
+    expect(gatewayNeedsStatusPolling(provisioning, PAST_CONSOLE_WINDOW)).toBe(
+      true,
+    );
+    expect(gatewayConsoleUnavailable(provisioning, PAST_CONSOLE_WINDOW)).toBe(
+      false,
+    );
+
+    // A published console is never "unavailable"; a failed gateway surfaces its
+    // own failure rather than a console-unavailable state.
+    expect(
+      gatewayConsoleUnavailable(
+        gateway({
+          consoleUrl: "https://console.example.com",
+          phase: "Running",
+        }),
+        PAST_CONSOLE_WINDOW,
+      ),
+    ).toBe(false);
+    expect(
+      gatewayConsoleUnavailable(
+        gateway({ phase: "Failed" }),
+        PAST_CONSOLE_WINDOW,
       ),
     ).toBe(false);
   });
