@@ -345,6 +345,7 @@ func (r *GatewayReconciler) Handle(ctx context.Context, event watcher.Event[*pb.
 		ControlPlaneNamespace: r.controlPlaneNamespace,
 		GatewayID:             event.ResourceID,
 		UpdateRouteAddress:    r.makeRouteAddressUpdater(event.ResourceID),
+		UpdateConsoleAddress:  r.makeConsoleAddressUpdater(event.ResourceID),
 		Keycloak:              r.keycloakConfig,
 		KeycloakClient:        r.keycloakClient,
 		GatewayName:           gw.Name,
@@ -449,6 +450,26 @@ func (r *GatewayReconciler) updateRouteAddress(ctx context.Context, gatewayID st
 	})
 	if err != nil {
 		return fmt.Errorf("update gateway %s route_address to %s: %w", gatewayID, routeAddress, err)
+	}
+	return nil
+}
+
+// makeConsoleAddressUpdater returns a ConsoleAddressUpdater callback that
+// PATCHes the console_address field on the API-server Gateway via gRPC.
+func (r *GatewayReconciler) makeConsoleAddressUpdater(gatewayID string) gateway.ConsoleAddressUpdater {
+	return func(ctx context.Context, consoleAddress string) error {
+		return r.updateConsoleAddress(ctx, gatewayID, consoleAddress)
+	}
+}
+
+func (r *GatewayReconciler) updateConsoleAddress(ctx context.Context, gatewayID string, consoleAddress string) error {
+	client := pb.NewGatewayServiceClient(r.grpcConn)
+	_, err := client.UpdateGateway(ctx, &pb.UpdateGatewayRequest{
+		Id:             gatewayID,
+		ConsoleAddress: &consoleAddress,
+	})
+	if err != nil {
+		return fmt.Errorf("update gateway %s console_address to %s: %w", gatewayID, consoleAddress, err)
 	}
 	return nil
 }

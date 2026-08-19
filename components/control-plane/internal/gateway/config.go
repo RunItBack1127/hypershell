@@ -15,9 +15,21 @@ type ImageDefaults interface {
 	DefaultGatewayImage() string
 	DefaultSupervisorImage() string
 	DefaultDatabaseImage() string
+	DefaultConsoleImage() string
+	DefaultOAuth2ProxyImage() string
 }
 
 const defaultDatabaseImage = "postgres:18"
+
+// defaultConsoleImage is the OpenShell dashboard image. The upstream project
+// publishes no registry image today, so this tag is expected to be built and
+// loaded into the cluster (see the console spec Prerequisites). Overridable via
+// HYPERSHELL_CONSOLE_IMAGE.
+const defaultConsoleImage = "openshell-dashboard:latest"
+
+// defaultOAuth2ProxyImage is the oauth2-proxy sidecar image. Overridable via
+// HYPERSHELL_OAUTH2_PROXY_IMAGE.
+const defaultOAuth2ProxyImage = "quay.io/oauth2-proxy/oauth2-proxy:v7.7.1"
 
 type StaticImageDefaults struct{}
 
@@ -34,6 +46,20 @@ func (StaticImageDefaults) DefaultDatabaseImage() string {
 		return v
 	}
 	return defaultDatabaseImage
+}
+
+func (StaticImageDefaults) DefaultConsoleImage() string {
+	if v := os.Getenv("HYPERSHELL_CONSOLE_IMAGE"); v != "" {
+		return v
+	}
+	return defaultConsoleImage
+}
+
+func (StaticImageDefaults) DefaultOAuth2ProxyImage() string {
+	if v := os.Getenv("HYPERSHELL_OAUTH2_PROXY_IMAGE"); v != "" {
+		return v
+	}
+	return defaultOAuth2ProxyImage
 }
 
 type NamespaceConfig struct {
@@ -102,6 +128,11 @@ type DatabaseConfig struct {
 // is provided by the top-level reconciler which owns the gRPC connection.
 type RouteAddressUpdater func(ctx context.Context, routeAddress string) error
 
+// ConsoleAddressUpdater is called by the gateway reconciler to update the
+// console_address field on the API-server Gateway resource. The implementation
+// is provided by the top-level reconciler which owns the gRPC connection.
+type ConsoleAddressUpdater func(ctx context.Context, consoleAddress string) error
+
 // KeycloakConfig holds Keycloak Admin REST API connection parameters read
 // from the hypershell-keycloak-admin Secret in the control-plane namespace.
 type KeycloakConfig struct {
@@ -131,6 +162,9 @@ type ReconcileOpts struct {
 	// UpdateRouteAddress is an optional callback that PATCHes the route_address
 	// field on the API-server Gateway.  Nil means no update will be attempted.
 	UpdateRouteAddress RouteAddressUpdater
+	// UpdateConsoleAddress is an optional callback that PATCHes the console_address
+	// field on the API-server Gateway. Nil means no update will be attempted.
+	UpdateConsoleAddress ConsoleAddressUpdater
 	// RotateDBCredentials is the value of the hypershell.redhat.io/rotate-db-credentials
 	// annotation on the Gateway resource. Empty means no rotation requested.
 	RotateDBCredentials string
@@ -154,4 +188,5 @@ type ReconcileOpts struct {
 // KeycloakClientAPI is the subset of keycloak.Client needed by the gateway package.
 type KeycloakClientAPI interface {
 	DeleteGatewayClient(ctx context.Context, gatewayName string) error
+	DeleteConsoleClient(ctx context.Context, consoleClientID string) error
 }

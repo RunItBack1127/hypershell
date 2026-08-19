@@ -169,6 +169,7 @@ func DeleteGatewayResources(
 	if opts.HasGatewayAPI {
 		namespacedResources = append(namespacedResources,
 			schema.GroupVersionResource{Group: "gateway.networking.k8s.io", Version: "v1", Resource: "grpcroutes"},
+			schema.GroupVersionResource{Group: "gateway.networking.k8s.io", Version: "v1", Resource: "httproutes"},
 			schema.GroupVersionResource{Group: "gateway.networking.k8s.io", Version: "v1", Resource: "backendtlspolicies"},
 		)
 	}
@@ -214,6 +215,16 @@ func DeleteGatewayResources(
 		} else {
 			log.Printf("INFO deleted keycloak client %s", kcClientID)
 		}
+
+		// The console namespaced resources are swept by label above, but the
+		// console Keycloak client must be deleted explicitly (it lives in the
+		// realm, not the namespace). Best-effort: log the orphan on failure.
+		consoleClientID := kcClientID + "-console"
+		if err := opts.KeycloakClient.DeleteConsoleClient(ctx, consoleClientID); err != nil {
+			log.Printf("WARN failed to delete console client %s (orphaned): %v", consoleClientID, err)
+		} else {
+			log.Printf("INFO deleted console client %s", consoleClientID)
+		}
 	}
 
 	for _, credNS := range credentialNamespaces {
@@ -258,6 +269,9 @@ func deleteGatewayAPIResources(ctx context.Context, dynamicClient dynamic.Interf
 	if err := dynamicClient.Resource(netpolGVR).Namespace(namespace).Delete(ctx, "openshell-gateway-allow-router", metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
 		log.Printf("WARN failed to delete router NetworkPolicy: %v", err)
 	}
+
+	// The console follows the route, so removing the route removes the console.
+	deleteConsole(ctx, dynamicClient, clientset, namespace, opts)
 
 	if opts.UpdateRouteAddress != nil {
 		if err := opts.UpdateRouteAddress(ctx, ""); err != nil {
@@ -592,6 +606,7 @@ func kindToResource(kind string) string {
 		"Certificate":           "certificates",
 		"Gateway":               "gateways",
 		"GRPCRoute":             "grpcroutes",
+		"HTTPRoute":             "httproutes",
 		"BackendTLSPolicy":      "backendtlspolicies",
 	}
 
@@ -1494,6 +1509,17 @@ func reconcileGatewayAPIResources(ctx context.Context, dynamicClient dynamic.Int
 
 	// The route address is published deterministically at the top of this
 	// function, so no readiness-gated discovery is required here.
+
+	// The console follows the route: it is deployed in the same pass that creates
+	// the route resources. A console failure must not fail the gateway route
+	// reconciliation, so it is logged and the reconcile continues.
+	images := opts.Images
+	if images == nil {
+		images = StaticImageDefaults{}
+	}
+	if err := reconcileConsole(ctx, dynamicClient, clientset, nsConfig, opts, images); err != nil {
+		log.Printf("WARN failed to reconcile console in %s: %v", namespace, err)
+	}
 
 	log.Printf("INFO Gateway API resources reconciled in namespace %s (hostname=%s)", namespace, hostname)
 	return nil
