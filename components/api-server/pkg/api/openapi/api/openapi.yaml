@@ -2558,6 +2558,12 @@ components:
           credential_driver:
             description: JSON-encoded credential storage driver configuration
             type: string
+          active_sandbox_count:
+            description: Number of active (Running or Pending) agent sandboxes observed
+              in the gateway namespace by the control plane
+            format: int32
+            readOnly: true
+            type: integer
         required:
         - cluster_id
         - database_id
@@ -2582,6 +2588,7 @@ components:
         external_dns: external_dns
         phase: phase
         image: image
+        active_sandbox_count: 5
         kind: kind
         console_address: console_address
         route_address: route_address
@@ -2628,6 +2635,7 @@ components:
           external_dns: external_dns
           phase: phase
           image: image
+          active_sandbox_count: 5
           kind: kind
           console_address: console_address
           route_address: route_address
@@ -2655,6 +2663,7 @@ components:
           external_dns: external_dns
           phase: phase
           image: image
+          active_sandbox_count: 5
           kind: kind
           console_address: console_address
           route_address: route_address

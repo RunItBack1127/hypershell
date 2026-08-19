@@ -125,6 +125,7 @@ export function GatewayRowActions({
         />
       ) : null}
       <GatewayDeleteDialog
+        activeSandboxCount={gateway.activeSandboxCount}
         gatewayId={gateway.id}
         gatewayName={gateway.name}
         isOpen={isDeleteOpen}

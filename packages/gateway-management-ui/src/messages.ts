@@ -6,6 +6,12 @@ export const messages = defineMessages({
     defaultMessage: "Actions",
     description: "Accessible heading for table row actions.",
   },
+  activeSandboxes: {
+    id: "app.gateway.column.activeSandboxes",
+    defaultMessage: "Active sandboxes",
+    description:
+      "Heading for the gateways table column showing the number of active sandbox sessions.",
+  },
   cancel: {
     id: "app.action.cancel",
     defaultMessage: "Cancel",
@@ -75,6 +81,30 @@ export const messages = defineMessages({
     id: "app.gateway.cluster.region",
     defaultMessage: "Region: {region}",
     description: "Region context that distinguishes a managed cluster option.",
+  },
+  connectionInstallLink: {
+    id: "app.gateway.connection.installLink",
+    defaultMessage: "Install the OpenShell CLI",
+    description:
+      "Link text pointing to the NVIDIA OpenShell installation documentation.",
+  },
+  connectionInstallLinkNewTab: {
+    id: "app.gateway.connection.installLinkNewTab",
+    defaultMessage: "Install the OpenShell CLI (opens in a new tab)",
+    description:
+      "Accessible name for the OpenShell CLI install docs link, including that it opens in a new tab.",
+  },
+  connectionInstallPrereq: {
+    id: "app.gateway.connection.installPrereq",
+    defaultMessage:
+      "The OpenShell CLI must be installed before running the commands below.",
+    description:
+      "Prerequisite note shown above the connection steps directing operators to install the CLI first.",
+  },
+  connectionInstallPrereqTitle: {
+    id: "app.gateway.connection.installPrereqTitle",
+    defaultMessage: "Prerequisite",
+    description: "Title for the CLI installation prerequisite alert.",
   },
   connectionLoginUnavailable: {
     id: "app.gateway.connection.login.unavailable",
@@ -162,6 +192,13 @@ export const messages = defineMessages({
     id: "app.gateway.delete",
     defaultMessage: "Delete gateway",
     description: "Action that permanently deletes a gateway.",
+  },
+  deleteGatewayActiveSandboxWarning: {
+    id: "app.gateway.delete.activeSandboxWarning",
+    defaultMessage:
+      "This gateway has {count, plural, one {# active sandbox} other {# active sandboxes}} that will be disrupted by deletion.",
+    description:
+      "Warning shown before deleting a gateway that still has running sandboxes.",
   },
   deleteGatewayConfirmation: {
     id: "app.gateway.delete.confirmation",

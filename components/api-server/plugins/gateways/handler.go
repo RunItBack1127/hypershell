@@ -6,11 +6,13 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/golang/glog"
 	"github.com/gorilla/mux"
 
 	"github.com/openshift-online/hypershell/components/api-server/pkg/api/openapi"
 	"github.com/openshift-online/hypershell/components/api-server/pkg/rbac"
 	"github.com/openshift-online/rh-trex-ai/pkg/api/presenters"
+	"github.com/openshift-online/rh-trex-ai/pkg/auth"
 	"github.com/openshift-online/rh-trex-ai/pkg/errors"
 	"github.com/openshift-online/rh-trex-ai/pkg/handlers"
 	"github.com/openshift-online/rh-trex-ai/pkg/services"
@@ -128,6 +130,11 @@ func (h gatewayHandler) Patch(w http.ResponseWriter, r *http.Request) {
 			if patch.ConsoleAddress != nil {
 				found.ConsoleAddress = patch.ConsoleAddress
 			}
+			// active_sandbox_count is a control-plane-owned observability signal
+			// written only via the gRPC AdjustActiveSandboxCount / SetActiveSandboxCount
+			// RPCs (readOnly on the REST Gateway schema); it is intentionally not
+			// settable via the public REST PATCH, and gRPC UpdateGateway refuses to
+			// mutate it as well.
 			if patch.Oidc != nil {
 				found.Oidc = patch.Oidc
 			}
@@ -164,7 +171,8 @@ func (h gatewayHandler) List(w http.ResponseWriter, r *http.Request) {
 			listArgs := services.NewListArguments(r.URL.Query())
 
 			userID := rbac.GetUserIDFromContext(ctx)
-			if userID != "" && h.visibilityFilter != nil {
+			hasPlatformAdmin := rbac.HasPlatformAdminRole(ctx, userID)
+			if userID != "" && h.visibilityFilter != nil && !hasPlatformAdmin {
 				accessibleIDs, filterErr := h.visibilityFilter.AccessibleGatewayIDs(ctx, userID)
 				if filterErr != nil {
 					return nil, errors.GeneralError("failed to check gateway access: %s", filterErr)
@@ -244,6 +252,13 @@ func (h gatewayHandler) Get(w http.ResponseWriter, r *http.Request) {
 				return nil, err
 			}
 
+			userID := rbac.GetUserIDFromContext(ctx)
+			if rbac.HasPlatformAdminRole(ctx, userID) {
+				username := auth.GetUsernameFromContext(ctx)
+				glog.Infof("platform:admin action=view gateway_id=%s gateway_name=%s user=%s user_id=%s",
+					gateway.ID, gateway.Name, username, userID)
+			}
+
 			return PresentGateway(gateway), nil
 		},
 	}
@@ -256,10 +271,29 @@ func (h gatewayHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		Action: func() (interface{}, *errors.ServiceError) {
 			id := mux.Vars(r)["id"]
 			ctx := r.Context()
+
+			userID := rbac.GetUserIDFromContext(ctx)
+			isPlatformAdmin := rbac.HasPlatformAdminRole(ctx, userID)
+
+			var gatewayName string
+			if isPlatformAdmin {
+				gateway, getErr := h.gateway.Get(ctx, id)
+				if getErr == nil {
+					gatewayName = gateway.Name
+				}
+			}
+
 			err := h.gateway.Delete(ctx, id)
 			if err != nil {
 				return nil, err
 			}
+
+			if isPlatformAdmin {
+				username := auth.GetUsernameFromContext(ctx)
+				glog.Infof("platform:admin action=delete gateway_id=%s gateway_name=%s user=%s user_id=%s",
+					id, gatewayName, username, userID)
+			}
+
 			return nil, nil
 		},
 	}

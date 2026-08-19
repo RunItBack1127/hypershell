@@ -1,4 +1,11 @@
-import { Content, Skeleton, Title } from "@patternfly/react-core";
+import {
+  Alert,
+  AlertActionLink,
+  Content,
+  Skeleton,
+  Title,
+} from "@patternfly/react-core";
+import { ExternalLinkAltIcon } from "@patternfly/react-icons";
 import { type ReactNode, useState } from "react";
 import { useIntl } from "react-intl";
 
@@ -9,6 +16,7 @@ import {
   buildSetupScript,
   claudeModel,
   type GatewayConnection,
+  installDocsUrl,
   sandboxName as defaultSandboxName,
   vertexProviderName,
 } from "./gateway-connections";
@@ -23,7 +31,7 @@ const providerMarker = "OSPROVIDERNAMEZ";
 const modelMarker = "OSMODELNAMEZ";
 const sandboxMarker = "OSSANDBOXNAMEZ";
 const setupMarkers = [providerMarker, modelMarker];
-const sandboxMarkers = [sandboxMarker];
+const sandboxMarkers = [sandboxMarker, modelMarker];
 
 function ConnectionStep({
   children,
@@ -69,6 +77,30 @@ export function GatewayConnectionSteps({
         description={intl.formatMessage(messages.connectionSetupDescription)}
         title={intl.formatMessage(messages.connectionSetupTitle)}
       >
+        <Alert
+          actionLinks={
+            <AlertActionLink
+              aria-label={intl.formatMessage(
+                messages.connectionInstallLinkNewTab,
+              )}
+              component="a"
+              href={installDocsUrl}
+              icon={<ExternalLinkAltIcon aria-hidden />}
+              iconPosition="end"
+              rel="noopener noreferrer"
+              target="_blank"
+            >
+              {intl.formatMessage(messages.connectionInstallLink)}
+            </AlertActionLink>
+          }
+          className={styles.prereqAlert}
+          component="h3"
+          isInline
+          title={intl.formatMessage(messages.connectionInstallPrereqTitle)}
+          variant="info"
+        >
+          {intl.formatMessage(messages.connectionInstallPrereq)}
+        </Alert>
         {setupTemplate && setupCopy ? (
           <EditableCommand
             copyAriaLabel={intl.formatMessage(messages.copySetupCommand)}
@@ -109,16 +141,24 @@ export function GatewayConnectionSteps({
       >
         <EditableCommand
           copyAriaLabel={intl.formatMessage(messages.copySandboxCommand)}
-          copyText={buildSandboxCreateCommand(sandboxName)}
+          copyText={buildSandboxCreateCommand(sandboxName, model)}
           labels={{
+            [modelMarker]: intl.formatMessage(messages.editModel),
             [sandboxMarker]: intl.formatMessage(messages.editSandboxName),
           }}
           markers={sandboxMarkers}
-          onFieldChange={(_marker, value) => {
-            setSandboxName(value);
+          onFieldChange={(marker, value) => {
+            if (marker === sandboxMarker) {
+              setSandboxName(value);
+            } else if (marker === modelMarker) {
+              setModel(value);
+            }
           }}
-          templateCommand={buildSandboxCreateCommand(sandboxMarker)}
-          values={{ [sandboxMarker]: sandboxName }}
+          templateCommand={buildSandboxCreateCommand(
+            sandboxMarker,
+            modelMarker,
+          )}
+          values={{ [modelMarker]: model, [sandboxMarker]: sandboxName }}
         />
       </ConnectionStep>
     </ol>
