@@ -371,20 +371,78 @@ func (r *GatewayReconciler) Handle(ctx context.Context, event watcher.Event[*pb.
 	}
 
 	// The Deployment is Ready. A routed gateway is not Running until its external
-	// exposure is also observed Ready, so leave it at Provisioning and let the
-	// continuous health reconciler promote it to Running once the exposure is
-	// programmed (or move it to Degraded after the route-readiness grace window).
-	// A non-routed gateway - or any gateway on a cluster without the exposure
-	// port - is Running on Deployment readiness alone. See
+	// exposure is also observed Ready. Poll the exposure here within a bounded
+	// window so the gateway is promoted to Running promptly once its route is
+	// programmed - rather than waiting up to a full health-reconciler tick, which
+	// would leave the connection command and console button hidden for seconds
+	// after the pods are ready. If the window elapses, park at Provisioning and
+	// let the continuous health reconciler keep enforcing the full route-readiness
+	// grace window (promoting to Running, or Degraded once it expires). A
+	// non-routed gateway - or any gateway on a cluster without the exposure port -
+	// is Running on Deployment readiness alone. See
 	// openshell-gateway-health.spec.md § Phase Reflects Workload and Route Readiness.
 	if r.exposure != nil && isRoutedGateway(gw) {
-		r.updateGatewayHealth(ctx, event.ResourceID, "Provisioning", "Deployment ready; awaiting route readiness")
-		log.Printf("INFO gateway %s deployment ready in namespace %s; awaiting route readiness", gw.Name, namespace)
+		if r.waitForRouteReady(ctx, namespace) {
+			r.updateGatewayHealth(ctx, event.ResourceID, "Running", "Healthy")
+			log.Printf("INFO gateway %s provisioned and route ready in namespace %s", gw.Name, namespace)
+		} else {
+			r.updateGatewayHealth(ctx, event.ResourceID, "Provisioning", "Deployment ready; awaiting route readiness")
+			log.Printf("INFO gateway %s deployment ready in namespace %s; awaiting route readiness", gw.Name, namespace)
+		}
 	} else {
 		r.updateGatewayHealth(ctx, event.ResourceID, "Running", "Healthy")
 		log.Printf("INFO gateway %s provisioned and ready in namespace %s", gw.Name, namespace)
 	}
 	return nil
+}
+
+// provisioningRouteReadyWait bounds how long the provisioning path polls a
+// routed gateway's external exposure for readiness before parking it at
+// Provisioning. Route programming typically completes within a few seconds of
+// Deployment readiness; polling here (rather than waiting for the health loop's
+// next tick) lets the connection command and console surface promptly. On
+// timeout the health reconciler continues enforcing the full route-readiness
+// grace window, so a slow route is not misreported.
+const provisioningRouteReadyWait = 90 * time.Second
+
+// provisioningRouteReadyInterval is the cadence at which the provisioning path
+// polls a routed gateway's exposure. It is intentionally far tighter than the
+// steady-state health interval (30s) so the first Running promotion is prompt;
+// the 30s cadence still governs ongoing health once the gateway is settled.
+const provisioningRouteReadyInterval = 2 * time.Second
+
+// waitForRouteReady polls the gateway's external exposure until it reports Ready
+// or the bounded provisioning window elapses, returning whether it became Ready.
+func (r *GatewayReconciler) waitForRouteReady(ctx context.Context, namespace string) bool {
+	return r.pollRouteReady(ctx, namespace, provisioningRouteReadyInterval, provisioningRouteReadyWait)
+}
+
+// pollRouteReady observes the exposure immediately and then every interval until
+// it reports Ready or the window elapses, mirroring WaitForGatewayReady so a
+// route that is already (or quickly) programmed promotes without waiting a full
+// interval. A transient observation error is logged and retried, never treated
+// as not-ready-forever. Interval and window are parameters so tests can drive it
+// without real-time waits.
+func (r *GatewayReconciler) pollRouteReady(ctx context.Context, namespace string, interval, window time.Duration) bool {
+	deadline := time.After(window)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		rr, err := r.exposure.ObserveReadiness(ctx, exposure.Request{Namespace: namespace})
+		if err != nil {
+			log.Printf("WARN gateway route readiness for %s: %v", namespace, err)
+		} else if rr.Ready {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-deadline:
+			return false
+		case <-ticker.C:
+		}
+	}
 }
 
 // isRoutedGateway reports whether a Gateway declares external route exposure
