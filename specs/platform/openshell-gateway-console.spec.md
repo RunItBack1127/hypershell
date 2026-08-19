@@ -106,6 +106,10 @@ The console client must have three protocol mappers. Each mapper targets the gat
 
 The client-role mapper reads the user roles for the named client. It adds the gateway roles to the token, although the console client issues the token. The OIDC Role Bridge already assigns `openshell-admin` and `openshell-user` on the gateway client (see `openshell-gateway-keycloak.spec.md`). The reconciler adds no roles.
 
+#### Scope mappings
+
+Because `fullScopeAllowed` is `false`, Keycloak filters every role mapper's output to the console client's scope. A client role that is not in scope is silently dropped from the token, even when the mapper targets it and the user holds it. The reconciler MUST therefore grant the console client scope for the gateway client's roles by adding client scope-mappings for `openshell-admin` and `openshell-user` (the gateway client's roles) to the console client. Without this grant the access token omits `hypershell.roles` and the gateway denies every request with `role 'openshell-user' required`, even though `aud` (which is not scope-filtered) is present. The grant is scoped to this one gateway client's roles, so per-gateway isolation is preserved. The reconciler reconciles the scope-mappings on every pass so a console provisioned before this grant existed is healed.
+
 #### Scenario: Console token has the gateway audience and roles
 
 - GIVEN a routed gateway `my-gateway` (id `2FhMpQzXBz`) with gateway client `my-gateway-2FhMpQzXBz`

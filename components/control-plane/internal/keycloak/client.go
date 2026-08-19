@@ -356,6 +356,67 @@ func (c *Client) getClientUUID(ctx context.Context, clientID string) (string, er
 	return "", nil
 }
 
+func (c *Client) listClientRoles(ctx context.Context, clientUUID string) ([]keycloakRole, error) {
+	path := fmt.Sprintf("/admin/realms/%s/clients/%s/roles", c.realm, clientUUID)
+	respBody, err := c.doRequest(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	var roles []keycloakRole
+	if err := json.Unmarshal(respBody, &roles); err != nil {
+		return nil, fmt.Errorf("parse client roles: %w", err)
+	}
+	return roles, nil
+}
+
+// EnsureConsoleScopeMappings grants the console client scope for the gateway
+// client's roles. With fullScopeAllowed=false (required for per-gateway
+// isolation), Keycloak filters every role mapper's output to the requesting
+// client's scope, so without this grant the console access token omits
+// hypershell.roles entirely and the gateway denies every request with
+// "role 'openshell-user' required". Idempotent: re-POSTing existing scope
+// mappings is a no-op on the Keycloak side, so this is safe to run each
+// reconcile. Only this one gateway client's roles are granted, so isolation is
+// preserved.
+func (c *Client) EnsureConsoleScopeMappings(ctx context.Context, consoleClientID, gatewayClientID string) error {
+	consoleUUID, err := c.getClientUUID(ctx, consoleClientID)
+	if err != nil {
+		return fmt.Errorf("resolve console client %s: %w", consoleClientID, err)
+	}
+	if consoleUUID == "" {
+		return fmt.Errorf("console client %s not found", consoleClientID)
+	}
+	return c.addConsoleScopeMappings(ctx, consoleUUID, gatewayClientID)
+}
+
+// addConsoleScopeMappings grants the console client (by UUID) scope for every
+// role defined on the gateway client. See EnsureConsoleScopeMappings.
+func (c *Client) addConsoleScopeMappings(ctx context.Context, consoleUUID, gatewayClientID string) error {
+	gatewayUUID, err := c.getClientUUID(ctx, gatewayClientID)
+	if err != nil {
+		return fmt.Errorf("resolve gateway client %s: %w", gatewayClientID, err)
+	}
+	if gatewayUUID == "" {
+		return fmt.Errorf("gateway client %s not found", gatewayClientID)
+	}
+	roles, err := c.listClientRoles(ctx, gatewayUUID)
+	if err != nil {
+		return fmt.Errorf("list roles on gateway client %s: %w", gatewayClientID, err)
+	}
+	if len(roles) == 0 {
+		return nil
+	}
+	body, err := json.Marshal(roles)
+	if err != nil {
+		return fmt.Errorf("marshal scope mapping roles: %w", err)
+	}
+	path := fmt.Sprintf("/admin/realms/%s/clients/%s/scope-mappings/clients/%s", c.realm, consoleUUID, gatewayUUID)
+	if _, err := c.doRequest(ctx, http.MethodPost, path, body); err != nil {
+		return fmt.Errorf("add console scope mappings from gateway client %s: %w", gatewayClientID, err)
+	}
+	return nil
+}
+
 func (c *Client) getClientRoleUUID(ctx context.Context, clientUUID, roleName string) (string, error) {
 	path := fmt.Sprintf("/admin/realms/%s/clients/%s/roles/%s", c.realm, clientUUID, url.PathEscape(roleName))
 	respBody, err := c.doRequest(ctx, http.MethodGet, path, nil)
@@ -506,6 +567,16 @@ func (c *Client) ProvisionConsoleClient(ctx context.Context, consoleClientID, ga
 		return "", "", fmt.Errorf("create console protocol mappers: %w", err)
 	}
 	log.Printf("INFO keycloak: created protocol mappers on console client %s", consoleClientID)
+
+	log.Printf("INFO keycloak: granting console client %s scope for gateway client %s roles", consoleClientID, gatewayClientID)
+	if err = c.addConsoleScopeMappings(ctx, clientUUID, gatewayClientID); err != nil {
+		log.Printf("WARN keycloak: scope mapping failed for %s, rolling back client: %v", consoleClientID, err)
+		if rollbackErr := c.deleteClientByUUID(ctx, clientUUID); rollbackErr != nil {
+			log.Printf("WARN keycloak: failed to rollback console client %s after scope mapping failure: %v", consoleClientID, rollbackErr)
+		}
+		return "", "", fmt.Errorf("grant console scope mappings: %w", err)
+	}
+	log.Printf("INFO keycloak: granted console client %s scope for gateway client %s roles", consoleClientID, gatewayClientID)
 
 	log.Printf("INFO keycloak: fetching client secret for console client %s", consoleClientID)
 	clientSecret, err = c.getClientSecret(ctx, clientUUID)
