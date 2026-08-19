@@ -83,10 +83,39 @@ describe("gateway presentation data", () => {
   });
 
   it("stops lifecycle polling for terminal gateway states", () => {
-    expect(gatewayNeedsStatusPolling(gateway({ phase: "Running" }))).toBe(
-      false,
-    );
+    expect(
+      gatewayNeedsStatusPolling(
+        gateway({
+          consoleUrl: "https://console.example.com",
+          phase: "Running",
+        }),
+      ),
+    ).toBe(false);
     expect(gatewayNeedsStatusPolling(gateway({ phase: "Failed" }))).toBe(false);
+  });
+
+  it("keeps polling a running routed gateway until its console address arrives", () => {
+    // A routed gateway reaches Running before its console pod can serve; the
+    // control plane publishes console_address only once the pod is Ready. Keep
+    // polling so the console button appears without a manual page refresh.
+    expect(gatewayNeedsStatusPolling(gateway({ phase: "Running" }))).toBe(true);
+
+    // Once the console URL is published, the button can render and polling stops.
+    expect(
+      gatewayNeedsStatusPolling(
+        gateway({
+          consoleUrl: "https://console.example.com",
+          phase: "Running",
+        }),
+      ),
+    ).toBe(false);
+
+    // A non-routed gateway never gains a console, so a settled one does not poll.
+    expect(
+      gatewayNeedsStatusPolling(
+        gateway({ externalDns: undefined, phase: "Running" }),
+      ),
+    ).toBe(false);
   });
 
   it("presents transitional and failed lifecycle phases before health", () => {

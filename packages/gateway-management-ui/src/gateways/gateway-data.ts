@@ -21,16 +21,40 @@ const gatewayPollingStates = new Set([
 const gatewayFailedLifecycleStates = new Set(["error", "failed"]);
 
 export function gatewayNeedsStatusPolling(
-  gateway: Pick<GatewayRecord, "phase" | "status">,
+  gateway: Pick<
+    GatewayRecord,
+    "phase" | "status" | "externalDns" | "consoleUrl"
+  >,
 ): boolean {
   const states = [gateway.phase, gateway.status]
     .map((value) => value?.trim().toLocaleLowerCase() ?? "")
     .filter(Boolean);
 
-  return (
+  if (
     states.length === 0 ||
     states.some((value) => gatewayPollingStates.has(value))
+  ) {
+    return true;
+  }
+
+  return gatewayAwaitingConsole(gateway, states);
+}
+
+// A routed gateway reaches Running before its per-gateway console pod can serve;
+// the control plane publishes console_address only once that pod is Ready. Keep
+// polling a settled routed gateway (one with an external endpoint) until its
+// console URL arrives so the console button appears without a manual page
+// refresh. A failed gateway will not gain a console, so it never keeps polling.
+function gatewayAwaitingConsole(
+  gateway: Pick<GatewayRecord, "externalDns" | "consoleUrl">,
+  states: readonly string[],
+): boolean {
+  const routed = Boolean(gateway.externalDns?.trim());
+  const consolePublished = Boolean(gateway.consoleUrl?.trim());
+  const failed = states.some((value) =>
+    gatewayFailedLifecycleStates.has(value),
   );
+  return routed && !consolePublished && !failed;
 }
 
 export function gatewayListQueryKey(request: GatewayListRequest) {

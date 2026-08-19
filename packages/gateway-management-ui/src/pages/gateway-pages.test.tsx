@@ -386,6 +386,7 @@ describe("gateway shell pages", () => {
       })
       .mockResolvedValue({
         ...gatewayResponse("gateway-1", "Team gateway"),
+        consoleUrl: "https://console.example.com",
         phase: "Running",
         status: "",
       });
@@ -408,6 +409,55 @@ describe("gateway shell pages", () => {
 
     await act(async () => vi.advanceTimersByTimeAsync(10_000));
 
+    expect(gatewayOperations.getGateway).toHaveBeenCalledTimes(2);
+    view.unmount();
+  });
+
+  it("reveals the console button once the console address arrives without a refresh", async () => {
+    vi.useFakeTimers();
+    // A routed gateway reaches Running before its console pod can serve, so the
+    // first fetch has no console URL. The control plane publishes it a moment
+    // later; the page must keep polling and surface the button on its own.
+    gatewayOperations.getGateway
+      .mockResolvedValueOnce({
+        ...gatewayResponse("gateway-1", "Team gateway"),
+        consoleUrl: undefined,
+        phase: "Running",
+        status: "Ready",
+      })
+      .mockResolvedValue({
+        ...gatewayResponse("gateway-1", "Team gateway"),
+        consoleUrl: "https://console.example.com",
+        phase: "Running",
+        status: "Ready",
+      });
+
+    const view = renderPage(() => <GatewayPage gatewayId="gateway-1" />);
+    await act(async () => vi.advanceTimersByTimeAsync(0));
+
+    expect(gatewayOperations.getGateway).toHaveBeenCalledOnce();
+    expect(
+      screen.queryByRole("link", {
+        name: "Open console for Team gateway in a new tab",
+      }),
+    ).toBeNull();
+
+    await act(async () => vi.advanceTimersByTimeAsync(5_000));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(1);
+    });
+
+    expect(gatewayOperations.getGateway).toHaveBeenCalledTimes(2);
+    expect(
+      screen.getByRole("link", {
+        name: "Open console for Team gateway in a new tab",
+      }),
+    ).toBeTruthy();
+
+    // The console URL is published, so polling stops.
+    await act(async () => vi.advanceTimersByTimeAsync(10_000));
     expect(gatewayOperations.getGateway).toHaveBeenCalledTimes(2);
     view.unmount();
   });
@@ -522,6 +572,7 @@ describe("gateway shell pages", () => {
         items: [
           {
             ...gatewayResponse("gateway-1", "Team gateway"),
+            consoleUrl: "https://console.example.com",
             phase: "Running",
             status: "",
           },
