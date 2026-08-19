@@ -43,7 +43,7 @@ func fixedClock(t time.Time) func() time.Time {
 func routedGateway(id, namespace string) *pb.Gateway {
 	route := `{"host":"gw.example.com"}`
 	return &pb.Gateway{
-		Metadata:  &pb.ObjectReference{Id:id},
+		Metadata:  &pb.ObjectReference{Id: id},
 		Namespace: namespace,
 		Route:     &route,
 	}
@@ -68,7 +68,7 @@ func TestSelfHealConsole_NoOpWhenUnconfigured(t *testing.T) {
 
 	t.Run("not a routed gateway", func(t *testing.T) {
 		h := &GatewayHealthReconciler{exposure: fakeExposure{}, keycloakConfig: &gateway.KeycloakConfig{}}
-		h.selfHealConsole(ctx, "gw-1", &pb.Gateway{Metadata: &pb.ObjectReference{Id:"gw-1"}, Namespace: "openshell-abc"})
+		h.selfHealConsole(ctx, "gw-1", &pb.Gateway{Metadata: &pb.ObjectReference{Id: "gw-1"}, Namespace: "openshell-abc"})
 	})
 }
 

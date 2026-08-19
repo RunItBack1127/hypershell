@@ -19,7 +19,7 @@ func roleBinding(id, roleName string) *pb.RoleBinding {
 func TestUnionKcRoles_OverlapKeepsSharedRole(t *testing.T) {
 	const deletedID = "rb-owner"
 	remaining := []*pb.RoleBinding{
-		roleBinding(deletedID, "gateway:owner"),  // the one being deleted -- excluded
+		roleBinding(deletedID, "gateway:owner"), // the one being deleted -- excluded
 		roleBinding("rb-viewer", "gateway:viewer"),
 	}
 
