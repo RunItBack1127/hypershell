@@ -14,9 +14,14 @@ import (
 	"google.golang.org/grpc"
 )
 
-var keycloakRoleMap = map[string]string{
-	"gateway:owner":  "openshell-admin",
-	"gateway:viewer": "openshell-user",
+// keycloakRoleMap maps a platform RoleBinding role to the gateway client roles a
+// user must hold on the per-gateway Keycloak console client. The gateway admin
+// API enforces openshell-admin and openshell-user independently (admin does not
+// imply user), so an owner must be granted BOTH -- otherwise the console can read
+// gateway info but is refused "list workspaces" with "role 'openshell-user' required".
+var keycloakRoleMap = map[string][]string{
+	"gateway:owner":  {"openshell-admin", "openshell-user"},
+	"gateway:viewer": {"openshell-user"},
 }
 
 type RoleBindingReconciler struct {
@@ -64,7 +69,7 @@ func (r *RoleBindingReconciler) Handle(ctx context.Context, event watcher.Event[
 		return nil
 	}
 
-	kcRole, ok := keycloakRoleMap[rb.RoleName]
+	kcRoles, ok := keycloakRoleMap[rb.RoleName]
 	if !ok {
 		log.Printf("DEBUG role binding %s: role %q has no keycloak mapping, skipping", event.ResourceID, rb.RoleName)
 		return nil
@@ -83,15 +88,19 @@ func (r *RoleBindingReconciler) Handle(ctx context.Context, event watcher.Event[
 
 	switch event.Type {
 	case watcher.EventCreated, watcher.EventUpdated:
-		log.Printf("INFO assigning keycloak role %s to user %s on client %s", kcRole, username, kcClientID)
-		if err := r.assignClientRoleWithRetry(ctx, kcClientID, username, kcRole); err != nil {
-			return fmt.Errorf("assign keycloak role %s to user %s on client %s: %w", kcRole, username, kcClientID, err)
+		for _, kcRole := range kcRoles {
+			log.Printf("INFO assigning keycloak role %s to user %s on client %s", kcRole, username, kcClientID)
+			if err := r.assignClientRoleWithRetry(ctx, kcClientID, username, kcRole); err != nil {
+				return fmt.Errorf("assign keycloak role %s to user %s on client %s: %w", kcRole, username, kcClientID, err)
+			}
 		}
 
 	case watcher.EventDeleted:
-		log.Printf("INFO removing keycloak role %s from user %s on client %s", kcRole, username, kcClientID)
-		if err := r.keycloakClient.RemoveClientRole(ctx, kcClientID, username, kcRole); err != nil {
-			return fmt.Errorf("remove keycloak role %s from user %s on client %s: %w", kcRole, username, kcClientID, err)
+		for _, kcRole := range kcRoles {
+			log.Printf("INFO removing keycloak role %s from user %s on client %s", kcRole, username, kcClientID)
+			if err := r.keycloakClient.RemoveClientRole(ctx, kcClientID, username, kcRole); err != nil {
+				return fmt.Errorf("remove keycloak role %s from user %s on client %s: %w", kcRole, username, kcClientID, err)
+			}
 		}
 	}
 
