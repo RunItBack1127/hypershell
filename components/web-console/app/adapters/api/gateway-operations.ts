@@ -98,6 +98,7 @@ function toGatewayRecord(gateway: Gateway): GatewayRecord {
 
   return {
     clusterId: gateway.cluster_id,
+    ...(gateway.console_address ? { consoleUrl: gateway.console_address } : {}),
     ...(gateway.created_at ? { createdAt: gateway.created_at } : {}),
     databaseId: gateway.database_id,
     externalDns:
