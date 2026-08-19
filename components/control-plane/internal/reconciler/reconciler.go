@@ -389,10 +389,14 @@ func (r *GatewayReconciler) Handle(ctx context.Context, event watcher.Event[*pb.
 			r.updateGatewayHealth(ctx, event.ResourceID, "Provisioning", "Deployment ready; awaiting route readiness")
 			log.Printf("INFO gateway %s deployment ready in namespace %s; awaiting route readiness", gw.Name, namespace)
 		}
-		// Publish the console address now if the console pod is already serving so
-		// the button appears promptly on warm clusters; the health reconciler
-		// publishes (and retracts) it as the console's readiness changes otherwise.
-		syncConsoleAddress(ctx, r.clientset, pb.NewGatewayServiceClient(r.grpcConn), event.ResourceID, gw, r.exposure != nil)
+		// The console pod starts after the gateway is routed and typically becomes
+		// Ready seconds to a minute later. Poll its readiness on a tight cadence in
+		// the background and publish console_address as soon as it can serve, so the
+		// web UI's console button enables promptly instead of waiting for the next
+		// 30s health-reconciler tick. It runs in the background so a slow console
+		// image pull never blocks the (serial) gateway watch loop; the health
+		// reconciler remains the backstop that publishes and retracts the address.
+		go r.publishConsoleAddressWhenReady(ctx, event.ResourceID, gw)
 	} else {
 		r.updateGatewayHealth(ctx, event.ResourceID, "Running", "Healthy")
 		log.Printf("INFO gateway %s provisioned and ready in namespace %s", gw.Name, namespace)
@@ -415,6 +419,18 @@ const provisioningRouteReadyWait = 90 * time.Second
 // the 30s cadence still governs ongoing health once the gateway is settled.
 const provisioningRouteReadyInterval = 2 * time.Second
 
+// provisioningConsoleReadyWait bounds how long the provisioning path polls a
+// routed gateway's console Deployment for readiness before leaving further
+// publication to the health reconciler. It is generous because the console
+// images may need pulling on a cold cluster; the poll runs in the background,
+// so a long window never blocks the gateway watch loop.
+const provisioningConsoleReadyWait = 5 * time.Minute
+
+// provisioningConsoleReadyInterval is the cadence at which the provisioning path
+// polls the console Deployment's readiness, tight enough that the console button
+// enables within a couple of seconds of the pod becoming ready.
+const provisioningConsoleReadyInterval = 2 * time.Second
+
 // waitForRouteReady polls the gateway's external exposure until it reports Ready
 // or the bounded provisioning window elapses, returning whether it became Ready.
 func (r *GatewayReconciler) waitForRouteReady(ctx context.Context, namespace string) bool {
@@ -428,15 +444,39 @@ func (r *GatewayReconciler) waitForRouteReady(ctx context.Context, namespace str
 // as not-ready-forever. Interval and window are parameters so tests can drive it
 // without real-time waits.
 func (r *GatewayReconciler) pollRouteReady(ctx context.Context, namespace string, interval, window time.Duration) bool {
+	return poll(ctx, interval, window, func() bool {
+		rr, err := r.exposure.ObserveReadiness(ctx, exposure.Request{Namespace: namespace})
+		if err != nil {
+			log.Printf("WARN gateway route readiness for %s: %v", namespace, err)
+			return false
+		}
+		return rr.Ready
+	})
+}
+
+// publishConsoleAddressWhenReady polls the gateway's console Deployment on a
+// tight cadence and publishes console_address as soon as the console pod can
+// serve, so the web UI's console button enables promptly rather than waiting for
+// the next health-reconciler tick. It is meant to run in the background and
+// stops once the address is published or the bounded window elapses.
+func (r *GatewayReconciler) publishConsoleAddressWhenReady(ctx context.Context, gatewayID string, gw *pb.Gateway) {
+	client := pb.NewGatewayServiceClient(r.grpcConn)
+	poll(ctx, provisioningConsoleReadyInterval, provisioningConsoleReadyWait, func() bool {
+		return syncConsoleAddress(ctx, r.clientset, client, gatewayID, gw, r.exposure != nil)
+	})
+}
+
+// poll invokes attempt immediately and then every interval until it returns
+// true or the window elapses (or the context is cancelled), reporting whether
+// attempt ever succeeded. Interval and window are parameters so tests can drive
+// it without real-time waits.
+func poll(ctx context.Context, interval, window time.Duration, attempt func() bool) bool {
 	deadline := time.After(window)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
-		rr, err := r.exposure.ObserveReadiness(ctx, exposure.Request{Namespace: namespace})
-		if err != nil {
-			log.Printf("WARN gateway route readiness for %s: %v", namespace, err)
-		} else if rr.Ready {
+		if attempt() {
 			return true
 		}
 		select {
@@ -513,33 +553,35 @@ func consoleAddressFor(ready bool, url string) string {
 // serve. It is a no-op for gateways without a console (no exposure port, or not
 // routed) and when the base domain is unconfigured, and it leaves the address
 // untouched on a transient readiness-observation error rather than flapping the
-// button.
-func syncConsoleAddress(ctx context.Context, clientset *kubernetes.Clientset, client pb.GatewayServiceClient, gatewayID string, gw *pb.Gateway, hasExposure bool) {
+// button. It returns whether the console is currently Ready, so a caller polling
+// during provisioning can stop once the address has been published.
+func syncConsoleAddress(ctx context.Context, clientset *kubernetes.Clientset, client pb.GatewayServiceClient, gatewayID string, gw *pb.Gateway, hasExposure bool) bool {
 	if gatewayID == "" || !hasExposure || !isRoutedGateway(gw) {
-		return
+		return false
 	}
 	namespace := gatewayNamespace(gw)
 	url, ok := gateway.ConsoleURL(namespace)
 	if !ok {
-		return
+		return false
 	}
 	ready, _, err := gateway.DeploymentReadiness(ctx, clientset, namespace, gateway.ConsoleDeploymentName)
 	if err != nil {
 		log.Printf("WARN console readiness for %s: %v", namespace, err)
-		return
+		return false
 	}
 	desired := consoleAddressFor(ready, url)
 	if gw.GetConsoleAddress() == desired {
-		return
+		return ready
 	}
 	if _, err := client.UpdateGateway(ctx, &pb.UpdateGatewayRequest{
 		Id:             gatewayID,
 		ConsoleAddress: &desired,
 	}); err != nil {
 		log.Printf("WARN failed to set console address for %s to %q: %v", gatewayID, desired, err)
-		return
+		return false
 	}
 	log.Printf("INFO console address for %s set to %q (consoleReady=%v)", gatewayID, desired, ready)
+	return ready
 }
 
 // makeRouteAddressUpdater returns a RouteAddressUpdater callback that PATCHes

@@ -86,6 +86,38 @@ func TestPollRouteReady(t *testing.T) {
 	})
 }
 
+func TestPoll(t *testing.T) {
+	t.Run("returns true as soon as attempt succeeds", func(t *testing.T) {
+		calls := 0
+		ok := poll(t.Context(), time.Millisecond, time.Second, func() bool {
+			calls++
+			return calls == 3
+		})
+		if !ok {
+			t.Fatal("expected poll to report success")
+		}
+		if calls != 3 {
+			t.Errorf("expected attempt to run 3 times, got %d", calls)
+		}
+	})
+
+	t.Run("window elapses without success returns false", func(t *testing.T) {
+		if poll(t.Context(), time.Millisecond, 20*time.Millisecond, func() bool {
+			return false
+		}) {
+			t.Fatal("expected timeout to report failure")
+		}
+	})
+
+	t.Run("cancelled context returns false", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		if poll(ctx, time.Millisecond, time.Minute, func() bool { return false }) {
+			t.Fatal("expected cancelled context to report failure")
+		}
+	})
+}
+
 func TestConsoleAddressFor(t *testing.T) {
 	const url = "https://console-openshell-abc.gw.example.com"
 
