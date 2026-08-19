@@ -133,6 +133,15 @@ help:
 build-all:
 	@scripts/kind/build-images.sh
 
+# Builds the OpenShell console (dashboard) image from the upstream project and
+# loads it, plus the oauth2-proxy sidecar image, into the Kind cluster. The
+# upstream project ships no registry image, so the console is built from source;
+# run this before bringing up gateways with a console. Pin/override the source
+# via OPENSHELL_DASHBOARD_REF.
+.PHONY: build-console
+build-console:
+	@scripts/kind/build-console-image.sh
+
 .PHONY: verify-pnpm
 verify-pnpm:
 	@current=$$($(PNPM) --version); \
