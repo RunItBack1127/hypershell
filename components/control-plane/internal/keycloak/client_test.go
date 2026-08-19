@@ -213,6 +213,135 @@ func TestProvisionConsoleClient_HappyPath(t *testing.T) {
 	}
 }
 
+// EnsureConsoleClientConfig must reconcile an existing console client's drifted
+// configuration on every pass: reset fullScopeAllowed to false, rewrite the
+// redirect URIs / web origins to the desired console host, upsert the protocol
+// mappers (create the ones missing, update the ones present), and re-grant the
+// gateway-client scope mappings.
+func TestEnsureConsoleClientConfig_ReconcilesDrift(t *testing.T) {
+	const consoleUUID = testFakeUUID
+	var mu sync.Mutex
+	var putRep map[string]interface{}
+	createdMappers := map[string]bool{}
+	updatedMappers := map[string]bool{}
+	var scopeGranted []keycloakRole
+
+	mux := http.NewServeMux()
+	mux.HandleFunc(fmt.Sprintf("/realms/%s/protocol/openid-connect/token", testRealm), func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "fake-token", "expires_in": 300})
+	})
+
+	// Client-list lookups: resolve the console and gateway clients by clientId.
+	mux.HandleFunc(fmt.Sprintf("/admin/realms/%s/clients", testRealm), func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Query().Get("clientId") {
+		case testConsoleClientID:
+			_ = json.NewEncoder(w).Encode([]keycloakClient{{ID: consoleUUID, ClientID: testConsoleClientID}})
+		case testGatewayClientID:
+			_ = json.NewEncoder(w).Encode([]keycloakClient{{ID: testGatewayUUID, ClientID: testGatewayClientID}})
+		default:
+			_ = json.NewEncoder(w).Encode([]keycloakClient{})
+		}
+	})
+
+	// Everything under /clients/ (single-client rep, mappers, scope-mappings, roles).
+	prefix := fmt.Sprintf("/admin/realms/%s/clients/", testRealm)
+	mux.HandleFunc(prefix, func(w http.ResponseWriter, r *http.Request) {
+		sub := strings.TrimPrefix(r.URL.Path, prefix)
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case sub == consoleUUID && r.Method == http.MethodGet:
+			// The current (drifted) representation: fullScopeAllowed true and a
+			// stale redirect URI that must be corrected.
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"id":               consoleUUID,
+				"clientId":         testConsoleClientID,
+				"fullScopeAllowed": true,
+				"redirectUris":     []string{"https://old-host.example.com/oauth2/callback"},
+				"webOrigins":       []string{"https://old-host.example.com"},
+			})
+		case sub == consoleUUID && r.Method == http.MethodPut:
+			body, _ := io.ReadAll(r.Body)
+			mu.Lock()
+			_ = json.Unmarshal(body, &putRep)
+			mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+		case sub == consoleUUID+"/protocol-mappers/models" && r.Method == http.MethodGet:
+			// Only the audience mapper exists; client-roles and sub are missing.
+			_ = json.NewEncoder(w).Encode([]map[string]interface{}{
+				{"id": "audience-id", "name": "audience"},
+			})
+		case sub == consoleUUID+"/protocol-mappers/models" && r.Method == http.MethodPost:
+			body, _ := io.ReadAll(r.Body)
+			var m capturedMapper
+			_ = json.Unmarshal(body, &m)
+			mu.Lock()
+			createdMappers[m.Name] = true
+			mu.Unlock()
+			w.WriteHeader(http.StatusCreated)
+		case strings.HasPrefix(sub, consoleUUID+"/protocol-mappers/models/") && r.Method == http.MethodPut:
+			body, _ := io.ReadAll(r.Body)
+			var m capturedMapper
+			_ = json.Unmarshal(body, &m)
+			mu.Lock()
+			updatedMappers[m.Name] = true
+			mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+		case sub == testGatewayUUID+"/roles" && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode([]keycloakRole{
+				{ID: "role-user-uuid", Name: "openshell-user"},
+			})
+		case sub == consoleUUID+"/scope-mappings/clients/"+testGatewayUUID && r.Method == http.MethodPost:
+			body, _ := io.ReadAll(r.Body)
+			var roles []keycloakRole
+			_ = json.Unmarshal(body, &roles)
+			mu.Lock()
+			scopeGranted = append(scopeGranted, roles...)
+			mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, "unexpected "+r.Method+" "+r.URL.Path, http.StatusNotFound)
+		}
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	kc := NewClient(srv.URL, testRealm, testAdminClientID, testAdminSecret)
+	if err := kc.EnsureConsoleClientConfig(t.Context(), testConsoleClientID, testGatewayClientID, testRedirectURI, testWebOrigin); err != nil {
+		t.Fatalf("EnsureConsoleClientConfig: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if putRep == nil {
+		t.Fatal("expected the console client representation to be PUT")
+	}
+	if fsa, _ := putRep["fullScopeAllowed"].(bool); fsa {
+		t.Error("fullScopeAllowed must be reset to false")
+	}
+	if uris, _ := putRep["redirectUris"].([]interface{}); len(uris) != 1 || uris[0] != testRedirectURI {
+		t.Errorf("redirectUris = %v, want [%q]", putRep["redirectUris"], testRedirectURI)
+	}
+	if origins, _ := putRep["webOrigins"].([]interface{}); len(origins) != 1 || origins[0] != testWebOrigin {
+		t.Errorf("webOrigins = %v, want [%q]", putRep["webOrigins"], testWebOrigin)
+	}
+
+	if !updatedMappers["audience"] {
+		t.Error("expected the existing audience mapper to be updated in place")
+	}
+	for _, name := range []string{"client-roles", "sub"} {
+		if !createdMappers[name] {
+			t.Errorf("expected missing mapper %q to be created", name)
+		}
+	}
+
+	if len(scopeGranted) != 1 || scopeGranted[0].Name != "openshell-user" {
+		t.Errorf("expected the gateway role to be granted into the console scope, got %v", scopeGranted)
+	}
+}
+
 func TestDeleteConsoleClient_NotFound(t *testing.T) {
 	srv, _ := newFakeKeycloak(t)
 	kc := NewClient(srv.URL, testRealm, testAdminClientID, testAdminSecret)

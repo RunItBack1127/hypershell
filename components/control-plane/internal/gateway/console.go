@@ -251,14 +251,17 @@ func reconcileConsole(ctx context.Context, dynamicClient dynamic.Interface, clie
 		if err != nil {
 			return fmt.Errorf("get console client secret %s: %w", consoleClientID, err)
 		}
-		// Reconcile the scope mappings on every pass so a console provisioned
-		// before this grant existed (or one whose gateway roles changed) is
-		// healed; the gateway client roles must be in the console client's scope
-		// or Keycloak strips hypershell.roles and the gateway denies every call.
-		if err = kc.EnsureConsoleScopeMappings(ctx, consoleClientID, gwClientID); err != nil {
-			return fmt.Errorf("ensure console scope mappings for %s: %w", consoleClientID, err)
+		// Reconcile the full desired client configuration on every pass so a
+		// console provisioned before a given setting existed (or one that has since
+		// drifted) is healed: redirect URIs and web origins (which change if the
+		// base domain changes), fullScopeAllowed=false and the confidential flags,
+		// the protocol mappers, and the gateway-client scope mappings. The gateway
+		// client roles must be in the console client's scope or Keycloak strips
+		// hypershell.roles and the gateway denies every call.
+		if err = kc.EnsureConsoleClientConfig(ctx, consoleClientID, gwClientID, redirectURI, consoleURL); err != nil {
+			return fmt.Errorf("ensure console client config for %s: %w", consoleClientID, err)
 		}
-		log.Printf("INFO console client %s already exists (uuid=%s)", consoleClientID, existingUUID)
+		log.Printf("INFO console client %s already exists (uuid=%s), config reconciled", consoleClientID, existingUUID)
 	}
 
 	// The oauth2-proxy issuer must match the issuer the gateway validates, so the
