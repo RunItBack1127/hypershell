@@ -2,6 +2,8 @@ import { createBffTracing } from "./adapters/observability/otel-tracing.js";
 import { buildApp } from "./app.js";
 import { loadConfig } from "./config.js";
 
+// Validate merge queue check-regexp fix
+
 const config = loadConfig();
 // The bootstrap is the one server path exempt from the telemetry import ban; it
 // owns the OTel SDK lifecycle and injects the tracing port into the app.

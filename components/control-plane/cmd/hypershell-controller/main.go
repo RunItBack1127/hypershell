@@ -28,6 +28,8 @@ import (
 	gatewayclient "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned"
 )
 
+// Validate merge queue check-regexp fix
+
 const defaultManifestsDir = "/manifests/gateway"
 
 func main() {

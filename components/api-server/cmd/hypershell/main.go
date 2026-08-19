@@ -21,6 +21,8 @@ import (
 	_ "github.com/openshift-online/rh-trex-ai/plugins/generic"
 )
 
+// Validate merge queue check-regexp fix
+
 func main() {
 	rootCmd := pkgcmd.NewRootCommand("hypershell", "My service built with TRex library")
 	rootCmd.AddCommand(
