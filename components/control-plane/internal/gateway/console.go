@@ -193,6 +193,14 @@ func reconcileConsole(ctx context.Context, dynamicClient dynamic.Interface, clie
 	trustedCA := hasConsoleTrustedCABundle(ctx, clientset, namespace)
 
 	deployment := buildConsoleDeployment(namespace, consoleImage, proxyImage, issuer, consoleClientID, redirectURI, trustedCA)
+	// Console resources are reconciled outside deployGateway, so the gateway
+	// path's OpenShift fixup never reaches this Deployment. The restricted SCC
+	// assigns namespace-specific UID/GID ranges and rejects a hardcoded fsGroup,
+	// so strip it (and any pinned container runAsUser) on OpenShift, matching the
+	// gateway path.
+	if opts.IsOpenShift {
+		applyOpenShiftOverrides(deployment)
+	}
 	if err := reconcileResource(ctx, dynamicClient, deployment); err != nil {
 		return fmt.Errorf("reconcile console Deployment in %s: %w", namespace, err)
 	}

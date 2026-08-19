@@ -131,6 +131,30 @@ func TestBuildConsoleDeployment_DashboardUsesGatewayMTLS(t *testing.T) {
 	}
 }
 
+// On OpenShift the restricted SCC assigns per-namespace UID/GID ranges and
+// rejects a pod that pins fsGroup. Because the console is reconciled outside the
+// gateway deploy path, reconcileConsole applies the same OpenShift fixup itself.
+// Verify that fixup strips the hardcoded fsGroup while leaving the rest of the
+// pod security context intact.
+func TestConsoleDeployment_OpenShiftOverrideStripsFsGroup(t *testing.T) {
+	dep := buildConsoleDeployment("ns", "dash:latest", "proxy:latest",
+		"https://issuer.example/realms/r", "gw-1-console", "https://console.example/oauth2/callback", false)
+
+	// Sanity: the base Deployment pins fsGroup off OpenShift.
+	if _, found, _ := unstructured.NestedInt64(dep.Object, "spec", "template", "spec", "securityContext", "fsGroup"); !found {
+		t.Fatal("expected the base console Deployment to set fsGroup")
+	}
+
+	applyOpenShiftOverrides(dep)
+
+	if _, found, _ := unstructured.NestedInt64(dep.Object, "spec", "template", "spec", "securityContext", "fsGroup"); found {
+		t.Error("expected fsGroup to be removed after the OpenShift override")
+	}
+	if v, found, _ := unstructured.NestedBool(dep.Object, "spec", "template", "spec", "securityContext", "runAsNonRoot"); !found || !v {
+		t.Error("expected runAsNonRoot to remain true after the OpenShift override")
+	}
+}
+
 // In production the issuer is publicly trusted and the trusted-CA ConfigMap is
 // absent, so the sidecar must not reference a CA file or mount that would fail
 // to bind.
