@@ -270,6 +270,10 @@ components:
               type: string
               readOnly: true
               description: External route address populated by the control plane
+            console_address:
+              type: string
+              readOnly: true
+              description: Web console address populated by the control plane
             oidc:
               type: string
               readOnly: true
@@ -380,6 +384,8 @@ components:
           items:
             type: string
         route_address:
+          type: string
+        console_address:
           type: string
         oidc:
           type: string

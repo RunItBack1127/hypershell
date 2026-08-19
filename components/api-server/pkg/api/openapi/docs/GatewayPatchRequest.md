@@ -18,6 +18,7 @@ Name | Type | Description | Notes
 **SupervisorImage** | Pointer to **string** |  | [optional] 
 **ServerDnsNames** | Pointer to **[]string** |  | [optional] 
 **RouteAddress** | Pointer to **string** |  | [optional] 
+**ConsoleAddress** | Pointer to **string** |  | [optional] 
 **Oidc** | Pointer to **string** |  | [optional] 
 **Route** | Pointer to **string** |  | [optional] 
 **DatabaseConfig** | Pointer to **string** |  | [optional] 
@@ -391,6 +392,31 @@ SetRouteAddress sets RouteAddress field to given value.
 `func (o *GatewayPatchRequest) HasRouteAddress() bool`
 
 HasRouteAddress returns a boolean if a field has been set.
+
+### GetConsoleAddress
+
+`func (o *GatewayPatchRequest) GetConsoleAddress() string`
+
+GetConsoleAddress returns the ConsoleAddress field if non-nil, zero value otherwise.
+
+### GetConsoleAddressOk
+
+`func (o *GatewayPatchRequest) GetConsoleAddressOk() (*string, bool)`
+
+GetConsoleAddressOk returns a tuple with the ConsoleAddress field if it's non-nil, zero value otherwise
+and a boolean to check if the value has been set.
+
+### SetConsoleAddress
+
+`func (o *GatewayPatchRequest) SetConsoleAddress(v string)`
+
+SetConsoleAddress sets ConsoleAddress field to given value.
+
+### HasConsoleAddress
+
+`func (o *GatewayPatchRequest) HasConsoleAddress() bool`
+
+HasConsoleAddress returns a boolean if a field has been set.
 
 ### GetOidc
 

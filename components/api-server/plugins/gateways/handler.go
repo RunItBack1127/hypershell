@@ -125,6 +125,9 @@ func (h gatewayHandler) Patch(w http.ResponseWriter, r *http.Request) {
 			if patch.RouteAddress != nil {
 				found.RouteAddress = patch.RouteAddress
 			}
+			if patch.ConsoleAddress != nil {
+				found.ConsoleAddress = patch.ConsoleAddress
+			}
 			if patch.Oidc != nil {
 				found.Oidc = patch.Oidc
 			}

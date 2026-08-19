@@ -186,6 +186,9 @@ func (h *gatewayGRPCHandler) UpdateGateway(ctx context.Context, req *pb.UpdateGa
 	if req.RouteAddress != nil {
 		gateway.RouteAddress = req.RouteAddress
 	}
+	if req.ConsoleAddress != nil {
+		gateway.ConsoleAddress = req.ConsoleAddress
+	}
 	if req.Oidc != nil {
 		gateway.Oidc = req.Oidc
 	}
