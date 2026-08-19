@@ -1,11 +1,15 @@
 package gateway
 
 import (
+	"context"
 	"encoding/base64"
 	"strings"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/client-go/kubernetes/fake"
 )
 
 // consoleContainerByName returns the named container map from a console
@@ -139,5 +143,62 @@ func TestGenerateConsoleCookieSecret_DecodesTo32Bytes(t *testing.T) {
 		if n := len(decoded); n != 16 && n != 24 && n != 32 {
 			t.Fatalf("cookie secret decodes to %d bytes, want 16/24/32", n)
 		}
+	}
+}
+
+// A brand-new tenant namespace has no console secret yet, so the first reconcile
+// must CREATE it. Generating the cookie secret clears the local err, so the
+// not-found state must be captured beforehand -- otherwise reconcile wrongly
+// takes the Update path and fails with "secrets ... not found", aborting the
+// whole console reconcile so no console is ever deployed. (The fake clientset
+// does not run the server-side StringData->Data conversion, so assert on the
+// StringData the code writes.)
+func TestReconcileConsoleSecret_CreatesWhenAbsent(t *testing.T) {
+	client := fake.NewSimpleClientset()
+
+	if err := reconcileConsoleSecret(context.Background(), client, "openshell-ns", "client-abc"); err != nil {
+		t.Fatalf("reconcileConsoleSecret on empty namespace: %v", err)
+	}
+
+	got, err := client.CoreV1().Secrets("openshell-ns").Get(context.Background(), consoleSecretName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("expected console secret to be created: %v", err)
+	}
+	if v := got.StringData["client-secret"]; v != "client-abc" {
+		t.Errorf("client-secret = %q, want %q", v, "client-abc")
+	}
+	if got.StringData["cookie-secret"] == "" {
+		t.Error("expected a generated cookie-secret")
+	}
+}
+
+// On a subsequent reconcile the secret already exists and the cookie-secret must
+// be preserved (so live browser sessions survive) while the client-secret is
+// refreshed from Keycloak. Seed the existing secret's Data as a real API server
+// would expose it (StringData is server-converted to Data on write).
+func TestReconcileConsoleSecret_PreservesCookieOnUpdate(t *testing.T) {
+	ctx := context.Background()
+	existing := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: consoleSecretName, Namespace: "openshell-ns"},
+		Type:       corev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			"client-secret": []byte("client-v1"),
+			"cookie-secret": []byte("preserved-cookie-value"),
+		},
+	}
+	client := fake.NewSimpleClientset(existing)
+
+	if err := reconcileConsoleSecret(ctx, client, "openshell-ns", "client-v2"); err != nil {
+		t.Fatalf("reconcile over existing secret: %v", err)
+	}
+	got, err := client.CoreV1().Secrets("openshell-ns").Get(ctx, consoleSecretName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get after update: %v", err)
+	}
+	if v := got.StringData["cookie-secret"]; v != "preserved-cookie-value" {
+		t.Errorf("cookie-secret = %q, want preserved %q", v, "preserved-cookie-value")
+	}
+	if v := got.StringData["client-secret"]; v != "client-v2" {
+		t.Errorf("client-secret = %q, want refreshed %q", v, "client-v2")
 	}
 }

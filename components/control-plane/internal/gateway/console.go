@@ -211,14 +211,18 @@ func generateConsoleCookieSecret() (string, error) {
 // The cookie-secret is generated once and preserved across reconciles so active
 // browser sessions stay valid; the client-secret is refreshed from Keycloak.
 // Neither value is ever written to a log.
-func reconcileConsoleSecret(ctx context.Context, clientset *kubernetes.Clientset, namespace, clientSecret string) error {
+func reconcileConsoleSecret(ctx context.Context, clientset kubernetes.Interface, namespace, clientSecret string) error {
 	existing, err := clientset.CoreV1().Secrets(namespace).Get(ctx, consoleSecretName, metav1.GetOptions{})
 	if err != nil && !k8serrors.IsNotFound(err) {
 		return fmt.Errorf("get console secret: %w", err)
 	}
+	// Capture existence before err is reused below; generating the cookie clears
+	// err on success, which would otherwise mask the NotFound and send a
+	// brand-new namespace down the Update path (secret ... not found).
+	secretExists := err == nil
 
 	cookieSecret := ""
-	if err == nil {
+	if secretExists {
 		if v, ok := existing.Data["cookie-secret"]; ok && len(v) > 0 {
 			cookieSecret = string(v)
 		}
@@ -243,7 +247,7 @@ func reconcileConsoleSecret(ctx context.Context, clientset *kubernetes.Clientset
 		},
 	}
 
-	if k8serrors.IsNotFound(err) {
+	if !secretExists {
 		if _, err := clientset.CoreV1().Secrets(namespace).Create(ctx, secret, metav1.CreateOptions{}); err != nil {
 			return fmt.Errorf("create console secret: %w", err)
 		}
