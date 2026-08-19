@@ -7,7 +7,7 @@ import {
   DropdownList,
   MenuToggle,
 } from "@patternfly/react-core";
-import { EllipsisVIcon } from "@patternfly/react-icons";
+import { EllipsisVIcon, ExternalLinkAltIcon } from "@patternfly/react-icons";
 import { useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 
@@ -76,8 +76,9 @@ export function GatewayRowActions({
         <DropdownList>
           {gateway.consoleUrl ? (
             <DropdownItem
-              isExternalLink
+              icon={<ExternalLinkAltIcon />}
               rel="noreferrer"
+              target="_blank"
               to={gateway.consoleUrl}
             >
               <FormattedMessage {...messages.openGatewayConsole} />

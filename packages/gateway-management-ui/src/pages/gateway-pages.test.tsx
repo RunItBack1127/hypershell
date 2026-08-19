@@ -967,11 +967,16 @@ describe("gateway shell pages", () => {
       }),
     );
 
+    const consoleMenuItem = screen.getByRole("menuitem", {
+      name: "Open gateway console",
+    });
+    expect(consoleMenuItem.getAttribute("href")).toBe(
+      previewGateway.consoleUrl,
+    );
+    expect(consoleMenuItem.getAttribute("target")).toBe("_blank");
     expect(
-      screen
-        .getByRole("menuitem", { name: "Open gateway console" })
-        .getAttribute("href"),
-    ).toBe(previewGateway.consoleUrl);
+      consoleMenuItem.querySelector(".pf-v6-c-menu__item-icon svg"),
+    ).toBeTruthy();
     await user.click(
       screen.getByRole("menuitem", {
         name: "Copy CLI connection command",
