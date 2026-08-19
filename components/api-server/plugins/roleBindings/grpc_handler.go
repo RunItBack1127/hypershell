@@ -58,9 +58,18 @@ func (h *roleBindingGRPCHandler) ListRoleBindings(ctx context.Context, req *pb.L
 
 		roleName := ""
 		if h.roleService != nil {
-			if role, roleErr := h.roleService.Get(ctx, rb.RoleID); roleErr == nil {
-				roleName = role.Name
+			role, roleErr := h.roleService.Get(ctx, rb.RoleID)
+			if roleErr != nil {
+				// The control plane unions role names across a user's surviving
+				// bindings to decide which Keycloak roles to keep when a binding is
+				// deleted. A binding returned with an unresolved (empty) role name
+				// would silently drop out of that union and could cause a role still
+				// granted by another binding to be revoked. Fail the whole list
+				// rather than hand back an incomplete view, so revocation aborts and
+				// retries once the role is resolvable again.
+				return nil, status.Errorf(codes.Internal, "resolve role %s for binding %s: %v", rb.RoleID, rb.ID, roleErr)
 			}
+			roleName = role.Name
 		}
 		username := ""
 		if rb.UserID != nil && h.userService != nil {
