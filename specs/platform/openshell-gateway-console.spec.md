@@ -35,7 +35,7 @@ This spec covers Option 1: one oauth2-proxy for each gateway, real tokens with t
 
 The console client is a second Keycloak client. It is not the CLI client (`{name}-{id}`). Its mappers target the gateway client. The gateway accepts console tokens like CLI tokens. The CLI client stays unchanged.
 
-A console needs a route. A routed gateway has `client_ca_path` removed (see `openshell-gateway-routing.spec.md`). The gateway does not request a client certificate from the console. The console still verifies the gateway server certificate.
+A console needs a route. Browser traffic reaches the console through that route, and a routed gateway has `client_ca_path` removed on its externally-routed data path because the ingress proxy cannot present a client certificate (see `openshell-gateway-routing.spec.md`). The console's dashboard does not use that route to reach the gateway: it dials the in-cluster `openshell-gateway.<ns>.svc.cluster.local:8080` admin API directly over gRPC with mutual TLS, presenting the `openshell-client` certificate and verifying the gateway server certificate against the openshell CA.
 
 ---
 
@@ -161,14 +161,18 @@ Every console resource must carry the standard gateway labels, with `app.kuberne
 - Listen port: `8000`. The dashboard binds all interfaces, so the kubelet can run the probe. The Service does not expose port `8000`. The NetworkPolicies do not allow ingress to port `8000`, so only the in-pod oauth2-proxy reaches the dashboard.
 - Environment (the dashboard BFF reads these; see the upstream contract):
   - `PORT = 8000`
-  - `OPENSHELL_GATEWAY_URL = openshell-gateway.<ns>.svc.cluster.local:8080` (host:port, no scheme)
-  - `GATEWAY_CA_CERT = /etc/openshell-tls/gateway/ca.crt` (its presence enables TLS to the gateway)
+  - `OPENSHELL_GATEWAY_URL = grpcs://openshell-gateway.<ns>.svc.cluster.local:8080` (the `grpcs://` scheme selects the dashboard's TLS gRPC client; without it the client speaks h2c cleartext into the gateway's TLS listener and the connection is reset while reading the server preface)
+  - `GATEWAY_CA_CERT = /etc/openshell-tls/gateway/ca.crt` (verifies the gateway server certificate)
+  - `GATEWAY_CLIENT_CERT = /etc/openshell-tls/gateway-client/tls.crt` (client certificate presented for mutual TLS to the gateway admin API)
+  - `GATEWAY_CLIENT_KEY = /etc/openshell-tls/gateway-client/tls.key` (client private key for mutual TLS)
   - `AUTH_DISABLED = false`
   - `AUTH_TOKEN_HEADER = X-Forwarded-Access-Token`
   - `AUTH_USER_HEADER = X-Forwarded-User`
   - `ADMIN_ROLE = openshell-admin`
   - `LOGOUT_URL = /oauth2/sign_out`
-- Volume mount: the `openshell-server-tls` Secret key `ca.crt` at `/etc/openshell-tls/gateway` (read only), to verify the gateway server certificate.
+- Volume mounts:
+  - the `openshell-server-tls` Secret key `ca.crt` at `/etc/openshell-tls/gateway` (read only), to verify the gateway server certificate.
+  - the `openshell-client-tls` Secret keys `tls.crt` and `tls.key` at `/etc/openshell-tls/gateway-client` (read only), presented as the client certificate for mutual TLS to the gateway admin API.
 
 #### oauth2-proxy sidecar container
 
@@ -369,7 +373,7 @@ The console needs no new Keycloak permission. The `hypershell-keycloak-admin` ac
 ## Prerequisites
 
 1. **Shared Gateway HTTP listener.** The admin must add an HTTP listener to the shared Gateway (HTTPS/Terminate, port 443, wildcard `*.<base-domain>` certificate). The listener must accept HTTPRoutes from gateway namespaces. Its `sectionName` must match `GATEWAY_API_HTTP_LISTENER_NAME`.
-2. **Dashboard image.** The upstream project ([Gkrumbach07/openshell-dashboard](https://github.com/Gkrumbach07/openshell-dashboard)) builds `openshell-dashboard:latest` from source and publishes no registry image today. The platform must build the image and push it to the platform registry, or load it into Kind for local testing, and then pin the digest. The image contract (`OPENSHELL_GATEWAY_URL` as `host:port`, TLS through `GATEWAY_CA_CERT`, and the `X-Forwarded-Access-Token` relay) is an upstream dependency.
+2. **Dashboard image.** The upstream project ([Gkrumbach07/openshell-dashboard](https://github.com/Gkrumbach07/openshell-dashboard)) builds `openshell-dashboard:latest` from source and publishes no registry image today. The platform must build the image and push it to the platform registry, or load it into Kind for local testing, and then pin the digest. The image contract (`OPENSHELL_GATEWAY_URL` as a `grpcs://` URL, mutual TLS through `GATEWAY_CA_CERT` plus `GATEWAY_CLIENT_CERT`/`GATEWAY_CLIENT_KEY`, and the `X-Forwarded-Access-Token` relay) is an upstream dependency.
 3. **Keycloak realm.** The realm prerequisites in `openshell-gateway-keycloak.spec.md` apply. The console adds no realm-level object.
 
 ---
