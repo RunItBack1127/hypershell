@@ -23,6 +23,13 @@ const (
 	consoleSecretName    = "openshell-console-oauth2"
 	consoleDashboardPort = int64(8000)
 	consoleProxyPort     = int64(4180)
+
+	// consoleTrustedCAConfigMap is the per-namespace ConfigMap the control plane
+	// copies from its own namespace (reconcileTrustedCABundle) holding the CA that
+	// signs the OIDC issuer's certificate. The gateway pod trusts it the same way.
+	consoleTrustedCAConfigMap = "gateway-trusted-ca"
+	consoleTrustedCAKey       = "ca-bundle.crt"
+	consoleTrustedCAMountPath = "/etc/openshell-tls/oidc/ca-bundle.crt"
 )
 
 // consoleLabels returns the standard gateway labels for console resources, with
@@ -142,7 +149,16 @@ func reconcileConsole(ctx context.Context, dynamicClient dynamic.Interface, clie
 	consoleImage := images.DefaultConsoleImage()
 	proxyImage := images.DefaultOAuth2ProxyImage()
 
-	deployment := buildConsoleDeployment(namespace, consoleImage, proxyImage, issuer, consoleClientID, redirectURI)
+	// oauth2-proxy performs OIDC discovery against the issuer over HTTPS. When the
+	// issuer is served with a privately-signed certificate (the gateway pod faces
+	// the same problem), the control plane copies the trusting CA into every
+	// tenant namespace as the gateway-trusted-ca ConfigMap. Mount it into the
+	// sidecar so discovery succeeds. In production the issuer presents a
+	// publicly-trusted certificate, the ConfigMap is absent, and the sidecar
+	// falls back to the system trust store -- config, not code, drives this.
+	trustedCA := hasConsoleTrustedCABundle(ctx, clientset, namespace)
+
+	deployment := buildConsoleDeployment(namespace, consoleImage, proxyImage, issuer, consoleClientID, redirectURI, trustedCA)
 	if err := reconcileResource(ctx, dynamicClient, deployment); err != nil {
 		return fmt.Errorf("reconcile console Deployment in %s: %w", namespace, err)
 	}
@@ -177,6 +193,20 @@ func reconcileConsole(ctx context.Context, dynamicClient dynamic.Interface, clie
 	return nil
 }
 
+// generateConsoleCookieSecret returns a fresh oauth2-proxy cookie secret.
+// oauth2-proxy strips padding and URL-base64-decodes the value, then requires
+// 16/24/32 decoded bytes. Standard base64 (with +/ and = padding) fails that
+// decode and is used verbatim as a 44-byte string, which oauth2-proxy rejects
+// for AES. RawURLEncoding of 32 bytes yields a 43-char, padding-free, URL-safe
+// string that decodes back to 32 bytes.
+func generateConsoleCookieSecret() (string, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("generate cookie secret: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(buf), nil
+}
+
 // reconcileConsoleSecret creates or updates the openshell-console-oauth2 Secret.
 // The cookie-secret is generated once and preserved across reconciles so active
 // browser sessions stay valid; the client-secret is refreshed from Keycloak.
@@ -194,11 +224,10 @@ func reconcileConsoleSecret(ctx context.Context, clientset *kubernetes.Clientset
 		}
 	}
 	if cookieSecret == "" {
-		buf := make([]byte, 32)
-		if _, err := rand.Read(buf); err != nil {
-			return fmt.Errorf("generate cookie secret: %w", err)
+		cookieSecret, err = generateConsoleCookieSecret()
+		if err != nil {
+			return err
 		}
-		cookieSecret = base64.StdEncoding.EncodeToString(buf)
 	}
 
 	secret := &corev1.Secret{
@@ -266,11 +295,26 @@ func envFromSecret(name, secretName, key string) map[string]interface{} {
 	}
 }
 
+// hasConsoleTrustedCABundle reports whether the per-namespace trusted-CA
+// ConfigMap (copied by reconcileTrustedCABundle) is present, meaning the OIDC
+// issuer is served with a privately-signed certificate the oauth2-proxy sidecar
+// must be told to trust. Absent in production, where the issuer is publicly
+// trusted and the sidecar uses the system trust store.
+func hasConsoleTrustedCABundle(ctx context.Context, clientset *kubernetes.Clientset, namespace string) bool {
+	if clientset == nil {
+		return false
+	}
+	_, err := clientset.CoreV1().ConfigMaps(namespace).Get(ctx, consoleTrustedCAConfigMap, metav1.GetOptions{})
+	return err == nil
+}
+
 // buildConsoleDeployment builds the two-container console Deployment (dashboard +
 // oauth2-proxy sidecar). The dashboard binds all interfaces on 8000 so the
 // kubelet can probe it, but the Service and NetworkPolicies keep 8000
-// unreachable so only the in-pod oauth2-proxy reaches it.
-func buildConsoleDeployment(namespace, consoleImage, proxyImage, issuer, consoleClientID, redirectURI string) *unstructured.Unstructured {
+// unreachable so only the in-pod oauth2-proxy reaches it. When trustedCA is set,
+// the sidecar mounts the tenant's gateway-trusted-ca bundle and is pointed at it
+// for OIDC discovery so a privately-signed issuer certificate validates.
+func buildConsoleDeployment(namespace, consoleImage, proxyImage, issuer, consoleClientID, redirectURI string, trustedCA bool) *unstructured.Unstructured {
 	selectorLabels := map[string]interface{}{
 		"app.kubernetes.io/name":     "openshell",
 		"app.kubernetes.io/instance": consoleName,
@@ -306,28 +350,44 @@ func buildConsoleDeployment(namespace, consoleImage, proxyImage, issuer, console
 		"resources":       consoleResources(),
 	}
 
+	proxyEnv := []interface{}{
+		envVar("OAUTH2_PROXY_PROVIDER", "oidc"),
+		envVar("OAUTH2_PROXY_OIDC_ISSUER_URL", issuer),
+		envVar("OAUTH2_PROXY_CLIENT_ID", consoleClientID),
+		envFromSecret("OAUTH2_PROXY_CLIENT_SECRET", consoleSecretName, "client-secret"),
+		envFromSecret("OAUTH2_PROXY_COOKIE_SECRET", consoleSecretName, "cookie-secret"),
+		envVar("OAUTH2_PROXY_CODE_CHALLENGE_METHOD", "S256"),
+		envVar("OAUTH2_PROXY_REDIRECT_URL", redirectURI),
+		envVar("OAUTH2_PROXY_UPSTREAMS", fmt.Sprintf("http://127.0.0.1:%d", consoleDashboardPort)),
+		envVar("OAUTH2_PROXY_HTTP_ADDRESS", fmt.Sprintf("0.0.0.0:%d", consoleProxyPort)),
+		envVar("OAUTH2_PROXY_REVERSE_PROXY", "true"),
+		envVar("OAUTH2_PROXY_PASS_ACCESS_TOKEN", "true"),
+		envVar("OAUTH2_PROXY_PASS_USER_HEADERS", "true"),
+		envVar("OAUTH2_PROXY_SKIP_PROVIDER_BUTTON", "true"),
+		envVar("OAUTH2_PROXY_COOKIE_SECURE", "true"),
+		envVar("OAUTH2_PROXY_EMAIL_DOMAINS", "*"),
+		envVar("OAUTH2_PROXY_SCOPE", "openid profile email roles gateway-roles"),
+	}
+	proxyVolumeMounts := []interface{}{
+		map[string]interface{}{"name": "tmp-proxy", "mountPath": "/tmp"},
+	}
+	if trustedCA {
+		// oauth2-proxy appends these CA files to the system trust store for its
+		// OIDC discovery/token requests, so the privately-signed issuer validates.
+		proxyEnv = append(proxyEnv, envVar("OAUTH2_PROXY_PROVIDER_CA_FILES", consoleTrustedCAMountPath))
+		proxyVolumeMounts = append(proxyVolumeMounts, map[string]interface{}{
+			"name":      "oidc-trusted-ca",
+			"mountPath": consoleTrustedCAMountPath,
+			"subPath":   consoleTrustedCAKey,
+			"readOnly":  true,
+		})
+	}
+
 	proxyContainer := map[string]interface{}{
 		"name":            "oauth2-proxy",
 		"image":           proxyImage,
 		"imagePullPolicy": "IfNotPresent",
-		"env": []interface{}{
-			envVar("OAUTH2_PROXY_PROVIDER", "oidc"),
-			envVar("OAUTH2_PROXY_OIDC_ISSUER_URL", issuer),
-			envVar("OAUTH2_PROXY_CLIENT_ID", consoleClientID),
-			envFromSecret("OAUTH2_PROXY_CLIENT_SECRET", consoleSecretName, "client-secret"),
-			envFromSecret("OAUTH2_PROXY_COOKIE_SECRET", consoleSecretName, "cookie-secret"),
-			envVar("OAUTH2_PROXY_CODE_CHALLENGE_METHOD", "S256"),
-			envVar("OAUTH2_PROXY_REDIRECT_URL", redirectURI),
-			envVar("OAUTH2_PROXY_UPSTREAMS", fmt.Sprintf("http://127.0.0.1:%d", consoleDashboardPort)),
-			envVar("OAUTH2_PROXY_HTTP_ADDRESS", fmt.Sprintf("0.0.0.0:%d", consoleProxyPort)),
-			envVar("OAUTH2_PROXY_REVERSE_PROXY", "true"),
-			envVar("OAUTH2_PROXY_PASS_ACCESS_TOKEN", "true"),
-			envVar("OAUTH2_PROXY_PASS_USER_HEADERS", "true"),
-			envVar("OAUTH2_PROXY_SKIP_PROVIDER_BUTTON", "true"),
-			envVar("OAUTH2_PROXY_COOKIE_SECURE", "true"),
-			envVar("OAUTH2_PROXY_EMAIL_DOMAINS", "*"),
-			envVar("OAUTH2_PROXY_SCOPE", "openid profile email roles gateway-roles"),
-		},
+		"env":             proxyEnv,
 		"ports": []interface{}{
 			map[string]interface{}{"containerPort": consoleProxyPort, "name": "http"},
 		},
@@ -341,11 +401,34 @@ func buildConsoleDeployment(namespace, consoleImage, proxyImage, issuer, console
 			"initialDelaySeconds": int64(10),
 			"periodSeconds":       int64(20),
 		},
-		"volumeMounts": []interface{}{
-			map[string]interface{}{"name": "tmp-proxy", "mountPath": "/tmp"},
-		},
+		"volumeMounts":    proxyVolumeMounts,
 		"securityContext": consoleSecurityContext(),
 		"resources":       consoleResources(),
+	}
+
+	volumes := []interface{}{
+		map[string]interface{}{
+			"name": "gateway-ca",
+			"secret": map[string]interface{}{
+				"secretName": "openshell-server-tls",
+				"items": []interface{}{
+					map[string]interface{}{"key": "ca.crt", "path": "ca.crt"},
+				},
+			},
+		},
+		map[string]interface{}{"name": "tmp-dashboard", "emptyDir": map[string]interface{}{}},
+		map[string]interface{}{"name": "tmp-proxy", "emptyDir": map[string]interface{}{}},
+	}
+	if trustedCA {
+		volumes = append(volumes, map[string]interface{}{
+			"name": "oidc-trusted-ca",
+			"configMap": map[string]interface{}{
+				"name": consoleTrustedCAConfigMap,
+				"items": []interface{}{
+					map[string]interface{}{"key": consoleTrustedCAKey, "path": consoleTrustedCAKey},
+				},
+			},
+		})
 	}
 
 	podSpec := map[string]interface{}{
@@ -355,19 +438,7 @@ func buildConsoleDeployment(namespace, consoleImage, proxyImage, issuer, console
 			"seccompProfile": map[string]interface{}{"type": "RuntimeDefault"},
 		},
 		"containers": []interface{}{dashboardContainer, proxyContainer},
-		"volumes": []interface{}{
-			map[string]interface{}{
-				"name": "gateway-ca",
-				"secret": map[string]interface{}{
-					"secretName": "openshell-server-tls",
-					"items": []interface{}{
-						map[string]interface{}{"key": "ca.crt", "path": "ca.crt"},
-					},
-				},
-			},
-			map[string]interface{}{"name": "tmp-dashboard", "emptyDir": map[string]interface{}{}},
-			map[string]interface{}{"name": "tmp-proxy", "emptyDir": map[string]interface{}{}},
-		},
+		"volumes":    volumes,
 	}
 
 	return &unstructured.Unstructured{
