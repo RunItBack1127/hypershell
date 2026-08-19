@@ -103,6 +103,34 @@ func TestBuildConsoleDeployment_TrustedCAWiresOAuth2ProxyCA(t *testing.T) {
 	}
 }
 
+// The dashboard dials the gateway admin API over mutual TLS. It must use the
+// grpcs:// scheme (plaintext h2c into the TLS listener resets on the server
+// preface) and present the openshell-client cert/key, or the gateway rejects the
+// handshake and every dashboard->gateway call fails with 502 Unavailable.
+func TestBuildConsoleDeployment_DashboardUsesGatewayMTLS(t *testing.T) {
+	dep := buildConsoleDeployment("ns", "dash:latest", "proxy:latest",
+		"https://issuer.example/realms/r", "gw-1-console", "https://console.example/oauth2/callback", false)
+
+	dash := consoleContainerByName(t, dep, "dashboard")
+
+	url, ok := envValue(dash, "OPENSHELL_GATEWAY_URL")
+	if !ok || !strings.HasPrefix(url, "grpcs://") {
+		t.Errorf("OPENSHELL_GATEWAY_URL = %q, want a grpcs:// TLS endpoint", url)
+	}
+	if v, _ := envValue(dash, "GATEWAY_CLIENT_CERT"); v != consoleGatewayClientCertPath {
+		t.Errorf("GATEWAY_CLIENT_CERT = %q, want %q", v, consoleGatewayClientCertPath)
+	}
+	if v, _ := envValue(dash, "GATEWAY_CLIENT_KEY"); v != consoleGatewayClientKeyPath {
+		t.Errorf("GATEWAY_CLIENT_KEY = %q, want %q", v, consoleGatewayClientKeyPath)
+	}
+	if !volumeNames(t, dep)["gateway-client"] {
+		t.Error("expected gateway-client volume (openshell-client-tls) on the pod spec")
+	}
+	if !volumeMountNames(dash)["gateway-client"] {
+		t.Error("expected gateway-client volumeMount on the dashboard container")
+	}
+}
+
 // In production the issuer is publicly trusted and the trusted-CA ConfigMap is
 // absent, so the sidecar must not reference a CA file or mount that would fail
 // to bind.

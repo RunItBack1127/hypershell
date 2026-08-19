@@ -30,6 +30,15 @@ const (
 	consoleTrustedCAConfigMap = "gateway-trusted-ca"
 	consoleTrustedCAKey       = "ca-bundle.crt"
 	consoleTrustedCAMountPath = "/etc/openshell-tls/oidc/ca-bundle.crt"
+
+	// The dashboard dials the gateway's admin gRPC API over mutual TLS: it
+	// verifies the gateway with the openshell CA (openshell-server-tls/ca.crt)
+	// and authenticates itself with the openshell-client cert/key
+	// (openshell-client-tls). Both secrets are provisioned per namespace by the
+	// cert-manager reconcile (reconcileCertificates).
+	consoleGatewayCACertPath     = "/etc/openshell-tls/gateway/ca.crt"
+	consoleGatewayClientCertPath = "/etc/openshell-tls/gateway-client/tls.crt"
+	consoleGatewayClientKeyPath  = "/etc/openshell-tls/gateway-client/tls.key"
 )
 
 // consoleLabels returns the standard gateway labels for console resources, with
@@ -330,8 +339,15 @@ func buildConsoleDeployment(namespace, consoleImage, proxyImage, issuer, console
 		"imagePullPolicy": "IfNotPresent",
 		"env": []interface{}{
 			envVar("PORT", fmt.Sprintf("%d", consoleDashboardPort)),
-			envVar("OPENSHELL_GATEWAY_URL", fmt.Sprintf("openshell-gateway.%s.svc.cluster.local:8080", namespace)),
-			envVar("GATEWAY_CA_CERT", "/etc/openshell-tls/gateway/ca.crt"),
+			// The grpcs:// scheme is required for the dashboard's gRPC client to
+			// dial over TLS; without it the client speaks h2c cleartext into the
+			// gateway's TLS listener and the connection is reset while reading the
+			// server preface. The gateway's admin API also requires mutual TLS, so
+			// the dashboard presents the openshell-client cert/key below.
+			envVar("OPENSHELL_GATEWAY_URL", fmt.Sprintf("grpcs://openshell-gateway.%s.svc.cluster.local:8080", namespace)),
+			envVar("GATEWAY_CA_CERT", consoleGatewayCACertPath),
+			envVar("GATEWAY_CLIENT_CERT", consoleGatewayClientCertPath),
+			envVar("GATEWAY_CLIENT_KEY", consoleGatewayClientKeyPath),
 			envVar("AUTH_DISABLED", "false"),
 			envVar("AUTH_TOKEN_HEADER", "X-Forwarded-Access-Token"),
 			envVar("AUTH_USER_HEADER", "X-Forwarded-User"),
@@ -348,6 +364,7 @@ func buildConsoleDeployment(namespace, consoleImage, proxyImage, issuer, console
 		},
 		"volumeMounts": []interface{}{
 			map[string]interface{}{"name": "gateway-ca", "mountPath": "/etc/openshell-tls/gateway", "readOnly": true},
+			map[string]interface{}{"name": "gateway-client", "mountPath": "/etc/openshell-tls/gateway-client", "readOnly": true},
 			map[string]interface{}{"name": "tmp-dashboard", "mountPath": "/tmp"},
 		},
 		"securityContext": consoleSecurityContext(),
@@ -417,6 +434,16 @@ func buildConsoleDeployment(namespace, consoleImage, proxyImage, issuer, console
 				"secretName": "openshell-server-tls",
 				"items": []interface{}{
 					map[string]interface{}{"key": "ca.crt", "path": "ca.crt"},
+				},
+			},
+		},
+		map[string]interface{}{
+			"name": "gateway-client",
+			"secret": map[string]interface{}{
+				"secretName": "openshell-client-tls",
+				"items": []interface{}{
+					map[string]interface{}{"key": "tls.crt", "path": "tls.crt"},
+					map[string]interface{}{"key": "tls.key", "path": "tls.key"},
 				},
 			},
 		},
