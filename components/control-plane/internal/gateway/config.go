@@ -21,11 +21,13 @@ type ImageDefaults interface {
 
 const defaultDatabaseImage = "postgres:18"
 
-// defaultConsoleImage is the OpenShell dashboard image. The upstream project
-// publishes no registry image today, so this tag is expected to be built and
-// loaded into the cluster (see the console spec Prerequisites). Overridable via
-// HYPERSHELL_CONSOLE_IMAGE.
-const defaultConsoleImage = "openshell-dashboard:latest"
+// defaultConsoleImage is the OpenShell dashboard image (the per-gateway
+// console). The upstream project publishes it to quay.io, so clusters pull it
+// directly (imagePullPolicy IfNotPresent) rather than building from source.
+// Pinned by digest to the sha-07f1b13 build for reproducibility; bump
+// deliberately when adopting a new dashboard contract. Overridable via
+// HYPERSHELL_CONSOLE_IMAGE (e.g. a platform-registry mirror in production).
+const defaultConsoleImage = "quay.io/gkrumbach07/openshell-dashboard@sha256:cb5e5b18b4cdf62efb1ce33e2ae73ed646d3cdf438966cae3c328f1c04cce0b4"
 
 // defaultOAuth2ProxyImage is the oauth2-proxy sidecar image. Overridable via
 // HYPERSHELL_OAUTH2_PROXY_IMAGE.

@@ -215,26 +215,10 @@ if [[ "${LOCAL_IMAGES:-}" == "true" ]]; then
   echo ""
 fi
 
-# --- Console (dashboard + oauth2-proxy) images ---
-# The per-gateway console the control plane provisions runs the OpenShell
-# dashboard plus an oauth2-proxy sidecar, both deployed with imagePullPolicy
-# IfNotPresent and no published registry image (see the console spec
-# Prerequisites). Unless both are loaded into the Kind node, every console pod
-# sits in ImagePullBackOff and the gateway's console never becomes servable, so
-# a fresh cluster must build+load them here rather than leaving it a manual step.
-# The build is expensive (upstream git clone + image build), and `kind load`
-# persists the image in the node across kind-up re-runs, so skip it when the
-# dashboard image is already present unless KIND_REBUILD_CONSOLE=true. Set
-# KIND_CONSOLE=false to opt out entirely.
-if [[ "${KIND_CONSOLE:-true}" == "true" ]]; then
-  header "Console Images"
-  if [[ "${KIND_REBUILD_CONSOLE:-}" != "true" ]] && node_has_image openshell-dashboard; then
-    info "Console images already loaded in node; skipping rebuild (set KIND_REBUILD_CONSOLE=true to force)"
-  else
-    "${SCRIPT_DIR}/build-console-image.sh"
-  fi
-  echo ""
-fi
+# The per-gateway console images (the OpenShell dashboard and its oauth2-proxy
+# sidecar) are public registry images -- the dashboard is published to quay.io,
+# pinned by digest in the control plane's ImageDefaults -- so console pods pull
+# them at start (imagePullPolicy IfNotPresent) with no build or pre-load step.
 
 # --- Apply pull secret (if configured) ---
 if [[ -n "${KIND_PULL_SECRET:-}" ]]; then

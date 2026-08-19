@@ -34,16 +34,13 @@ patches:
                   # covered by the same *.gw.localhost cert as the gRPC route.
                   - name: GATEWAY_API_HTTP_LISTENER_NAME
                     value: grpc
-                  # OpenShell dashboard image, built from the upstream project and
-                  # loaded into Kind by scripts/kind/build-console-image.sh (invoked
-                  # from kind-up). IfNotPresent pull policy uses the loaded image
-                  # (there is no registry image).
-                  - name: HYPERSHELL_CONSOLE_IMAGE
-                    value: "openshell-dashboard:latest"
-                  # oauth2-proxy sidecar image, loaded into Kind alongside the
-                  # dashboard so IfNotPresent finds it without a registry pull.
-                  - name: HYPERSHELL_OAUTH2_PROXY_IMAGE
-                    value: "quay.io/oauth2-proxy/oauth2-proxy:v7.7.1"
+                  # The console dashboard and oauth2-proxy sidecar images are
+                  # public registry images; the control plane's ImageDefaults
+                  # already point at them (dashboard pinned by digest on quay),
+                  # so Kind pulls them at pod start (imagePullPolicy IfNotPresent)
+                  # with no overlay override or pre-load needed. Override
+                  # HYPERSHELL_CONSOLE_IMAGE / HYPERSHELL_OAUTH2_PROXY_IMAGE only
+                  # to test a different build.
                   # Kind's Gateway data plane is cloud-provider-kind's Envoy,
                   # which runs as an out-of-cluster Docker container. Its source
                   # IP cannot be matched by the per-tenant gateway
