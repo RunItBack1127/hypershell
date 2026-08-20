@@ -100,11 +100,6 @@ func withRateLimiter[T any](l workqueue.TypedRateLimiter[string]) queueOption[T]
 	}
 }
 
-// withClock overrides the queue's clock (used by tests).
-func withClock[T any](now func() time.Time) queueOption[T] {
-	return func(q *reconcileQueue[T]) { q.now = now }
-}
-
 // withWorkers overrides the worker count (used by tests).
 func withWorkers[T any](n int) queueOption[T] {
 	return func(q *reconcileQueue[T]) { q.workers = n }
