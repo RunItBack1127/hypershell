@@ -110,6 +110,38 @@ func ApplyManifestToNamespace(manifest *unstructured.Unstructured, namespace str
 	return result, nil
 }
 
+// ApplySelfManagedDatabaseOverrides renders the legacy per-gateway PostgreSQL
+// manifest used only when a Gateway has no ManagedDatabase assignment.
+func ApplySelfManagedDatabaseOverrides(obj *unstructured.Unstructured, images ImageDefaults) error {
+	if images == nil {
+		images = StaticImageDefaults{}
+	}
+
+	jsonBytes, err := obj.MarshalJSON()
+	if err != nil {
+		return fmt.Errorf("marshal for self-managed database overrides: %w", err)
+	}
+	manifestJSON := string(jsonBytes)
+
+	dbImage := images.DefaultDatabaseImage()
+	userKey, passKey, dbKey := selfManagedPostgresEnvKeys(dbImage)
+	dataPath := selfManagedPostgresDataPath(dbImage)
+
+	// DB_IMAGE_PLACEHOLDER must be replaced before the generic
+	// IMAGE_PLACEHOLDER substitution because it contains that shorter token.
+	manifestJSON = strings.ReplaceAll(manifestJSON, "DB_IMAGE_PLACEHOLDER", dbImage)
+	manifestJSON = strings.ReplaceAll(manifestJSON, "DB_STORAGE_PLACEHOLDER", "5Gi")
+	manifestJSON = strings.ReplaceAll(manifestJSON, "DB_USER_KEY_PLACEHOLDER", userKey)
+	manifestJSON = strings.ReplaceAll(manifestJSON, "DB_PASS_KEY_PLACEHOLDER", passKey)
+	manifestJSON = strings.ReplaceAll(manifestJSON, "DB_NAME_KEY_PLACEHOLDER", dbKey)
+	manifestJSON = strings.ReplaceAll(manifestJSON, "DB_DATA_PATH_PLACEHOLDER", dataPath)
+
+	if err := obj.UnmarshalJSON([]byte(manifestJSON)); err != nil {
+		return fmt.Errorf("unmarshal after self-managed database overrides: %w", err)
+	}
+	return nil
+}
+
 func ApplyConfigOverrides(obj *unstructured.Unstructured, config GatewayConfig, tenantNamespace ...string) error {
 	kind := obj.GetKind()
 

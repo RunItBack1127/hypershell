@@ -63,3 +63,12 @@ func TestCNPGClusterReadyFromObject(t *testing.T) {
 		t.Fatal("nil object should not be ready")
 	}
 }
+
+func TestUsesSelfManagedDatabaseOnlyWithoutAssignment(t *testing.T) {
+	if !usesSelfManagedDatabase(&pb.Gateway{}) {
+		t.Fatal("gateway without database_id should use the self-managed fallback")
+	}
+	if usesSelfManagedDatabase(&pb.Gateway{DatabaseId: "managed-db"}) {
+		t.Fatal("gateway with database_id must remain on the CNPG path")
+	}
+}

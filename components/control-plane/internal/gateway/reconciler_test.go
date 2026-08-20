@@ -138,6 +138,52 @@ func TestRouteResourcesAbsent(t *testing.T) {
 	})
 }
 
+func TestReconcileSelfManagedDatabaseCredentials(t *testing.T) {
+	const namespace = "openshell-test"
+	const connection = "postgresql://openshell:secret@openshell-gateway-db:5432/openshell?sslmode=disable"
+
+	t.Run("adds uri alias to a legacy secret without changing credentials", func(t *testing.T) {
+		client := k8sfake.NewSimpleClientset(&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "openshell-gateway-db-credentials", Namespace: namespace},
+			Data: map[string][]byte{
+				"url":               []byte(connection),
+				"POSTGRES_PASSWORD": []byte("secret"),
+			},
+		})
+
+		if err := reconcileSelfManagedDatabaseCredentials(context.Background(), client, namespace, "postgres:18"); err != nil {
+			t.Fatalf("reconcile credentials: %v", err)
+		}
+		got, err := client.CoreV1().Secrets(namespace).Get(context.Background(), "openshell-gateway-db-credentials", metav1.GetOptions{})
+		if err != nil {
+			t.Fatalf("get reconciled secret: %v", err)
+		}
+		if string(got.Data["uri"]) != connection || string(got.Data["url"]) != connection {
+			t.Fatalf("connection aliases = uri:%q url:%q", got.Data["uri"], got.Data["url"])
+		}
+		if string(got.Data["POSTGRES_PASSWORD"]) != "secret" {
+			t.Fatal("existing password was changed")
+		}
+	})
+
+	t.Run("creates both connection aliases for a new secret", func(t *testing.T) {
+		client := k8sfake.NewSimpleClientset()
+		if err := reconcileSelfManagedDatabaseCredentials(context.Background(), client, namespace, "postgres:18"); err != nil {
+			t.Fatalf("reconcile credentials: %v", err)
+		}
+		got, err := client.CoreV1().Secrets(namespace).Get(context.Background(), "openshell-gateway-db-credentials", metav1.GetOptions{})
+		if err != nil {
+			t.Fatalf("get created secret: %v", err)
+		}
+		if got.StringData["uri"] == "" || got.StringData["url"] == "" {
+			t.Fatalf("created secret aliases = uri:%q url:%q", got.StringData["uri"], got.StringData["url"])
+		}
+		if got.StringData["uri"] != got.StringData["url"] {
+			t.Fatal("created uri and url aliases differ")
+		}
+	})
+}
+
 // fakeConsoleClientChecker is a stub ConsoleClientChecker for driving the
 // Keycloak console-client probe in RouteResourcesAbsent.
 type fakeConsoleClientChecker struct {

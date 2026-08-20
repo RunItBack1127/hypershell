@@ -500,9 +500,14 @@ func (r *GatewayReconciler) Handle(ctx context.Context, event watcher.Event[*pb.
 			return nil
 		}
 
-		deleteCNPGConfig, cnpgErr := r.resolveCNPGConfig(ctx, gw)
-		if cnpgErr != nil {
-			log.Printf("WARN gateway %s deleted but could not resolve CNPG config: %v; CNPG resources may require manual cleanup", event.ResourceID, cnpgErr)
+		useSelfManagedDatabase := usesSelfManagedDatabase(gw)
+		var deleteCNPGConfig gateway.CNPGConfig
+		if !useSelfManagedDatabase {
+			var cnpgErr error
+			deleteCNPGConfig, cnpgErr = r.resolveCNPGConfig(ctx, gw)
+			if cnpgErr != nil {
+				log.Printf("WARN gateway %s deleted but could not resolve CNPG config: %v; CNPG resources may require manual cleanup", event.ResourceID, cnpgErr)
+			}
 		}
 		log.Printf("INFO gateway %s deleted, cleaning up resources in namespace %s", event.ResourceID, namespace)
 		opts := gateway.ReconcileOpts{
@@ -512,6 +517,7 @@ func (r *GatewayReconciler) Handle(ctx context.Context, event watcher.Event[*pb.
 			SkipNetworkPolicies:   r.skipNetworkPolicies,
 			HasCNPG:               r.hasCNPG,
 			CNPG:                  deleteCNPGConfig,
+			SelfManagedDB:         useSelfManagedDatabase,
 			ControlPlaneNamespace: r.controlPlaneNamespace,
 			KeycloakClient:        r.keycloakClient,
 			GatewayID:             event.ResourceID,
@@ -568,9 +574,14 @@ func (r *GatewayReconciler) Handle(ctx context.Context, event watcher.Event[*pb.
 		return nil
 	}
 
-	cnpgConfig, resolveErr := r.resolveCNPGConfig(ctx, gw)
-	if resolveErr != nil {
-		return fmt.Errorf("resolve CNPG config for gateway %s: %w", gw.Name, resolveErr)
+	useSelfManagedDatabase := usesSelfManagedDatabase(gw)
+	var cnpgConfig gateway.CNPGConfig
+	if !useSelfManagedDatabase {
+		var resolveErr error
+		cnpgConfig, resolveErr = r.resolveCNPGConfig(ctx, gw)
+		if resolveErr != nil {
+			return fmt.Errorf("resolve CNPG config for gateway %s: %w", gw.Name, resolveErr)
+		}
 	}
 
 	namespace, err := gatewayNamespace(gw)
@@ -644,6 +655,7 @@ func (r *GatewayReconciler) Handle(ctx context.Context, event watcher.Event[*pb.
 		SkipNetworkPolicies:   r.skipNetworkPolicies,
 		HasCNPG:               r.hasCNPG,
 		CNPG:                  cnpgConfig,
+		SelfManagedDB:         useSelfManagedDatabase,
 		ControlPlaneNamespace: r.controlPlaneNamespace,
 		GatewayID:             event.ResourceID,
 		UpdateRouteAddress:    r.makeRouteAddressUpdater(event.ResourceID),
@@ -1064,6 +1076,10 @@ func (r *GatewayReconciler) resolveCNPGConfig(ctx context.Context, gw *pb.Gatewa
 		ClusterName:      "openshell-db",
 		ClusterNamespace: db.Namespace,
 	}, nil
+}
+
+func usesSelfManagedDatabase(gw *pb.Gateway) bool {
+	return gw.GetDatabaseId() == ""
 }
 
 func (r *GatewayReconciler) makeOIDCUpdater(gatewayID string) func(ctx context.Context, oidcJSON string) error {

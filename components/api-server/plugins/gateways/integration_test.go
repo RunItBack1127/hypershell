@@ -101,7 +101,7 @@ func TestGatewayPostAllowsEmptyReconcilerOwnedIDs(t *testing.T) {
 	Expect(gatewayOutput.Namespace).To(MatchRegexp(`^openshell-[0-9a-f]{16}$`))
 }
 
-func TestGatewayPostRejectsEmptyDatabaseId(t *testing.T) {
+func TestGatewayPostAllowsEmptyDatabaseId(t *testing.T) {
 	h, client := test.RegisterIntegration(t)
 
 	account := h.NewRandAccount()
@@ -114,9 +114,10 @@ func TestGatewayPostRejectsEmptyDatabaseId(t *testing.T) {
 		DatabaseId: "",
 	}
 
-	_, resp, err := client.DefaultAPI.CreateGateway(ctx).GatewayCreateRequest(gatewayInput).Execute()
-	Expect(err).To(HaveOccurred())
-	Expect(resp.StatusCode).To(Equal(http.StatusBadRequest))
+	gatewayOutput, resp, err := client.DefaultAPI.CreateGateway(ctx).GatewayCreateRequest(gatewayInput).Execute()
+	Expect(err).NotTo(HaveOccurred())
+	Expect(resp.StatusCode).To(Equal(http.StatusCreated))
+	Expect(gatewayOutput.DatabaseId).To(BeEmpty())
 }
 
 func TestGatewayPostWithoutRouteRemainsUnrouted(t *testing.T) {

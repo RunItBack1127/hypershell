@@ -118,29 +118,24 @@ func (s *sqlGatewayService) Create(ctx context.Context, gateway *Gateway) (*Gate
 		gateway.FleetId = fleetID
 	}
 
-	if gateway.DatabaseId == "" {
-		if s.dbFinder == nil {
-			return nil, errors.Validation("database_id is required")
-		}
+	if gateway.DatabaseId == "" && s.dbFinder != nil {
 		if gateway.FleetId != "" {
 			dbID, findErr := s.dbFinder.FindSoleInFleet(ctx, gateway.FleetId)
 			if findErr != nil {
 				return nil, errors.GeneralError("resolve fleet database: %s", findErr)
 			}
-			if dbID == "" {
-				return nil, errors.Validation("database_id is required: fleet %s has zero or multiple ManagedDatabases", gateway.FleetId)
+			if dbID != "" {
+				gateway.DatabaseId = dbID
 			}
-			gateway.DatabaseId = dbID
 		} else {
 			dbID, fleetID, findErr := s.dbFinder.FindSole(ctx)
 			if findErr != nil {
 				return nil, errors.GeneralError("resolve database: %s", findErr)
 			}
-			if dbID == "" {
-				return nil, errors.Validation("database_id is required: zero or multiple ManagedDatabases exist")
+			if dbID != "" {
+				gateway.DatabaseId = dbID
+				gateway.FleetId = fleetID
 			}
-			gateway.DatabaseId = dbID
-			gateway.FleetId = fleetID
 		}
 	}
 

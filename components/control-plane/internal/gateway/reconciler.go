@@ -84,17 +84,27 @@ func ReconcileGateway(
 		}
 	}
 
-	if !opts.HasCNPG {
-		return fmt.Errorf("CNPG operator is required but not available on the cluster: gateway deployment blocked for namespace %s", nsConfig.Name)
-	}
+	if opts.SelfManagedDB {
+		dbImage := images.DefaultDatabaseImage()
+		if err := reconcileSelfManagedDatabaseCredentials(ctx, clientset, nsConfig.Name, dbImage); err != nil {
+			return fmt.Errorf("reconcile self-managed database credentials in %s: %w", nsConfig.Name, err)
+		}
+		if opts.RotateDBCredentials != "" {
+			return fmt.Errorf("credential rotation is not supported for self-managed database fallback in namespace %s", nsConfig.Name)
+		}
+	} else {
+		if !opts.HasCNPG {
+			return fmt.Errorf("CNPG operator is required but not available on the cluster: gateway deployment blocked for namespace %s", nsConfig.Name)
+		}
 
-	if err := reconcileCNPGDatabaseResources(ctx, dynamicClient, clientset, nsConfig.Name, opts.GatewayID, opts.CNPG); err != nil {
-		return fmt.Errorf("reconcile CNPG database resources in %s: %w", nsConfig.Name, err)
-	}
+		if err := reconcileCNPGDatabaseResources(ctx, dynamicClient, clientset, nsConfig.Name, opts.GatewayID, opts.CNPG); err != nil {
+			return fmt.Errorf("reconcile CNPG database resources in %s: %w", nsConfig.Name, err)
+		}
 
-	if opts.RotateDBCredentials != "" {
-		if err := rotateCNPGDatabaseCredentials(ctx, clientset, nsConfig.Name, opts.GatewayID, opts.CNPG, opts.RotateDBCredentials); err != nil {
-			return fmt.Errorf("rotate database credentials in %s: %w", nsConfig.Name, err)
+		if opts.RotateDBCredentials != "" {
+			if err := rotateCNPGDatabaseCredentials(ctx, clientset, nsConfig.Name, opts.GatewayID, opts.CNPG, opts.RotateDBCredentials); err != nil {
+				return fmt.Errorf("rotate database credentials in %s: %w", nsConfig.Name, err)
+			}
 		}
 	}
 
@@ -226,7 +236,7 @@ func DeleteGatewayResources(
 		}
 	}
 
-	if opts.HasCNPG && opts.GatewayID != "" {
+	if !opts.SelfManagedDB && opts.HasCNPG && opts.GatewayID != "" {
 		if opts.CNPG.ClusterNamespace == "" {
 			log.Printf("WARN gateway %s: CNPG cluster namespace unknown; Database, DatabaseRole, and password Secret were not deleted and may require manual cleanup", opts.GatewayID)
 		} else {
@@ -674,10 +684,14 @@ func deployGateway(
 		"serviceaccount.yaml",
 		"configmap.yaml",
 		"certgen-job.yaml",
-		"service.yaml",
-		"deployment.yaml",
-		"networkpolicy.yaml",
 	}
+	if opts.SelfManagedDB {
+		if _, ok := manifests["database.yaml"]; !ok {
+			return fmt.Errorf("self-managed database manifest file database.yaml not found")
+		}
+		order = append(order, "database.yaml")
+	}
+	order = append(order, "service.yaml", "deployment.yaml", "networkpolicy.yaml")
 
 	for _, filename := range order {
 		resources, ok := manifests[filename]
@@ -692,7 +706,14 @@ func deployGateway(
 				continue
 			}
 
-			obj, err := ApplyManifestToNamespace(manifest.DeepCopy(), nsConfig.Name, nsConfig.Gateway, images)
+			raw := manifest.DeepCopy()
+			if filename == "database.yaml" {
+				if err := ApplySelfManagedDatabaseOverrides(raw, images); err != nil {
+					return fmt.Errorf("apply self-managed database overrides for %s: %w", filename, err)
+				}
+			}
+
+			obj, err := ApplyManifestToNamespace(raw, nsConfig.Name, nsConfig.Gateway, images)
 			if err != nil {
 				return fmt.Errorf("apply substitutions for %s: %w", filename, err)
 			}
@@ -718,6 +739,12 @@ func deployGateway(
 			}
 
 			log.Printf("DEBUG reconciled %s %s in %s", obj.GetKind(), obj.GetName(), nsConfig.Name)
+		}
+
+		if filename == "database.yaml" {
+			if err := waitForDeploymentReady(ctx, clientset, nsConfig.Name, "openshell-gateway-db", 2*time.Minute); err != nil {
+				return fmt.Errorf("wait for self-managed database in %s: %w", nsConfig.Name, err)
+			}
 		}
 	}
 
@@ -831,6 +858,34 @@ func WaitForGatewayReady(ctx context.Context, clientset *kubernetes.Clientset, n
 			}
 			if reason != "" {
 				lastReason = reason
+			}
+		}
+	}
+}
+
+func waitForDeploymentReady(ctx context.Context, clientset *kubernetes.Clientset, namespace, name string, timeout time.Duration) error {
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			return fmt.Errorf("timed out waiting for deployment %s/%s to become ready", namespace, name)
+		case <-ticker.C:
+			deploy, err := clientset.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
+			if err != nil {
+				if !k8serrors.IsNotFound(err) {
+					log.Printf("WARN error checking deployment %s/%s readiness: %v", namespace, name, err)
+				}
+				continue
+			}
+			if deploy.Spec.Replicas != nil && deploy.Status.ReadyReplicas >= *deploy.Spec.Replicas {
+				log.Printf("INFO deployment %s/%s is ready", namespace, name)
+				return nil
 			}
 		}
 	}
@@ -1497,6 +1552,100 @@ func reconcileKeycloakClient(ctx context.Context, opts ReconcileOpts, nsConfig *
 	}
 
 	return nil
+}
+
+func reconcileSelfManagedDatabaseCredentials(ctx context.Context, clientset kubernetes.Interface, namespace, dbImage string) error {
+	const secretName = "openshell-gateway-db-credentials"
+	existing, err := clientset.CoreV1().Secrets(namespace).Get(ctx, secretName, metav1.GetOptions{})
+	if err == nil {
+		if existing.Data == nil {
+			return fmt.Errorf("existing database credentials secret has no data")
+		}
+
+		changed := false
+		if len(existing.Data["uri"]) == 0 && len(existing.Data["url"]) > 0 {
+			existing.Data["uri"] = append([]byte(nil), existing.Data["url"]...)
+			changed = true
+		}
+		if len(existing.Data["url"]) == 0 && len(existing.Data["uri"]) > 0 {
+			existing.Data["url"] = append([]byte(nil), existing.Data["uri"]...)
+			changed = true
+		}
+		if len(existing.Data["uri"]) == 0 {
+			return fmt.Errorf("existing database credentials secret has neither uri nor url")
+		}
+		if changed {
+			if _, err := clientset.CoreV1().Secrets(namespace).Update(ctx, existing, metav1.UpdateOptions{}); err != nil {
+				return fmt.Errorf("add database connection string alias to credentials secret: %w", err)
+			}
+			log.Printf("INFO added database connection string alias to credentials secret %s in %s", secretName, namespace)
+		} else {
+			log.Printf("DEBUG database credentials secret %s already exists in %s, skipping", secretName, namespace)
+		}
+		return nil
+	}
+	if !k8serrors.IsNotFound(err) {
+		return fmt.Errorf("get database credentials secret: %w", err)
+	}
+
+	passwordBytes := make([]byte, 32)
+	if _, err := rand.Read(passwordBytes); err != nil {
+		return fmt.Errorf("generate database password: %w", err)
+	}
+	password := hex.EncodeToString(passwordBytes)
+
+	const dbUser = "openshell"
+	const dbName = "openshell"
+	const dbHost = "openshell-gateway-db"
+	dbURI := fmt.Sprintf("postgresql://%s:%s@%s:5432/%s?sslmode=disable",
+		dbUser, url.QueryEscape(password), dbHost, dbName)
+	userKey, passKey, dbKey := selfManagedPostgresEnvKeys(dbImage)
+
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      secretName,
+			Namespace: namespace,
+			Labels: map[string]string{
+				"app.kubernetes.io/name":       "openshell",
+				"app.kubernetes.io/component":  "database",
+				"app.kubernetes.io/managed-by": "hypershell-control-plane",
+				"hypershell.redhat.io/managed": "true",
+			},
+		},
+		Type: corev1.SecretTypeOpaque,
+		StringData: map[string]string{
+			userKey: dbUser,
+			passKey: password,
+			dbKey:   dbName,
+			"uri":   dbURI,
+			"url":   dbURI,
+		},
+	}
+
+	if _, err := clientset.CoreV1().Secrets(namespace).Create(ctx, secret, metav1.CreateOptions{}); err != nil {
+		return fmt.Errorf("create database credentials secret: %w", err)
+	}
+
+	log.Printf("INFO created self-managed database credentials secret %s in %s", secretName, namespace)
+	return nil
+}
+
+func isSelfManagedRHELPostgres(image string) bool {
+	return strings.Contains(image, "rhel") && strings.Contains(image, "postgresql-")
+}
+
+func selfManagedPostgresEnvKeys(image string) (userKey, passKey, dbKey string) {
+	if isSelfManagedRHELPostgres(image) {
+		return "POSTGRESQL_USER", "POSTGRESQL_PASSWORD", "POSTGRESQL_DATABASE"
+	}
+	return "POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB"
+}
+
+func selfManagedPostgresDataPath(image string) string {
+	if isSelfManagedRHELPostgres(image) {
+		return "/var/lib/pgsql/data"
+	}
+	return "/var/lib/postgresql/data"
 }
 
 func rotateCNPGDatabaseCredentials(

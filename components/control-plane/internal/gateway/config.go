@@ -179,6 +179,10 @@ type ReconcileOpts struct {
 	CNPG                  CNPGConfig
 	ControlPlaneNamespace string
 	Images                ImageDefaults
+	// SelfManagedDB provisions the legacy per-gateway PostgreSQL Deployment. It
+	// is used only for gateways without a database_id; assigned gateways continue
+	// through the CNPG path.
+	SelfManagedDB bool
 	// SkipNetworkPolicies disables creation of the per-tenant gateway
 	// NetworkPolicies. On distributions where the shared Gateway data plane
 	// runs out-of-cluster (e.g. cloud-provider-kind's Envoy container in local

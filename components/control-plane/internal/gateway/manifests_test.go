@@ -7,6 +7,63 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
+func TestSelfManagedDatabaseManifestRenders(t *testing.T) {
+	t.Setenv("HYPERSHELL_DATABASE_IMAGE", "postgres:18")
+
+	manifests, err := LoadGatewayManifests("../../manifests/gateway")
+	if err != nil {
+		t.Fatalf("load gateway manifests: %v", err)
+	}
+	resources, ok := manifests["database.yaml"]
+	if !ok {
+		t.Fatal("database.yaml was not loaded")
+	}
+	if len(resources) != 4 {
+		t.Fatalf("database.yaml resources = %d, want 4", len(resources))
+	}
+
+	seen := make(map[string]bool)
+	for _, manifest := range resources {
+		raw := manifest.DeepCopy()
+		if err := ApplySelfManagedDatabaseOverrides(raw, StaticImageDefaults{}); err != nil {
+			t.Fatalf("apply database overrides to %s: %v", raw.GetKind(), err)
+		}
+		obj, err := ApplyManifestToNamespace(raw, "openshell-test", GatewayConfig{}, StaticImageDefaults{})
+		if err != nil {
+			t.Fatalf("render %s: %v", raw.GetKind(), err)
+		}
+		data, err := obj.MarshalJSON()
+		if err != nil {
+			t.Fatalf("marshal rendered %s: %v", obj.GetKind(), err)
+		}
+		rendered := string(data)
+		if strings.Contains(rendered, "PLACEHOLDER") {
+			t.Errorf("rendered %s still contains a placeholder: %s", obj.GetKind(), rendered)
+		}
+		if obj.GetNamespace() != "openshell-test" {
+			t.Errorf("rendered %s namespace = %q, want openshell-test", obj.GetKind(), obj.GetNamespace())
+		}
+		seen[obj.GetKind()] = true
+
+		if obj.GetKind() == "Deployment" {
+			for _, want := range []string{`"image":"postgres:18"`, `"name":"POSTGRES_USER"`, `"name":"POSTGRES_PASSWORD"`, `"name":"POSTGRES_DB"`} {
+				if !strings.Contains(rendered, want) {
+					t.Errorf("rendered database Deployment missing %s", want)
+				}
+			}
+		}
+		if obj.GetKind() == "PersistentVolumeClaim" && !strings.Contains(rendered, `"storage":"5Gi"`) {
+			t.Error("rendered database PVC does not request 5Gi")
+		}
+	}
+
+	for _, kind := range []string{"PersistentVolumeClaim", "Deployment", "Service", "NetworkPolicy"} {
+		if !seen[kind] {
+			t.Errorf("database.yaml missing %s", kind)
+		}
+	}
+}
+
 func TestApplyCredentialDriverToml_KubernetesSecrets(t *testing.T) {
 	lines := []string{
 		"[openshell.gateway]",
