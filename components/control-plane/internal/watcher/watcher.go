@@ -9,6 +9,8 @@ import (
 
 	pb "github.com/openshift-online/hypershell/components/api-server/pkg/api/grpc/hypershell/v1"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -156,12 +158,38 @@ func WatchGateways(ctx context.Context, conn *grpc.ClientConn, handler Handler[*
 	// The queue serializes work per gateway, coalesces to the latest observed state,
 	// and retries failures indefinitely with capped backoff -- all on the watcher
 	// lifetime context so recovery survives a stream reconnect.
-	rq := newReconcileQueue(ctx, "Gateway", handler, withRetryTransform(clearGatewayPhaseForRetry))
+	rq := newReconcileQueue(ctx, "Gateway", handler,
+		withRetryTransform(clearGatewayPhaseForRetry),
+		withVersion(gatewayEventVersion))
 	defer rq.stop()
 	return watchLoop(ctx, "Gateway", func(ctx context.Context) error {
 		stream, err := client.WatchGateways(ctx, &pb.WatchGatewaysRequest{})
 		if err != nil {
 			return fmt.Errorf("starting gateway watch: %w", err)
+		}
+		// Wait for the stream header before seeding. Opening the stream is not a
+		// subscription handshake: client.WatchGateways can return before the server
+		// registers its broker subscription, so a seed issued immediately could
+		// list state, then miss an event that fires before the subscription goes
+		// live. The server flushes the header only after it has subscribed (see the
+		// WatchGateways handler), so blocking on Header() closes that list-watch gap
+		// -- every event after this point is captured by the watch, and the seed's
+		// list captures everything before it. A one-shot seed per connect is then
+		// sufficient; no periodic forced resync is needed (which would re-provision
+		// gateways the health reconciler legitimately owns in an active phase).
+		if _, err := stream.Header(); err != nil {
+			return fmt.Errorf("awaiting gateway watch subscription header: %w", err)
+		}
+		// Seed the queue from the current inventory before processing live events.
+		// The watch stream sends only future events and never replays existing
+		// state on (re)connect, so this LIST is the only path that recovers a
+		// gateway whose reconcile never completed -- e.g. one persisted at
+		// Provisioning when the controller died before creating its workload or
+		// recording a terminal phase. Returning on failure lets watchLoop back off
+		// and retry the seed, rather than watch live traffic while recoverable
+		// gateways stay stranded.
+		if err := seedGateways(ctx, client, rq); err != nil {
+			return err
 		}
 		for {
 			event, err := stream.Recv()
@@ -199,6 +227,153 @@ func clearGatewayPhaseForRetry(ev Event[*pb.Gateway]) Event[*pb.Gateway] {
 	clone.Phase = nil
 	ev.Resource = clone
 	return ev
+}
+
+// gatewayEventVersion returns a monotonically increasing version for a gateway
+// event, taken from the resource's updated_at (the API server bumps it on every
+// write and stamps it into both list and watch payloads). The reconcile queue
+// uses it to coalesce to the newest observed state, so a stale seed/resync
+// snapshot cannot clobber a newer live event. A missing resource or timestamp
+// yields 0, degrading to plain last-writer-wins for that event.
+func gatewayEventVersion(ev Event[*pb.Gateway]) int64 {
+	return ev.Resource.GetMetadata().GetUpdatedAt().AsTime().UnixNano()
+}
+
+// gatewaySeedPageSize is the page size used when listing existing gateways to
+// seed the reconcile queue. It matches the reconcilers' list page size so a
+// typical fleet is covered in a single request.
+const gatewaySeedPageSize = 500
+
+// gatewaySeedSink is the subset of the reconcile queue that seedGateways drives:
+// enqueue a gateway for reconciliation, snapshot the keys the queue still tracks,
+// and prune a key whose resource no longer exists.
+type gatewaySeedSink interface {
+	enqueue(Event[*pb.Gateway])
+	knownKeys() map[string]Event[*pb.Gateway]
+	prune(id string)
+}
+
+// seedGateways lists the current gateway inventory and enqueues every gateway so
+// a controller (re)start re-drives reconciles the watch stream will never replay.
+// It is the LIST half of the standard controller LIST-then-WATCH pattern: without
+// it, a gateway stranded mid-reconcile by a restart is only ever re-enqueued if
+// its spec later changes.
+//
+// Gateways in a phase the reconciler's phase gate suppresses (Provisioning,
+// Degraded) are seeded with the phase cleared -- the "forced retry for active
+// phases" recovery needs -- so the reconcile actually runs instead of being
+// skipped by the gate. Running gateways are seeded verbatim: their provisioning
+// completed, so they hit the gate and no-op, avoiding a needless re-provision
+// flap on every reconnect. Gateways with no phase (a create whose event was
+// missed while the controller was down) or a terminal Failed phase already pass
+// the gate, so they reconcile normally without forcing.
+//
+// The list is also authoritative for absence, but only after confirmation. A
+// gateway the queue is still retrying but that the list omits may have been
+// deleted while the stream was disconnected (its delete event was never
+// replayed) -- or it may simply have been skipped by the paginated list, which
+// is not a consistent snapshot: a concurrent create or delete shifts offsets, so
+// a still-live gateway can slide across a page boundary and be missing from the
+// union of pages. Pruning on list-absence alone would cancel that live gateway's
+// only retry. So each omitted, still-tracked gateway is confirmed with a point
+// GetGateway, and pruned only on a NotFound; any other outcome (it still exists,
+// or the confirmation itself failed) leaves the retry in place. Cleanup of any
+// orphaned namespace is left to the NamespaceGCReconciler, which rechecks
+// liveness before it deletes -- safer than synthesizing a delete here. Absence is
+// only trusted after a fully successful list: any page error aborts before
+// pruning.
+func seedGateways(ctx context.Context, client pb.GatewayServiceClient, sink gatewaySeedSink) error {
+	listed := make(map[string]struct{})
+	var seeded, forced int
+	for page := int32(1); ; page++ {
+		resp, err := client.ListGateways(ctx, &pb.ListGatewaysRequest{Page: page, Size: gatewaySeedPageSize})
+		if err != nil {
+			return fmt.Errorf("listing gateways to seed reconcile queue: %w", err)
+		}
+		items := resp.GetItems()
+		for _, gw := range items {
+			listed[gw.GetMetadata().GetId()] = struct{}{}
+			if enqueueSeed(sink, gw) {
+				forced++
+			}
+			seeded++
+		}
+		// Stop on the authoritative Total, or a short/empty page (defensive, so a
+		// misreported Total cannot spin forever) -- mirrors listAllGateways.
+		total := int(resp.GetMetadata().GetTotal())
+		if len(items) == 0 || len(items) < gatewaySeedPageSize || (total > 0 && seeded >= total) {
+			break
+		}
+	}
+
+	// Prune tracked keys the authoritative list omits -- but confirm each first,
+	// because offset pagination can omit a still-live gateway (see the doc comment).
+	// A pending delete is left alone so its teardown still runs.
+	var pruned int
+	for id, ev := range sink.knownKeys() {
+		if _, present := listed[id]; present || ev.Type == EventDeleted {
+			continue
+		}
+		// The list omitted this tracked gateway; confirm it is truly gone with a
+		// point read before dropping its retry.
+		resp, err := client.GetGateway(ctx, &pb.GetGatewayRequest{Id: id})
+		if err != nil {
+			if status.Code(err) != codes.NotFound {
+				// Confirmation failed for another reason (transient RPC error, etc.):
+				// absence is unproven, so keep the retry; a later seed reconfirms.
+				log.Printf("WARN could not confirm gateway %s absence during seed; keeping its retry: %v", id, err)
+				continue
+			}
+			// NotFound: the gateway really is gone. Prune its stale retry.
+			sink.prune(id)
+			pruned++
+			continue
+		}
+		// The gateway still exists; the paginated list just missed it. Re-seed it
+		// with the payload GetGateway returned rather than leaving the tracked
+		// entry untouched: its spec may have changed while the stream was
+		// disconnected, and because the list missed it there is no buffered watch
+		// event to correct a stale payload. Enqueuing the current state keeps the
+		// reconcile driving the right desired state (and version-aware coalescing
+		// discards it as a no-op if the tracked payload is already newer).
+		enqueueSeed(sink, resp.GetGateway())
+	}
+
+	log.Printf("INFO seeded %d gateway(s) into reconcile queue on watch (re)connect (%d forced past the phase gate for recovery, %d absent retries pruned)", seeded, forced, pruned)
+	return nil
+}
+
+// enqueueSeed enqueues one gateway as a seed event and reports whether it was
+// forced past the phase gate. A gateway in a gate-suppressed active phase
+// (Provisioning, Degraded) has its phase cleared -- the seed of such a gateway is
+// exactly a forced retry of a reconcile a restart lost -- so the reconcile runs
+// instead of being skipped by the gate. Every other phase is seeded verbatim.
+func enqueueSeed(sink gatewaySeedSink, gw *pb.Gateway) (forced bool) {
+	ev := Event[*pb.Gateway]{
+		Type:       EventUpdated,
+		ResourceID: gw.GetMetadata().GetId(),
+		Resource:   gw,
+	}
+	if forceSeedRecovery(gw) {
+		ev = clearGatewayPhaseForRetry(ev)
+		forced = true
+	}
+	sink.enqueue(ev)
+	return forced
+}
+
+// forceSeedRecovery reports whether a seeded gateway must bypass the phase gate
+// to recover. Provisioning and Degraded denote reconciliation that never reached
+// a healthy steady state, so a restart must re-drive them; the gate would
+// otherwise skip these phases. Running is deliberately excluded so healthy
+// gateways are not re-provisioned on every reconnect.
+func forceSeedRecovery(gw *pb.Gateway) bool {
+	switch gw.GetPhase() {
+	case "Provisioning", "Degraded":
+		return true
+	default:
+		return false
+	}
 }
 
 func WatchGatewayNetworks(ctx context.Context, conn *grpc.ClientConn, handler Handler[*pb.GatewayNetwork]) error {
@@ -265,7 +440,16 @@ func watchLoop(ctx context.Context, kind string, connectAndRecv func(ctx context
 		}
 
 		log.Printf("INFO connecting %s watch stream...", kind)
-		err := connectAndRecv(ctx)
+		// Scope each attempt to its own cancelable context so the RPC -- and its
+		// server-side broker subscription -- is torn down before we reconnect.
+		// connectAndRecv can return while the stream is still healthy (e.g. a
+		// post-header seed LIST failed), so relying on the stream erroring to end
+		// the RPC would leak one subscription per reconnect. Any reconcile queue is
+		// created on the parent ctx, not this per-attempt one, so pending retries
+		// survive the reconnect.
+		attemptCtx, cancel := context.WithCancel(ctx)
+		err := connectAndRecv(attemptCtx)
+		cancel()
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}

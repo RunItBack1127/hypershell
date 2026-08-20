@@ -165,6 +165,96 @@ func TestReconcileQueue_PreservesBackoffAgainstDirtyReadds(t *testing.T) {
 	}
 }
 
+// Version-aware coalescing must keep the newest observed payload regardless of
+// enqueue order: a stale seed/resync snapshot (lower version) must not clobber a
+// newer live event, and a buffered out-of-order live event must not clobber a
+// newer seed. This is what lets a one-shot seed coexist with live traffic.
+func TestReconcileQueue_VersionCoalescingKeepsNewest(t *testing.T) {
+	h := &recordingHandler{
+		enter:   make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	version := func(ev Event[string]) int64 {
+		v := map[string]int64{"old": 1, "new": 2}
+		return v[ev.Resource]
+	}
+	q := newReconcileQueue(context.Background(), "Test", h,
+		withRateLimiter[string](fastLimiter()), withWorkers[string](1),
+		withVersion(version))
+	defer q.stop()
+
+	// Hold a first reconcile in-flight so later enqueues coalesce into latest.
+	q.enqueue(Event[string]{ResourceID: "gw-1", Resource: "new"})
+	<-h.enter
+	// A stale snapshot (lower version) arrives while the newer payload is pending.
+	q.enqueue(Event[string]{ResourceID: "gw-1", Resource: "old"})
+	h.release <- struct{}{} // first reconcile ("new") completes
+
+	// If a second reconcile runs at all, it must not be the stale "old" payload.
+	select {
+	case <-h.enter:
+		got := h.lastSeen()
+		h.release <- struct{}{}
+		if got == "old" {
+			t.Fatalf("reconciled stale payload %q; version coalescing must keep the newest", got)
+		}
+	case <-time.After(50 * time.Millisecond):
+		// No second reconcile: the stale enqueue was dropped entirely. Correct.
+	}
+}
+
+// A pending (not-yet-processed) delete is terminal: a non-delete event -- e.g. a
+// stale seed snapshot or a buffered out-of-order live update -- must not overwrite
+// it and resurrect a resource whose deletion has not been reconciled.
+func TestReconcileQueue_PendingDeleteNotResurrected(t *testing.T) {
+	h := &recordingHandler{
+		enter:   make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	version := func(ev Event[string]) int64 {
+		// The resurrecting update even claims a *higher* version, to prove the delete
+		// wins on type, not on version.
+		if ev.Resource == "resurrect" {
+			return 100
+		}
+		return 1
+	}
+	q := newReconcileQueue(context.Background(), "Test", h,
+		withRateLimiter[string](fastLimiter()), withWorkers[string](1),
+		withVersion(version))
+	defer q.stop()
+
+	// Occupy the single worker so the delete stays pending in latest while the
+	// resurrecting update is enqueued.
+	q.enqueue(Event[string]{ResourceID: "blocker", Resource: "x"})
+	<-h.enter
+
+	q.enqueue(Event[string]{Type: EventDeleted, ResourceID: "gw-1", Resource: "gone"})
+	q.enqueue(Event[string]{Type: EventUpdated, ResourceID: "gw-1", Resource: "resurrect"})
+
+	// The pending payload for gw-1 must still be the delete.
+	q.mu.Lock()
+	got := q.latest["gw-1"]
+	q.mu.Unlock()
+	if got.Type != EventDeleted {
+		t.Fatalf("gw-1 pending event = %v (%q), want the delete to stay terminal", got.Type, got.Resource)
+	}
+
+	h.release <- struct{}{} // release blocker
+	// Drain any remaining processing so stop() is clean.
+	go func() {
+		for {
+			select {
+			case <-h.enter:
+				h.release <- struct{}{}
+			case <-time.After(100 * time.Millisecond):
+				return
+			}
+		}
+	}()
+	time.Sleep(120 * time.Millisecond)
+}
+
 // A retry must reconcile the latest observed payload, not the one that failed:
 // coalescing to newest desired state is what prevents a stale (e.g. still-routed)
 // payload from being replayed after the resource changed.

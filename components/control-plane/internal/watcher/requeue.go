@@ -62,7 +62,15 @@ type reconcileQueue[T any] struct {
 	kind           string
 	workers        int
 	retryTransform func(Event[T]) Event[T]
-	now            func() time.Time
+	// versionOf returns a monotonically increasing version for an event's payload
+	// (for gateways, the resource's updated_at). When set, enqueue coalesces to the
+	// highest-versioned payload so a stale snapshot -- from the startup/reconnect
+	// seed or the periodic resync -- can never clobber a newer live event, and a
+	// buffered out-of-order live event can never clobber a newer seed. Deletes are
+	// terminal and bypass the check. Nil disables version-aware coalescing (plain
+	// last-writer-wins), which is fine for streams that never seed.
+	versionOf func(Event[T]) int64
+	now       func() time.Time
 
 	queue   workqueue.TypedRateLimitingInterface[string]
 	limiter workqueue.TypedRateLimiter[string]
@@ -103,6 +111,13 @@ func withRateLimiter[T any](l workqueue.TypedRateLimiter[string]) queueOption[T]
 // withWorkers overrides the worker count (used by tests).
 func withWorkers[T any](n int) queueOption[T] {
 	return func(q *reconcileQueue[T]) { q.workers = n }
+}
+
+// withVersion enables version-aware coalescing keyed on f (see the versionOf
+// field). Used so seed/resync snapshots and live events converge on the newest
+// observed state regardless of the order they are enqueued.
+func withVersion[T any](f func(Event[T]) int64) queueOption[T] {
+	return func(q *reconcileQueue[T]) { q.versionOf = f }
 }
 
 // newReconcileQueue builds and starts a reconcile queue. Workers run on baseCtx
@@ -146,9 +161,55 @@ func newReconcileQueue[T any](baseCtx context.Context, kind string, handler Hand
 // reconciliation, coalescing with any pending work for the same resource.
 func (q *reconcileQueue[T]) enqueue(ev Event[T]) {
 	q.mu.Lock()
+	// A delete always wins: overwrite whatever is pending and schedule it. For a
+	// non-delete, guard the pending payload before overwriting it.
+	if ev.Type != EventDeleted {
+		if prev, ok := q.latest[ev.ResourceID]; ok {
+			// A pending (not-yet-processed) delete is terminal: a non-delete event
+			// -- a stale seed/resync snapshot or a buffered out-of-order live event
+			// -- must not overwrite it and resurrect a resource whose deletion has
+			// not been reconciled. Once the delete is processed it is pruned from
+			// latest, and later create/update events are accepted normally.
+			if prev.Type == EventDeleted {
+				q.mu.Unlock()
+				return
+			}
+			// Version-aware coalescing: drop an event older than the pending payload
+			// so a stale snapshot never clobbers newer live state (and vice versa).
+			// The newer payload is already queued, so there is nothing to schedule.
+			if q.versionOf != nil && q.versionOf(ev) < q.versionOf(prev) {
+				q.mu.Unlock()
+				return
+			}
+		}
+	}
 	q.latest[ev.ResourceID] = ev
 	q.mu.Unlock()
 	q.queue.Add(ev.ResourceID)
+}
+
+// knownKeys returns a snapshot of the payloads the queue is currently tracking
+// (one per resource with pending work). The seed uses it to reconcile an
+// authoritative list against what the queue still believes exists.
+func (q *reconcileQueue[T]) knownKeys() map[string]Event[T] {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	out := make(map[string]Event[T], len(q.latest))
+	for k, v := range q.latest {
+		out[k] = v
+	}
+	return out
+}
+
+// prune drops a tracked key's pending payload and backoff, stopping its retries.
+// Used when an authoritative list shows the resource no longer exists, so the
+// queue must not keep retrying stale desired state. A retry already scheduled for
+// the key finds no payload when it fires and is Forgotten (see processNext).
+func (q *reconcileQueue[T]) prune(id string) {
+	q.mu.Lock()
+	delete(q.latest, id)
+	delete(q.notBefore, id)
+	q.mu.Unlock()
 }
 
 func (q *reconcileQueue[T]) start() {
