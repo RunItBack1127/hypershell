@@ -148,6 +148,13 @@ func WatchGatewayReleases(ctx context.Context, conn *grpc.ClientConn, handler Ha
 
 func WatchGateways(ctx context.Context, conn *grpc.ClientConn, handler Handler[*pb.Gateway]) error {
 	client := pb.NewGatewayServiceClient(conn)
+	// A failed gateway reconcile must be re-driven durably: the watch stream does
+	// not replay state on reconnect, so without an out-of-band retry a transient
+	// failure (e.g. an API-server outage that also blocks recording a Failed
+	// phase) would strand the gateway until its spec next changes. The requeuer
+	// outlives individual stream connections so retries survive a reconnect.
+	rq := newRequeuer(ctx, "Gateway", handler)
+	defer rq.stop()
 	return watchLoop(ctx, "Gateway", func(ctx context.Context) error {
 		stream, err := client.WatchGateways(ctx, &pb.WatchGatewaysRequest{})
 		if err != nil {
@@ -161,12 +168,21 @@ func WatchGateways(ctx context.Context, conn *grpc.ClientConn, handler Handler[*
 			if err != nil {
 				return fmt.Errorf("receiving gateway event: %w", err)
 			}
-			if err := handler.Handle(ctx, Event[*pb.Gateway]{
+			ev := Event[*pb.Gateway]{
 				Type:       toEventType(event.Type),
 				ResourceID: event.ResourceId,
 				Resource:   event.Gateway,
-			}); err != nil {
+			}
+			if err := handler.Handle(ctx, ev); err != nil {
 				log.Printf("ERROR handling gateway %s: %v", event.ResourceId, err)
+				// Retry with the original event payload: its pre-Provisioning phase
+				// bypasses the reconciler's phase gate, and ReconcileGateway is
+				// idempotent, so re-running it once the outage clears recovers the
+				// gateway (or finally records Failed).
+				rq.schedule(ev)
+			} else {
+				// A clean pass supersedes any pending recovery for this gateway.
+				rq.cancel(event.ResourceId)
 			}
 		}
 	})
