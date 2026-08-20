@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/url"
@@ -126,7 +127,7 @@ func ReconcileGateway(
 				log.Printf("WARN failed to reconcile Gateway API resources in %s: %v", nsConfig.Name, err)
 			}
 		} else {
-			if err := deleteGatewayAPIResources(ctx, dynamicClient, clientset, nsConfig.Name, opts); err != nil {
+			if err := DeleteGatewayAPIResources(ctx, dynamicClient, clientset, nsConfig.Name, opts); err != nil {
 				log.Printf("WARN failed to remove Gateway API resources in %s: %v", nsConfig.Name, err)
 			}
 		}
@@ -280,14 +281,25 @@ func DeleteLabeledNamespaceResources(
 	}
 }
 
-func deleteGatewayAPIResources(ctx context.Context, dynamicClient dynamic.Interface, clientset *kubernetes.Clientset, namespace string, opts ReconcileOpts) error {
+// DeleteGatewayAPIResources reconciles the desired *absence* of a gateway's
+// route: it removes the GRPCRoute, BackendTLSPolicy, backend-CA ConfigMap and
+// router NetworkPolicy, tears down the console (which follows the route), and
+// clears the stored route_address. It attempts every deletion regardless of
+// individual failures and returns their joined errors (nil once everything is
+// absent), so a caller -- the provisioning path's route-disabled branch and the
+// health loop, which owns a Running gateway the provisioning path never revisits
+// -- can retry until the route and its console are fully gone rather than
+// stopping on partial cleanup. Idempotent: absent resources are ignored.
+func DeleteGatewayAPIResources(ctx context.Context, dynamicClient dynamic.Interface, clientset *kubernetes.Clientset, namespace string, opts ReconcileOpts) error {
+	var errs []error
+
 	grpcRouteGVR := schema.GroupVersionResource{
 		Group:    "gateway.networking.k8s.io",
 		Version:  "v1",
 		Resource: "grpcroutes",
 	}
 	if err := dynamicClient.Resource(grpcRouteGVR).Namespace(namespace).Delete(ctx, "openshell-gateway", metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
-		log.Printf("WARN failed to delete GRPCRoute: %v", err)
+		errs = append(errs, fmt.Errorf("delete GRPCRoute in %s: %w", namespace, err))
 	}
 
 	btlsGVR := schema.GroupVersionResource{
@@ -296,11 +308,11 @@ func deleteGatewayAPIResources(ctx context.Context, dynamicClient dynamic.Interf
 		Resource: "backendtlspolicies",
 	}
 	if err := dynamicClient.Resource(btlsGVR).Namespace(namespace).Delete(ctx, "openshell-gateway", metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
-		log.Printf("WARN failed to delete BackendTLSPolicy: %v", err)
+		errs = append(errs, fmt.Errorf("delete BackendTLSPolicy in %s: %w", namespace, err))
 	}
 
 	if err := clientset.CoreV1().ConfigMaps(namespace).Delete(ctx, "openshell-backend-ca", metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
-		log.Printf("WARN failed to delete backend CA ConfigMap: %v", err)
+		errs = append(errs, fmt.Errorf("delete backend CA ConfigMap in %s: %w", namespace, err))
 	}
 
 	netpolGVR := schema.GroupVersionResource{
@@ -309,22 +321,26 @@ func deleteGatewayAPIResources(ctx context.Context, dynamicClient dynamic.Interf
 		Resource: "networkpolicies",
 	}
 	if err := dynamicClient.Resource(netpolGVR).Namespace(namespace).Delete(ctx, "openshell-gateway-allow-router", metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
-		log.Printf("WARN failed to delete router NetworkPolicy: %v", err)
+		errs = append(errs, fmt.Errorf("delete router NetworkPolicy in %s: %w", namespace, err))
 	}
 
 	// The console follows the route, so removing the route removes the console.
-	deleteConsole(ctx, dynamicClient, clientset, namespace, opts)
+	if err := deleteConsole(ctx, dynamicClient, clientset, namespace, opts); err != nil {
+		errs = append(errs, err)
+	}
 
 	if opts.UpdateRouteAddress != nil {
 		if err := opts.UpdateRouteAddress(ctx, ""); err != nil {
-			log.Printf("WARN failed to clear routeAddress for gateway in %s: %v", namespace, err)
+			errs = append(errs, fmt.Errorf("clear routeAddress in %s: %w", namespace, err))
 		} else {
 			log.Printf("INFO cleared routeAddress for gateway in %s", namespace)
 		}
 	}
 
-	log.Printf("INFO Gateway API resources removed from namespace %s", namespace)
-	return nil
+	if len(errs) == 0 {
+		log.Printf("INFO Gateway API resources removed from namespace %s", namespace)
+	}
+	return errors.Join(errs...)
 }
 
 func namespaceExists(ctx context.Context, clientset *kubernetes.Clientset, namespace string) bool {

@@ -72,16 +72,45 @@ func TestSelfHealConsole_NoOpWhenUnconfigured(t *testing.T) {
 	})
 }
 
-// teardownConsole reconciles the console's desired absence for a non-routed
-// gateway. It must return before touching the (here nil) Kubernetes clients when
-// the gateway carries no namespace, so a malformed gateway can never panic the
-// health loop. The nil-client no-panic is the assertion.
-func TestTeardownConsole_NoOpWithoutNamespace(t *testing.T) {
-	h := &GatewayHealthReconciler{keycloakConfig: &gateway.KeycloakConfig{}}
-	// No Namespace set: gatewayNamespace errors, so teardownConsole must return
+// teardownRoute reconciles the desired absence of the route and console for a
+// non-routed gateway. It must return before touching the (here nil) Kubernetes
+// clients when the gateway carries no namespace, so a malformed gateway can never
+// panic the health loop. The nil-client no-panic is the assertion.
+func TestTeardownRoute_NoOpWithoutNamespace(t *testing.T) {
+	h := &GatewayHealthReconciler{
+		keycloakConfig: &gateway.KeycloakConfig{},
+		routeTornDown:  make(map[string]bool),
+	}
+	// No Namespace set: gatewayNamespace errors, so teardownRoute must return
 	// before dereferencing the nil clientset/dynamicClient.
-	h.teardownConsole(context.Background(), &fakeGatewayClient{}, "gw-1",
+	h.teardownRoute(context.Background(), &fakeGatewayClient{}, "gw-1",
 		&pb.Gateway{Metadata: &pb.ObjectReference{Id: "gw-1"}})
+}
+
+// A gateway already recorded as fully torn down must be skipped entirely, so a
+// settled non-routed gateway adds no per-tick delete or Keycloak traffic. The
+// gateway carries a namespace here, so the only thing preventing a nil-client
+// panic is the torn-down marker short-circuit -- that no-panic is the assertion.
+func TestTeardownRoute_SkipsWhenAlreadyTornDown(t *testing.T) {
+	h := &GatewayHealthReconciler{
+		keycloakConfig: &gateway.KeycloakConfig{},
+		routeTornDown:  map[string]bool{"gw-1": true},
+	}
+	h.teardownRoute(context.Background(), &fakeGatewayClient{}, "gw-1",
+		&pb.Gateway{Metadata: &pb.ObjectReference{Id: "gw-1"}, Namespace: "openshell-abc"})
+}
+
+// Observing a routed gateway must clear any recorded teardown so a later
+// un-routing triggers a fresh teardown rather than being skipped forever.
+func TestClearRouteTornDown_AllowsFreshTeardown(t *testing.T) {
+	h := &GatewayHealthReconciler{routeTornDown: map[string]bool{"gw-1": true}}
+	if !h.routeTornDownAlready("gw-1") {
+		t.Fatal("precondition: gw-1 should start marked as torn down")
+	}
+	h.clearRouteTornDown("gw-1")
+	if h.routeTornDownAlready("gw-1") {
+		t.Fatal("clearRouteTornDown must forget the gateway so teardown can re-run")
+	}
 }
 
 func TestEvaluateRouteReadiness_ReadyBecomesRunning(t *testing.T) {

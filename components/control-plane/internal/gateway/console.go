@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -203,10 +204,12 @@ func ReconcileConsole(ctx context.Context, dynamicClient dynamic.Interface, clie
 // console's desired *absence* independently of the provisioning phase gate: when
 // a Running gateway's route is removed the provisioning path never runs again
 // (see the reconciler's phase gate), so without this the console and its
-// Keycloak client would leak. Best-effort and idempotent -- absent resources are
-// ignored -- so it is safe to call on every health tick.
-func DeleteConsole(ctx context.Context, dynamicClient dynamic.Interface, clientset *kubernetes.Clientset, namespace string, opts ReconcileOpts) {
-	deleteConsole(ctx, dynamicClient, clientset, namespace, opts)
+// Keycloak client would leak. Idempotent -- absent resources are ignored -- so it
+// is safe to call on every health tick. It returns the joined errors of every
+// deletion that failed (an empty console yields nil) so callers can retry until
+// the console is actually absent rather than stopping on partial cleanup.
+func DeleteConsole(ctx context.Context, dynamicClient dynamic.Interface, clientset *kubernetes.Clientset, namespace string, opts ReconcileOpts) error {
+	return deleteConsole(ctx, dynamicClient, clientset, namespace, opts)
 }
 
 // reconcileConsole deploys the per-gateway OpenShell dashboard and its
@@ -786,32 +789,36 @@ func buildConsoleNetworkPolicies(namespace string) []*unstructured.Unstructured 
 }
 
 // deleteConsole removes all console resources and the console Keycloak client.
-// It is best-effort: failures are logged (including the orphan clientId when the
-// Keycloak client cannot be deleted) and do not stop the remaining deletions.
-func deleteConsole(ctx context.Context, dynamicClient dynamic.Interface, clientset *kubernetes.Clientset, namespace string, opts ReconcileOpts) {
+// It attempts every deletion regardless of individual failures and returns their
+// joined errors (nil when the console is already absent), so a caller can retry
+// until nothing remains instead of stopping on partial cleanup. A NotFound is not
+// an error: the resource is already gone.
+func deleteConsole(ctx context.Context, dynamicClient dynamic.Interface, clientset *kubernetes.Clientset, namespace string, opts ReconcileOpts) error {
+	var errs []error
+
 	deployGVR := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
 	if err := dynamicClient.Resource(deployGVR).Namespace(namespace).Delete(ctx, consoleName, metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
-		log.Printf("WARN failed to delete console Deployment: %v", err)
+		errs = append(errs, fmt.Errorf("delete console Deployment in %s: %w", namespace, err))
 	}
 
 	if err := clientset.CoreV1().Services(namespace).Delete(ctx, consoleName, metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
-		log.Printf("WARN failed to delete console Service: %v", err)
+		errs = append(errs, fmt.Errorf("delete console Service in %s: %w", namespace, err))
 	}
 
 	httpRouteGVR := schema.GroupVersionResource{Group: "gateway.networking.k8s.io", Version: "v1", Resource: "httproutes"}
 	if err := dynamicClient.Resource(httpRouteGVR).Namespace(namespace).Delete(ctx, consoleName, metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
-		log.Printf("WARN failed to delete console HTTPRoute: %v", err)
+		errs = append(errs, fmt.Errorf("delete console HTTPRoute in %s: %w", namespace, err))
 	}
 
 	netpolGVR := schema.GroupVersionResource{Group: "networking.k8s.io", Version: "v1", Resource: "networkpolicies"}
 	for _, name := range []string{"openshell-console-allow-router", "openshell-gateway-allow-console"} {
 		if err := dynamicClient.Resource(netpolGVR).Namespace(namespace).Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
-			log.Printf("WARN failed to delete console NetworkPolicy %s: %v", name, err)
+			errs = append(errs, fmt.Errorf("delete console NetworkPolicy %s in %s: %w", name, namespace, err))
 		}
 	}
 
 	if err := clientset.CoreV1().Secrets(namespace).Delete(ctx, consoleSecretName, metav1.DeleteOptions{}); err != nil && !k8serrors.IsNotFound(err) {
-		log.Printf("WARN failed to delete console Secret: %v", err)
+		errs = append(errs, fmt.Errorf("delete console Secret in %s: %w", namespace, err))
 	}
 
 	if opts.Keycloak != nil && opts.GatewayName != "" && opts.GatewayID != "" {
@@ -823,7 +830,7 @@ func deleteConsole(ctx context.Context, dynamicClient dynamic.Interface, clients
 			opts.Keycloak.ClientSecret,
 		)
 		if err := kc.DeleteConsoleClient(ctx, consoleClientID); err != nil {
-			log.Printf("WARN failed to delete console client %s (orphaned): %v", consoleClientID, err)
+			errs = append(errs, fmt.Errorf("delete console client %s (orphaned): %w", consoleClientID, err))
 		} else {
 			log.Printf("INFO deleted console client %s", consoleClientID)
 		}
@@ -831,9 +838,11 @@ func deleteConsole(ctx context.Context, dynamicClient dynamic.Interface, clients
 
 	if opts.UpdateConsoleAddress != nil {
 		if err := opts.UpdateConsoleAddress(ctx, ""); err != nil {
-			log.Printf("WARN failed to clear consoleAddress in %s: %v", namespace, err)
+			errs = append(errs, fmt.Errorf("clear consoleAddress in %s: %w", namespace, err))
 		} else {
 			log.Printf("INFO cleared consoleAddress for gateway in %s", namespace)
 		}
 	}
+
+	return errors.Join(errs...)
 }

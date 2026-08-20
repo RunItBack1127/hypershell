@@ -56,8 +56,17 @@ type GatewayHealthReconciler struct {
 	// window can be enforced during provisioning. Entries are cleared once the
 	// gateway settles (Running, Degraded, or Deployment not Ready). In-memory
 	// only: on restart the window restarts, which is acceptable.
+	//
+	// routeTornDown records, per gateway, that a full route+console teardown has
+	// completed with no residual resources or stored addresses, so subsequent
+	// ticks skip the (otherwise per-tick) delete and Keycloak traffic. It is set
+	// only on a clean teardown and cleared the moment the gateway is routed again,
+	// so a teardown that failed part-way keeps retrying until everything is gone.
+	// In-memory only: on restart a single confirming teardown pass re-runs, which
+	// is acceptable.
 	mu                 sync.Mutex
 	routeNotReadySince map[string]time.Time
+	routeTornDown      map[string]bool
 }
 
 func NewGatewayHealthReconciler(clientset *kubernetes.Clientset, dynamicClient dynamic.Interface, grpcConn *grpc.ClientConn, exposurePort exposure.Port, keycloakConfig *gateway.KeycloakConfig) *GatewayHealthReconciler {
@@ -75,6 +84,7 @@ func NewGatewayHealthReconciler(clientset *kubernetes.Clientset, dynamicClient d
 		skipNetworkPolicies: os.Getenv("GATEWAY_SKIP_NETWORK_POLICIES") == "true",
 		now:                 time.Now,
 		routeNotReadySince:  make(map[string]time.Time),
+		routeTornDown:       make(map[string]bool),
 	}
 }
 
@@ -181,14 +191,20 @@ func (h *GatewayHealthReconciler) reconcileGatewayHealth(ctx context.Context, cl
 		h.selfHealConsole(ctx, gatewayID, gw)
 	}
 
-	// Reconcile the console's desired absence. A gateway whose route was removed
-	// keeps its console (Deployment, Service, HTTPRoute, Keycloak client) and its
-	// published console_address until torn down. syncConsoleAddress and
-	// selfHealConsole both no-op for a non-routed gateway, and the provisioning
-	// path never runs again for a gateway the health loop owns (phase gate), so
-	// this is the only place an un-routed gateway's console is cleaned up.
-	if !isRoutedGateway(gw) {
-		h.teardownConsole(ctx, client, gatewayID, gw)
+	// Reconcile the route's desired absence. A gateway whose route was removed
+	// keeps its route resources (GRPCRoute, BackendTLSPolicy, backend-CA
+	// ConfigMap, router NetworkPolicy) and its console (Deployment, Service,
+	// HTTPRoute, Keycloak client), plus the published route_address and
+	// console_address, until torn down. syncConsoleAddress and selfHealConsole
+	// both no-op for a non-routed gateway, and the provisioning path never runs
+	// again for a gateway the health loop owns (phase gate), so this is the only
+	// place an un-routed gateway's route and console are cleaned up. Clearing the
+	// torn-down marker while routed lets a later un-routing trigger a fresh
+	// teardown.
+	if isRoutedGateway(gw) {
+		h.clearRouteTornDown(gatewayID)
+	} else {
+		h.teardownRoute(ctx, client, gatewayID, gw)
 	}
 
 	namespace, err := gatewayNamespace(gw)
@@ -274,31 +290,30 @@ func (h *GatewayHealthReconciler) selfHealConsole(ctx context.Context, gatewayID
 	log.Printf("INFO console self-heal reconciled in %s", namespace)
 }
 
-// teardownConsole reconciles the console's desired absence for a gateway the
-// health loop owns that is no longer routed, mirroring the provisioning path's
-// route-disabled branch (which the phase gate prevents from running again once
-// the gateway is Running). It removes the console resources and Keycloak client
-// and clears the published console_address. It is gated on there actually being
-// something to remove -- a live console Deployment or a still-published
-// console_address -- so a settled, never-routed gateway adds no per-tick delete
-// or Keycloak traffic. Failures are logged inside DeleteConsole, never
-// propagated: console teardown must not perturb the gateway's own health phase.
-func (h *GatewayHealthReconciler) teardownConsole(ctx context.Context, client pb.GatewayServiceClient, gatewayID string, gw *pb.Gateway) {
+// teardownRoute reconciles the desired absence of the route -- and the console
+// that follows it -- for a gateway the health loop owns that is no longer routed,
+// mirroring the provisioning path's route-disabled branch (which the phase gate
+// prevents from running again once the gateway is Running). It removes the
+// GRPCRoute, BackendTLSPolicy, backend-CA ConfigMap, router NetworkPolicy and all
+// console resources + Keycloak client, and clears the published route_address and
+// console_address.
+//
+// It keeps retrying every tick until DeleteGatewayAPIResources reports a clean
+// pass (no residual resources, no address left to clear), then records the
+// gateway as torn down so subsequent ticks add no delete or Keycloak traffic. A
+// teardown that fails part-way is deliberately left unmarked so the next tick
+// retries -- teardown must converge on full absence, not stop on partial cleanup.
+// Failures are logged, never propagated: route teardown must not perturb the
+// gateway's own health phase.
+func (h *GatewayHealthReconciler) teardownRoute(ctx context.Context, client pb.GatewayServiceClient, gatewayID string, gw *pb.Gateway) {
+	// A prior clean teardown means the route and console are already absent; skip
+	// until the gateway is routed again (which clears the marker).
+	if h.routeTornDownAlready(gatewayID) {
+		return
+	}
 	namespace, err := gatewayNamespace(gw)
 	if err != nil {
-		log.Printf("WARN console teardown for %s: %v", gatewayID, err)
-		return
-	}
-	// Only act when there is drift to clean: a console Deployment still present,
-	// or a console_address still published. A NotFound Deployment with an empty
-	// address means the console is already absent, so skip to keep the steady
-	// state quiet.
-	_, reason, err := gateway.DeploymentReadiness(ctx, h.clientset, namespace, gateway.ConsoleDeploymentName)
-	if err != nil {
-		log.Printf("WARN console teardown readiness for %s: %v", namespace, err)
-		return
-	}
-	if reason == "deployment not found" && gw.GetConsoleAddress() == "" {
+		log.Printf("WARN route teardown for %s: %v", gatewayID, err)
 		return
 	}
 	opts := gateway.ReconcileOpts{
@@ -307,16 +322,58 @@ func (h *GatewayHealthReconciler) teardownConsole(ctx context.Context, client pb
 		Keycloak:            h.keycloakConfig,
 		GatewayID:           gatewayID,
 		GatewayName:         gw.GetName(),
-		UpdateConsoleAddress: func(ctx context.Context, consoleAddress string) error {
+	}
+	// Wire an address-clearing callback only when an address is actually stored,
+	// so a gateway that never published one adds no gateway-update traffic.
+	if gw.GetRouteAddress() != "" {
+		opts.UpdateRouteAddress = func(ctx context.Context, routeAddress string) error {
+			_, uerr := client.UpdateGateway(ctx, &pb.UpdateGatewayRequest{
+				Id:           gatewayID,
+				RouteAddress: &routeAddress,
+			})
+			return uerr
+		}
+	}
+	if gw.GetConsoleAddress() != "" {
+		opts.UpdateConsoleAddress = func(ctx context.Context, consoleAddress string) error {
 			_, uerr := client.UpdateGateway(ctx, &pb.UpdateGatewayRequest{
 				Id:             gatewayID,
 				ConsoleAddress: &consoleAddress,
 			})
 			return uerr
-		},
+		}
 	}
-	gateway.DeleteConsole(ctx, h.dynamicClient, h.clientset, namespace, opts)
-	log.Printf("INFO console torn down in %s (gateway no longer routed)", namespace)
+	if err := gateway.DeleteGatewayAPIResources(ctx, h.dynamicClient, h.clientset, namespace, opts); err != nil {
+		// Leave the gateway unmarked so the next tick retries until every
+		// route-owned resource and stored address is gone.
+		log.Printf("WARN route teardown in %s (gateway no longer routed): %v", namespace, err)
+		return
+	}
+	h.markRouteTornDown(gatewayID)
+	log.Printf("INFO route and console torn down in %s (gateway no longer routed)", namespace)
+}
+
+// routeTornDownAlready reports whether a clean route+console teardown has already
+// completed for the gateway.
+func (h *GatewayHealthReconciler) routeTornDownAlready(gatewayID string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.routeTornDown[gatewayID]
+}
+
+// markRouteTornDown records that the gateway's route and console are fully absent.
+func (h *GatewayHealthReconciler) markRouteTornDown(gatewayID string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.routeTornDown[gatewayID] = true
+}
+
+// clearRouteTornDown forgets any recorded teardown for a gateway, so a later
+// un-routing triggers a fresh teardown.
+func (h *GatewayHealthReconciler) clearRouteTornDown(gatewayID string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.routeTornDown, gatewayID)
 }
 
 // evaluateRouteReadiness decides the phase for a routed gateway whose Deployment
