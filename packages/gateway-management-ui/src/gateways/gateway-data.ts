@@ -11,12 +11,16 @@ export const gatewayPlacementStaleMilliseconds = 60_000;
 export const gatewaySearchDebounceMilliseconds = 250;
 export const gatewayStatusPollMilliseconds = 5_000;
 // Upper bound on how long a settled routed gateway is polled for its console
-// address. A routed gateway is not proof of console eligibility: its console
-// provisioning can be disabled, misconfigured, or stuck, in which case
-// console_address never arrives. Without a bound the UI would poll that gateway
-// every gatewayStatusPollMilliseconds forever. Once this window (measured from
-// the gateway's createdAt) elapses, polling stops and the UI surfaces a terminal
-// "console unavailable" state (gatewayConsoleUnavailable).
+// address, measured from when the UI first observes the gateway awaiting its
+// console (see resolveConsoleWaitStart) -- NOT from the gateway's createdAt. A
+// routed gateway is not proof of console eligibility: its console provisioning
+// can be disabled, misconfigured, or stuck, in which case console_address never
+// arrives. Without a bound the UI would poll that gateway every
+// gatewayStatusPollMilliseconds forever. Once this window elapses, polling stops
+// and the UI surfaces a terminal "console unavailable" state
+// (gatewayConsoleUnavailable). Anchoring on the observed wait-start rather than
+// createdAt keeps a pre-existing routed gateway -- or one first routed long after
+// creation -- from being marked unavailable the instant it loads.
 export const gatewayConsoleReadyDeadlineMilliseconds = 600_000;
 
 const gatewayPollingStates = new Set([
@@ -30,16 +34,65 @@ const gatewayFailedLifecycleStates = new Set(["error", "failed"]);
 
 type GatewayConsoleRecord = Pick<
   GatewayRecord,
-  "phase" | "status" | "externalDns" | "consoleUrl" | "createdAt"
+  "phase" | "status" | "externalDns" | "consoleUrl"
 >;
+
+// Lowercased, non-empty lifecycle states (phase and health status) of a gateway.
+function gatewayLifecycleStates(gateway: GatewayConsoleRecord): string[] {
+  return [gateway.phase, gateway.status]
+    .map((value) => value?.trim().toLocaleLowerCase() ?? "")
+    .filter(Boolean);
+}
+
+// True when a gateway has settled (reached a routed steady state, not
+// transitional and not failed) with an external endpoint but no console URL yet:
+// a per-gateway console reaches Running before its pod can serve, and the control
+// plane publishes console_address only once that pod is Ready. This is the
+// time-independent part of "awaiting a console"; the polling deadline is applied
+// separately against the observed wait-start (withinConsoleReadyDeadline).
+function gatewayAwaitingConsoleEligible(
+  gateway: GatewayConsoleRecord,
+  states: readonly string[],
+): boolean {
+  const routed = Boolean(gateway.externalDns?.trim());
+  const consolePublished = Boolean(gateway.consoleUrl?.trim());
+  const transitional =
+    states.length === 0 ||
+    states.some((value) => gatewayPollingStates.has(value));
+  const failed = states.some((value) =>
+    gatewayFailedLifecycleStates.has(value),
+  );
+  return routed && !consolePublished && !transitional && !failed;
+}
+
+// Resolves the timestamp from which a gateway's console-ready polling deadline is
+// measured, given any timestamp the caller previously recorded for it. Returns
+// the previously recorded start (or `now` on first observation) while the gateway
+// is awaiting its console, and undefined once it no longer is -- console
+// published, gateway failed, route removed, or still transitional -- so the
+// caller can forget it and the clock restarts if the gateway becomes eligible
+// again. Callers persist the returned value per gateway across polls, anchoring
+// the deadline to when console-waiting actually began rather than to gateway
+// creation; see useConsoleWaitTracker.
+export function resolveConsoleWaitStart(
+  gateway: GatewayConsoleRecord,
+  now: number,
+  previousStart: number | undefined,
+): number | undefined {
+  if (
+    !gatewayAwaitingConsoleEligible(gateway, gatewayLifecycleStates(gateway))
+  ) {
+    return undefined;
+  }
+  return previousStart ?? now;
+}
 
 export function gatewayNeedsStatusPolling(
   gateway: GatewayConsoleRecord,
+  consoleWaitStartedAt?: number,
   now: number = Date.now(),
 ): boolean {
-  const states = [gateway.phase, gateway.status]
-    .map((value) => value?.trim().toLocaleLowerCase() ?? "")
-    .filter(Boolean);
+  const states = gatewayLifecycleStates(gateway);
 
   if (
     states.length === 0 ||
@@ -48,89 +101,61 @@ export function gatewayNeedsStatusPolling(
     return true;
   }
 
-  return gatewayAwaitingConsole(gateway, states, now);
-}
-
-// A routed gateway reaches Running before its per-gateway console pod can serve;
-// the control plane publishes console_address only once that pod is Ready. Keep
-// polling a settled routed gateway (one with an external endpoint) until its
-// console URL arrives so the console button appears without a manual page
-// refresh. A failed gateway will not gain a console, so it never keeps polling,
-// and polling is bounded by gatewayConsoleReadyDeadlineMilliseconds so a gateway
-// that is routed but never console-eligible does not poll forever.
-function gatewayAwaitingConsole(
-  gateway: Pick<GatewayRecord, "externalDns" | "consoleUrl" | "createdAt">,
-  states: readonly string[],
-  now: number,
-): boolean {
-  const routed = Boolean(gateway.externalDns?.trim());
-  const consolePublished = Boolean(gateway.consoleUrl?.trim());
-  const failed = states.some((value) =>
-    gatewayFailedLifecycleStates.has(value),
-  );
+  // Settled: keep polling only while still awaiting a console and within the
+  // bounded wait window anchored on when console-waiting began.
   return (
-    routed &&
-    !consolePublished &&
-    !failed &&
-    withinConsoleReadyDeadline(gateway.createdAt, now)
+    gatewayAwaitingConsoleEligible(gateway, states) &&
+    withinConsoleReadyDeadline(consoleWaitStartedAt, now)
   );
 }
 
-// Reports whether the console-ready polling window is still open. A gateway with
-// no parseable createdAt cannot be bounded, so it is treated as past the
-// deadline (do not poll) rather than polled indefinitely.
+// Reports whether the console-ready polling window is still open, given the
+// timestamp when console-waiting began. An undefined or unparseable start cannot
+// be bounded, so it is treated as outside the window (do not poll) rather than
+// polled indefinitely; callers that must distinguish "not yet waiting" from
+// "past the deadline" guard the undefined case themselves.
 function withinConsoleReadyDeadline(
-  createdAt: string | undefined,
+  consoleWaitStartedAt: number | undefined,
   now: number,
 ): boolean {
-  if (!createdAt) {
+  if (
+    consoleWaitStartedAt === undefined ||
+    Number.isNaN(consoleWaitStartedAt)
+  ) {
     return false;
   }
-  const created = Date.parse(createdAt);
-  if (Number.isNaN(created)) {
-    return false;
-  }
-  return now - created < gatewayConsoleReadyDeadlineMilliseconds;
+  return now - consoleWaitStartedAt < gatewayConsoleReadyDeadlineMilliseconds;
 }
 
 // Shared deadline primitive for views that already know a gateway is routed and
 // settled (e.g. the detail header, gated by isGatewayReadyToConnect) and only
-// need to distinguish "console still provisioning" from "console unavailable".
+// need to distinguish "console still provisioning" from "console unavailable". A
+// gateway not yet observed awaiting a console (undefined start) is still
+// provisioning, not unavailable.
 export function isGatewayConsolePastDeadline(
-  createdAt: string | undefined,
+  consoleWaitStartedAt: number | undefined,
   now: number = Date.now(),
 ): boolean {
-  return !withinConsoleReadyDeadline(createdAt, now);
+  if (consoleWaitStartedAt === undefined) {
+    return false;
+  }
+  return !withinConsoleReadyDeadline(consoleWaitStartedAt, now);
 }
 
 // True when a routed gateway has settled (not transitional, not failed) without
-// a console URL and the console-ready polling window has elapsed, so the UI can
-// surface a terminal "console unavailable" state instead of an indefinite
-// "provisioning" spinner.
+// a console URL and the console-ready polling window (anchored on when
+// console-waiting began) has elapsed, so the UI can surface a terminal "console
+// unavailable" state instead of an indefinite "provisioning" spinner.
 export function gatewayConsoleUnavailable(
   gateway: GatewayConsoleRecord,
+  consoleWaitStartedAt?: number,
   now: number = Date.now(),
 ): boolean {
-  const routed = Boolean(gateway.externalDns?.trim());
-  const consolePublished = Boolean(gateway.consoleUrl?.trim());
-  if (!routed || consolePublished) {
+  const states = gatewayLifecycleStates(gateway);
+  if (!gatewayAwaitingConsoleEligible(gateway, states)) {
     return false;
   }
-
-  const states = [gateway.phase, gateway.status]
-    .map((value) => value?.trim().toLocaleLowerCase() ?? "")
-    .filter(Boolean);
-  const transitional =
-    states.length === 0 ||
-    states.some((value) => gatewayPollingStates.has(value));
-  const failed = states.some((value) =>
-    gatewayFailedLifecycleStates.has(value),
-  );
-  if (transitional || failed) {
-    return false;
-  }
-
-  return !withinConsoleReadyDeadline(gateway.createdAt, now);
+  return !withinConsoleReadyDeadline(consoleWaitStartedAt, now);
 }
 
 export function gatewayListQueryKey(request: GatewayListRequest) {

@@ -105,10 +105,12 @@ export function GatewayEndpointCopy({
 }
 
 function GatewayDetailActions({
+  consoleWaitStartedAt,
   gateway,
   onDeleted,
   onRenamed,
 }: {
+  consoleWaitStartedAt?: number;
   gateway: GatewayConnection;
   onDeleted: () => void;
   onRenamed: (gatewayName: string) => void;
@@ -141,7 +143,7 @@ function GatewayDetailActions({
             ) : (
               <Tooltip
                 content={intl.formatMessage(
-                  isGatewayConsolePastDeadline(gateway.createdAt)
+                  isGatewayConsolePastDeadline(consoleWaitStartedAt)
                     ? messages.unavailableGatewayConsole
                     : messages.provisioningGatewayConsole,
                 )}
@@ -236,11 +238,13 @@ function GatewayDetailActions({
 }
 
 export function GatewayDetailHeader({
+  consoleWaitStartedAt,
   description,
   gateway,
   onDeleted,
   onRenamed,
 }: {
+  consoleWaitStartedAt?: number;
   description?: ReactNode;
   gateway: GatewayConnection;
   onDeleted: () => void;
@@ -267,6 +271,7 @@ export function GatewayDetailHeader({
       </FlexItem>
       <FlexItem>
         <GatewayDetailActions
+          consoleWaitStartedAt={consoleWaitStartedAt}
           gateway={gateway}
           onDeleted={onDeleted}
           onRenamed={onRenamed}
