@@ -352,22 +352,33 @@ func DeleteGatewayAPIResources(ctx context.Context, dynamicClient dynamic.Interf
 	return errors.Join(errs...)
 }
 
-// RouteResourcesAbsent reports whether every route- and console-owned Kubernetes
-// resource this control plane creates for a routed gateway is absent from the
-// namespace. It lets the health loop's route teardown converge on the gateway's
-// actual observed state rather than trusting a cached completion marker: a stale
+// ConsoleClientChecker reports whether the gateway's external Keycloak console
+// client still exists. RouteResourcesAbsent uses it so teardown's settled-state
+// check converges across BOTH Kubernetes and the external realm: the console
+// client is a realm object, not a namespaced one, so a stale provisioning pass
+// that recreated only the client -- e.g. failing before its namespaced Secret
+// and Deployment writes -- would otherwise be invisible to a Kubernetes-only
+// probe and let teardown settle while the client leaks.
+type ConsoleClientChecker interface {
+	ConsoleClientExists(ctx context.Context, consoleClientID string) (bool, error)
+}
+
+// RouteResourcesAbsent reports whether every route- and console-owned resource
+// this control plane creates for a routed gateway is absent -- both the
+// namespaced Kubernetes objects and the external Keycloak console client. It
+// lets the health loop's route teardown converge on the gateway's actual
+// observed state rather than trusting a cached completion marker: a stale
 // provisioning pass can recreate these resources after a teardown believed
 // itself finished, and cleared address fields do not prove the resources are
 // gone. Unknown state must never be read as absence.
 //
-// It returns (true, nil) only when every probed resource is confirmed NotFound.
-// The first resource found present short-circuits to (false, nil). Any GET that
-// fails for a reason other than NotFound is returned as an error so the caller
-// treats absence as unconfirmed (and re-runs teardown) rather than trusting an
-// unknown state. The Keycloak console client is not probed here -- it is not a
-// Kubernetes object and its deletion is idempotent, so a teardown re-run
-// (triggered by any resurrected resource above) removes it.
-func RouteResourcesAbsent(ctx context.Context, dynamicClient dynamic.Interface, clientset kubernetes.Interface, namespace string) (bool, error) {
+// It returns (true, nil) only when every probed resource is confirmed absent.
+// The first resource found present short-circuits to (false, nil). Any probe
+// that fails for a reason other than Kubernetes NotFound is returned as an error
+// so the caller treats absence as unconfirmed (and re-runs teardown) rather than
+// trusting an unknown state. The Keycloak client probe is skipped when
+// consoleClient is nil or consoleClientID is empty (no Keycloak configured).
+func RouteResourcesAbsent(ctx context.Context, dynamicClient dynamic.Interface, clientset kubernetes.Interface, namespace string, consoleClient ConsoleClientChecker, consoleClientID string) (bool, error) {
 	grpcRouteGVR := schema.GroupVersionResource{Group: "gateway.networking.k8s.io", Version: "v1", Resource: "grpcroutes"}
 	btlsGVR := schema.GroupVersionResource{Group: "gateway.networking.k8s.io", Version: "v1", Resource: "backendtlspolicies"}
 	httpRouteGVR := schema.GroupVersionResource{Group: "gateway.networking.k8s.io", Version: "v1", Resource: "httproutes"}
@@ -407,6 +418,22 @@ func RouteResourcesAbsent(ctx context.Context, dynamicClient dynamic.Interface, 
 		return false, nil
 	} else if !k8serrors.IsNotFound(err) {
 		return false, fmt.Errorf("probe secret %s in %s: %w", consoleSecretName, namespace, err)
+	}
+
+	// Probe the external Keycloak console client last: it is a realm object, not a
+	// namespaced one, and a stale provisioning pass that recreated only the client
+	// -- e.g. failing before its namespaced Secret and Deployment writes -- would
+	// otherwise be invisible above and let teardown settle while the client leaks.
+	// Skipped when unconfigured (nil checker / empty ID). A probe error is returned
+	// so absence stays unconfirmed rather than being read as gone.
+	if consoleClient != nil && consoleClientID != "" {
+		exists, err := consoleClient.ConsoleClientExists(ctx, consoleClientID)
+		if err != nil {
+			return false, fmt.Errorf("probe keycloak console client %s: %w", consoleClientID, err)
+		}
+		if exists {
+			return false, nil
+		}
 	}
 
 	return true, nil

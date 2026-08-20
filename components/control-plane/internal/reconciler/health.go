@@ -11,6 +11,7 @@ import (
 	pb "github.com/openshift-online/hypershell/components/api-server/pkg/api/grpc/hypershell/v1"
 	"github.com/openshift-online/hypershell/components/control-plane/internal/exposure"
 	"github.com/openshift-online/hypershell/components/control-plane/internal/gateway"
+	"github.com/openshift-online/hypershell/components/control-plane/internal/keycloak"
 	"google.golang.org/grpc"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
@@ -320,7 +321,22 @@ func (h *GatewayHealthReconciler) teardownRoute(ctx context.Context, client pb.G
 	// actually absent; if any reappeared -- or absence cannot be confirmed --
 	// drop the marker and re-run teardown so cleanup converges on real absence.
 	if h.teardownSettled(gatewayID, gw) {
-		absent, perr := gateway.RouteResourcesAbsent(ctx, h.dynamicClient, h.clientset, namespace)
+		// Include the external Keycloak console client in the absence check when
+		// Keycloak is configured: it is a realm object, so a stale provisioning pass
+		// that recreated only the client would be invisible to the Kubernetes-only
+		// probes and let teardown settle while the client leaks.
+		var consoleClient gateway.ConsoleClientChecker
+		consoleClientID := ""
+		if h.keycloakConfig != nil && gw.GetName() != "" && gatewayID != "" {
+			consoleClient = keycloak.NewClient(
+				h.keycloakConfig.ServerURL,
+				h.keycloakConfig.Realm,
+				h.keycloakConfig.ClientID,
+				h.keycloakConfig.ClientSecret,
+			)
+			consoleClientID = fmt.Sprintf("%s-%s-console", gw.GetName(), gatewayID)
+		}
+		absent, perr := gateway.RouteResourcesAbsent(ctx, h.dynamicClient, h.clientset, namespace, consoleClient, consoleClientID)
 		switch {
 		case perr != nil:
 			log.Printf("WARN route teardown: cannot confirm resource absence in %s; re-running teardown: %v", namespace, perr)
