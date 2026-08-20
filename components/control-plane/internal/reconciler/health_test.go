@@ -139,48 +139,59 @@ func TestTeardownSettled(t *testing.T) {
 	}
 }
 
-// The residual-absence probe must be bounded: it re-verifies only within a
-// window after teardown (while a stale provision could still resurrect
-// resources), then trusts the completion marker so a settled non-routed gateway
-// adds no per-tick Keycloak/apiserver traffic at fleet scale.
-func TestWithinVerifyWindow(t *testing.T) {
+// The residual-absence probe must be indefinite but low-frequency: a settled
+// gateway is re-verified at most once per routeVerifyInterval, and -- unlike a
+// wall-clock window -- it never stops being verified, because elapsed time is not
+// proof a stale provision cannot still resurrect resources.
+func TestDueForVerify(t *testing.T) {
 	base := time.Unix(1000, 0)
 	cur := base
 	h := &GatewayHealthReconciler{
 		now:             func() time.Time { return cur },
 		routeTornDown:   make(map[string]bool),
-		routeTornDownAt: make(map[string]time.Time),
+		routeVerifiedAt: make(map[string]time.Time),
 	}
 
-	// No recorded teardown time: verify defensively rather than trust an
-	// unstamped marker.
-	if !h.withinVerifyWindow("gw-1") {
-		t.Fatal("want verify=true when no teardown time is recorded")
+	// No recorded verification: verify defensively rather than trust an unstamped
+	// marker.
+	if !h.dueForVerify("gw-1") {
+		t.Fatal("want due=true when no verification time is recorded")
 	}
 
-	// markRouteTornDown stamps the completion time; immediately after, we are
-	// inside the window.
+	// markRouteTornDown stamps the baseline; immediately after, we are within the
+	// interval, so no re-probe is due yet.
 	h.markRouteTornDown("gw-1")
-	if !h.withinVerifyWindow("gw-1") {
-		t.Fatal("want verify=true immediately after teardown")
+	if h.dueForVerify("gw-1") {
+		t.Fatal("want due=false immediately after teardown")
 	}
 
-	// Just inside the window.
-	cur = base.Add(routeTeardownVerifyWindow - time.Second)
-	if !h.withinVerifyWindow("gw-1") {
-		t.Fatal("want verify=true just inside the window")
+	// Just inside the interval: still not due.
+	cur = base.Add(routeVerifyInterval - time.Second)
+	if h.dueForVerify("gw-1") {
+		t.Fatal("want due=false just inside the interval")
 	}
 
-	// Beyond the window: trust the marker, stop probing.
-	cur = base.Add(routeTeardownVerifyWindow + time.Second)
-	if h.withinVerifyWindow("gw-1") {
-		t.Fatal("want verify=false once the window has elapsed")
+	// At/after the interval: due again -- verification is indefinite, not a cutoff.
+	cur = base.Add(routeVerifyInterval)
+	if !h.dueForVerify("gw-1") {
+		t.Fatal("want due=true once the interval has elapsed")
 	}
 
-	// Clearing the marker (gateway routed again) resets to verify-on-next-teardown.
+	// A successful verification re-stamps the timestamp, deferring the next probe by
+	// another interval (proves it keeps probing forever, just not every tick).
+	h.markVerified("gw-1")
+	if h.dueForVerify("gw-1") {
+		t.Fatal("want due=false immediately after a verification")
+	}
+	cur = base.Add(routeVerifyInterval + routeVerifyInterval)
+	if !h.dueForVerify("gw-1") {
+		t.Fatal("want due=true an interval after the last verification")
+	}
+
+	// Clearing the marker (gateway routed again) forgets the recorded time.
 	h.clearRouteTornDown("gw-1")
-	if _, ok := h.routeTornDownAt["gw-1"]; ok {
-		t.Fatal("clearRouteTornDown must forget the recorded teardown time")
+	if _, ok := h.routeVerifiedAt["gw-1"]; ok {
+		t.Fatal("clearRouteTornDown must forget the recorded verification time")
 	}
 }
 

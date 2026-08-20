@@ -31,17 +31,21 @@ const defaultRouteReadyTimeout = 10 * time.Minute
 // when retrieving the full gateway fleet for health observation.
 const defaultListGatewaysPageSize = 100
 
-// routeTeardownVerifyWindow bounds how long after a clean route/console teardown
-// the health loop keeps re-verifying that the owned resources are actually absent.
-// A stale in-flight provisioning pass can only resurrect resources for a short
-// time after un-routing (it is bounded by the provisioning TLS-secret wait, and
-// the fail-closed route-intent re-check stops any pass from creating route/console
-// resources for a non-routed gateway). Beyond this window that race has drained,
-// so the completion marker is trusted without probing -- keeping a settled,
-// non-routed gateway from adding per-tick Keycloak and apiserver traffic that
-// would fleet-amplify in the serial health loop. Comfortably larger than the
-// provisioning path's 60s TLS wait plus reconcile time.
-const routeTeardownVerifyWindow = 5 * time.Minute
+// routeVerifyInterval is the minimum time between residual route/console
+// absence re-checks for a settled (torn-down, addressless) gateway.
+//
+// Verification is deliberately NOT bounded to a fixed window after teardown.
+// A stale in-flight provisioning pass creates the GRPCRoute before its
+// TLS-secret wait and fail-closed route-intent re-check, so elapsed wall-clock
+// time is not proof that every stale writer has drained -- a late pass can
+// resurrect resources after any wall-clock window would have expired. Instead
+// the health loop keeps re-verifying absence indefinitely, but at most once per
+// interval, so a settled non-routed gateway costs one cheap absence probe per
+// interval (not per tick). That bounds steady-state Keycloak/apiserver traffic
+// at fleet scale while never trusting a wall-clock guess that resources stay
+// gone. Comfortably larger than the provisioning path's 60s TLS wait plus
+// reconcile time, so the steady-state cost is low.
+const routeVerifyInterval = 5 * time.Minute
 
 // GatewayHealthReconciler continuously observes the health of provisioned
 // gateway Deployments and, for routed gateways, the readiness of their external
@@ -87,15 +91,16 @@ type GatewayHealthReconciler struct {
 	// In-memory only: on restart a single confirming teardown pass re-runs, which
 	// is acceptable.
 	//
-	// routeTornDownAt records when each clean teardown completed, so residual
-	// absence is re-verified only within a bounded window afterwards (see
-	// routeTeardownVerifyWindow). Beyond that window the marker is trusted without
-	// probing, so a settled non-routed gateway adds no steady-state Keycloak or
-	// apiserver traffic.
+	// routeVerifiedAt records, per gateway, when residual route/console absence
+	// was last confirmed, so the (indefinite) re-verification runs at most once
+	// per routeVerifyInterval rather than every tick. It is not a cutoff: a
+	// settled gateway keeps being re-verified forever at that low cadence, because
+	// elapsed wall-clock time is not proof that a stale provisioning pass cannot
+	// still resurrect resources (see routeVerifyInterval).
 	mu                 sync.Mutex
 	routeNotReadySince map[string]time.Time
 	routeTornDown      map[string]bool
-	routeTornDownAt    map[string]time.Time
+	routeVerifiedAt    map[string]time.Time
 }
 
 func NewGatewayHealthReconciler(clientset *kubernetes.Clientset, dynamicClient dynamic.Interface, grpcConn *grpc.ClientConn, exposurePort exposure.Port, keycloakConfig *gateway.KeycloakConfig) *GatewayHealthReconciler {
@@ -126,7 +131,7 @@ func NewGatewayHealthReconciler(clientset *kubernetes.Clientset, dynamicClient d
 		now:                  time.Now,
 		routeNotReadySince:   make(map[string]time.Time),
 		routeTornDown:        make(map[string]bool),
-		routeTornDownAt:      make(map[string]time.Time),
+		routeVerifiedAt:      make(map[string]time.Time),
 	}
 }
 
@@ -362,18 +367,21 @@ func (h *GatewayHealthReconciler) teardownRoute(ctx context.Context, client pb.G
 	// actually absent; if any reappeared -- or absence cannot be confirmed --
 	// drop the marker and re-run teardown so cleanup converges on real absence.
 	if h.teardownSettled(gatewayID, gw) {
-		// Beyond the verify window the stale-provision resurrection race has
-		// drained, so trust the marker without probing -- this is what keeps a
-		// settled, non-routed gateway from adding per-tick Keycloak/apiserver
-		// traffic at fleet scale.
-		if !h.withinVerifyWindow(gatewayID) {
+		// Re-verify absence at a low, indefinite cadence rather than only within a
+		// wall-clock window after teardown: a stale provisioning pass can create the
+		// GRPCRoute before its TLS wait and fail-closed route-intent re-check, so no
+		// elapsed time proves the resurrection race has drained. Between verifications
+		// trust the completion marker so a settled non-routed gateway costs at most one
+		// probe per routeVerifyInterval -- not one per tick -- at fleet scale.
+		if !h.dueForVerify(gatewayID) {
 			return
 		}
-		// Within the window, verify actual absence. Include the external Keycloak
-		// console client (a realm object a Kubernetes-only probe cannot see) via the
-		// single long-lived checker so its token cache is reused. If any resource
-		// reappeared -- or absence cannot be confirmed -- drop the marker and re-run
-		// teardown so cleanup converges on real absence.
+		// Verify actual absence. Include the external Keycloak console client (a realm
+		// object a Kubernetes-only probe cannot see) via the single long-lived checker
+		// so its token cache is reused. If any resource reappeared -- or absence cannot
+		// be confirmed -- drop the marker and re-run teardown so cleanup converges on
+		// real absence; if confirmed absent, stamp the verification so the next probe is
+		// one interval away.
 		consoleClientID := ""
 		if h.consoleClientChecker != nil && gw.GetName() != "" && gatewayID != "" {
 			consoleClientID = fmt.Sprintf("%s-%s-console", gw.GetName(), gatewayID)
@@ -381,9 +389,13 @@ func (h *GatewayHealthReconciler) teardownRoute(ctx context.Context, client pb.G
 		absent, perr := gateway.RouteResourcesAbsent(ctx, h.dynamicClient, h.clientset, namespace, h.consoleClientChecker, consoleClientID)
 		switch {
 		case perr != nil:
+			// Leave the verification timestamp stale so the next tick re-probes rather
+			// than waiting a full interval, and re-run teardown now in case resources
+			// reappeared while the probe was failing.
 			log.Printf("WARN route teardown: cannot confirm resource absence in %s; re-running teardown: %v", namespace, perr)
 			h.clearRouteTornDown(gatewayID)
 		case absent:
+			h.markVerified(gatewayID)
 			return
 		default:
 			log.Printf("INFO route/console resources reappeared in %s (stale provision after teardown); re-running teardown", namespace)
@@ -453,16 +465,27 @@ func (h *GatewayHealthReconciler) routeTornDownAlready(gatewayID string) bool {
 }
 
 // markRouteTornDown records that the gateway's route and console are fully absent,
-// stamping the completion time so residual absence is re-verified only within the
-// bounded verify window afterwards.
+// stamping the time as the baseline for the low-frequency re-verification so the
+// first re-check happens one routeVerifyInterval later.
 func (h *GatewayHealthReconciler) markRouteTornDown(gatewayID string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.routeTornDown[gatewayID] = true
-	if h.routeTornDownAt == nil {
-		h.routeTornDownAt = make(map[string]time.Time)
+	if h.routeVerifiedAt == nil {
+		h.routeVerifiedAt = make(map[string]time.Time)
 	}
-	h.routeTornDownAt[gatewayID] = h.now()
+	h.routeVerifiedAt[gatewayID] = h.now()
+}
+
+// markVerified stamps a successful residual-absence verification so the next probe
+// is one routeVerifyInterval away.
+func (h *GatewayHealthReconciler) markVerified(gatewayID string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.routeVerifiedAt == nil {
+		h.routeVerifiedAt = make(map[string]time.Time)
+	}
+	h.routeVerifiedAt[gatewayID] = h.now()
 }
 
 // clearRouteTornDown forgets any recorded teardown for a gateway, so a later
@@ -471,23 +494,23 @@ func (h *GatewayHealthReconciler) clearRouteTornDown(gatewayID string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	delete(h.routeTornDown, gatewayID)
-	delete(h.routeTornDownAt, gatewayID)
+	delete(h.routeVerifiedAt, gatewayID)
 }
 
-// withinVerifyWindow reports whether the gateway's clean teardown completed
-// recently enough that a stale provisioning pass could still have resurrected its
-// route/console resources, so their absence is worth re-verifying this tick.
-// Outside the window (or with no recorded time) the completion marker is trusted.
-func (h *GatewayHealthReconciler) withinVerifyWindow(gatewayID string) bool {
+// dueForVerify reports whether the settled gateway's residual-absence has not been
+// verified within routeVerifyInterval, so it is worth probing again this tick.
+// Verification is indefinite (never a wall-clock cutoff): a settled gateway is
+// always re-verified eventually, just at most once per interval.
+func (h *GatewayHealthReconciler) dueForVerify(gatewayID string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	at, ok := h.routeTornDownAt[gatewayID]
+	at, ok := h.routeVerifiedAt[gatewayID]
 	if !ok {
-		// No recorded completion time (e.g. a marker set before this field existed,
-		// or a restart): verify once rather than trusting an unstamped marker.
+		// No recorded verification (e.g. a marker set before this field existed, or a
+		// restart): verify rather than trusting an unstamped marker.
 		return true
 	}
-	return h.now().Sub(at) < routeTeardownVerifyWindow
+	return h.now().Sub(at) >= routeVerifyInterval
 }
 
 // evaluateRouteReadiness decides the phase for a routed gateway whose Deployment
