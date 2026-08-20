@@ -22,6 +22,7 @@ type recordingHandler struct {
 	maxInFl   int
 	enter     chan struct{}
 	release   chan struct{}
+	onCall    func() // invoked inside Handle, e.g. to simulate a self-status event
 }
 
 func (h *recordingHandler) Handle(_ context.Context, ev Event[string]) error {
@@ -33,8 +34,12 @@ func (h *recordingHandler) Handle(_ context.Context, ev Event[string]) error {
 	}
 	h.seen = append(h.seen, ev.Resource)
 	fail := h.calls <= h.failUntil
-	enter, release := h.enter, h.release
+	enter, release, onCall := h.enter, h.release, h.onCall
 	h.mu.Unlock()
+
+	if onCall != nil {
+		onCall()
+	}
 
 	if enter != nil {
 		enter <- struct{}{}
@@ -125,6 +130,39 @@ func TestReconcileQueue_RetriesIndefinitely(t *testing.T) {
 
 	// Far more than the old 8-attempt budget: proves retries do not stop.
 	waitForCount(t, h, 20)
+}
+
+// The reconciler's own phase-status writes emit watch events that re-enqueue (and
+// mark dirty) the key while it is being processed. client-go would then re-queue
+// it for immediate handling on Done, bypassing the retry backoff and spinning --
+// re-hammering the API server and Keycloak. The backoff floor must survive those
+// dirty re-adds: a persistently failing key that re-enqueues itself on every call
+// must still be handled at the backoff cadence, not in a tight loop.
+func TestReconcileQueue_PreservesBackoffAgainstDirtyReadds(t *testing.T) {
+	h := &recordingHandler{failUntil: 1 << 30}
+	// base 25ms backoff; a spin would produce hundreds of calls in the window below.
+	limiter := workqueue.NewTypedItemExponentialFailureRateLimiter[string](25*time.Millisecond, 50*time.Millisecond)
+	q := newReconcileQueue(context.Background(), "Test", h,
+		withRateLimiter[string](limiter), withWorkers[string](1))
+	defer q.stop()
+	// Each Handle re-enqueues the same key, simulating the reconciler's self-status
+	// write marking the key dirty during processing.
+	h.mu.Lock()
+	h.onCall = func() { q.enqueue(Event[string]{ResourceID: "gw-1", Resource: "v1"}) }
+	h.mu.Unlock()
+
+	q.enqueue(Event[string]{ResourceID: "gw-1", Resource: "v1"})
+
+	time.Sleep(200 * time.Millisecond)
+	// ~200ms / 25-50ms backoff => a handful of calls. Well under any spin, but more
+	// than one (proves it still retries).
+	got := h.count()
+	if got < 2 {
+		t.Fatalf("handler called %d times, want >= 2 (must keep retrying)", got)
+	}
+	if got > 15 {
+		t.Fatalf("handler called %d times in 200ms: backoff bypassed by dirty re-adds (spin)", got)
+	}
 }
 
 // A retry must reconcile the latest observed payload, not the one that failed:

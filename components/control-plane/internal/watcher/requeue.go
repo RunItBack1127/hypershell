@@ -62,14 +62,25 @@ type reconcileQueue[T any] struct {
 	kind           string
 	workers        int
 	retryTransform func(Event[T]) Event[T]
+	now            func() time.Time
 
-	queue workqueue.TypedRateLimitingInterface[string]
+	queue   workqueue.TypedRateLimitingInterface[string]
+	limiter workqueue.TypedRateLimiter[string]
 
-	mu       sync.Mutex
-	latest   map[string]Event[T]
-	wg       sync.WaitGroup
-	stopOnce sync.Once
-	stopCh   chan struct{}
+	mu     sync.Mutex
+	latest map[string]Event[T]
+	// notBefore is the earliest time a failed key may be handled again. It defends
+	// the AddRateLimited backoff against client-go's dirty-key semantics: the
+	// reconciler's own phase-status writes emit watch events that Add (mark dirty)
+	// the key while it is being processed, so Done would otherwise re-queue it for
+	// immediate handling and bypass the backoff delay -- a hot spin that re-hammers
+	// the API server and Keycloak (and re-writes Provisioning each pass, sustaining
+	// the self-event storm). While a key is within its backoff, processNext
+	// re-defers it cheaply instead of invoking the handler.
+	notBefore map[string]time.Time
+	wg        sync.WaitGroup
+	stopOnce  sync.Once
+	stopCh    chan struct{}
 }
 
 // queueOption customizes a reconcileQueue before its workers start.
@@ -84,8 +95,14 @@ func withRetryTransform[T any](f func(Event[T]) Event[T]) queueOption[T] {
 // backoff).
 func withRateLimiter[T any](l workqueue.TypedRateLimiter[string]) queueOption[T] {
 	return func(q *reconcileQueue[T]) {
+		q.limiter = l
 		q.queue = workqueue.NewTypedRateLimitingQueue(l)
 	}
+}
+
+// withClock overrides the queue's clock (used by tests).
+func withClock[T any](now func() time.Time) queueOption[T] {
+	return func(q *reconcileQueue[T]) { q.now = now }
 }
 
 // withWorkers overrides the worker count (used by tests).
@@ -97,16 +114,18 @@ func withWorkers[T any](n int) queueOption[T] {
 // (the watcher lifetime), not any per-stream context, so retries survive a stream
 // reconnect. Call stop to drain and shut down.
 func newReconcileQueue[T any](baseCtx context.Context, kind string, handler Handler[T], opts ...queueOption[T]) *reconcileQueue[T] {
+	limiter := workqueue.NewTypedItemExponentialFailureRateLimiter[string](gatewayRequeueBaseDelay, gatewayRequeueMaxDelay)
 	q := &reconcileQueue[T]{
-		baseCtx: baseCtx,
-		handler: handler,
-		kind:    kind,
-		workers: gatewayReconcileWorkers,
-		queue: workqueue.NewTypedRateLimitingQueue(
-			workqueue.NewTypedItemExponentialFailureRateLimiter[string](gatewayRequeueBaseDelay, gatewayRequeueMaxDelay),
-		),
-		latest: make(map[string]Event[T]),
-		stopCh: make(chan struct{}),
+		baseCtx:   baseCtx,
+		handler:   handler,
+		kind:      kind,
+		workers:   gatewayReconcileWorkers,
+		now:       time.Now,
+		limiter:   limiter,
+		queue:     workqueue.NewTypedRateLimitingQueue(limiter),
+		latest:    make(map[string]Event[T]),
+		notBefore: make(map[string]time.Time),
+		stopCh:    make(chan struct{}),
 	}
 	for _, opt := range opts {
 		opt(q)
@@ -157,12 +176,28 @@ func (q *reconcileQueue[T]) processNext() bool {
 	}
 	defer q.queue.Done(id)
 
+	// Enforce backoff against dirty-key re-adds: if this key failed recently and its
+	// delay has not elapsed, re-defer it without invoking the handler. A dirty re-add
+	// (e.g. from the reconciler's own phase-status watch event) thus costs a cheap
+	// Get/AddAfter/Done cycle instead of an immediate re-handle, so the backoff is
+	// preserved and no spin re-hammers the API server or Keycloak.
+	q.mu.Lock()
+	nb, backingOff := q.notBefore[id]
+	q.mu.Unlock()
+	if backingOff {
+		if remaining := nb.Sub(q.now()); remaining > 0 {
+			q.queue.AddAfter(id, remaining)
+			return true
+		}
+	}
+
 	q.mu.Lock()
 	ev, ok := q.latest[id]
 	q.mu.Unlock()
 	if !ok {
 		// No payload recorded (e.g. a delete already reconciled and pruned it).
 		q.queue.Forget(id)
+		q.clearBackoff(id)
 		return true
 	}
 
@@ -175,8 +210,17 @@ func (q *reconcileQueue[T]) processNext() bool {
 	}
 
 	if err := q.handler.Handle(q.baseCtx, ev); err != nil {
-		log.Printf("WARN %s %s reconcile failed; requeueing with backoff: %v", q.kind, id, err)
-		q.queue.AddRateLimited(id)
+		// When bumps the limiter and returns this attempt's capped-exponential
+		// delay; record it as the key's backoff floor and schedule the retry for
+		// then. Using AddAfter (not AddRateLimited) keeps the delay authoritative
+		// even though dirty re-adds may reach the queue sooner -- the notBefore gate
+		// above re-defers them.
+		delay := q.limiter.When(id)
+		q.mu.Lock()
+		q.notBefore[id] = q.now().Add(delay)
+		q.mu.Unlock()
+		q.queue.AddAfter(id, delay)
+		log.Printf("WARN %s %s reconcile failed; retrying in %s: %v", q.kind, id, delay, err)
 		return true
 	}
 
@@ -184,6 +228,7 @@ func (q *reconcileQueue[T]) processNext() bool {
 	// arrived while we worked, Add already re-dirtied the key so it is processed
 	// again with the latest payload.
 	q.queue.Forget(id)
+	q.clearBackoff(id)
 
 	// Prune a fully-handled delete so the latest map does not retain entries for
 	// gateways that no longer exist -- but only if no newer event coalesced in.
@@ -195,6 +240,14 @@ func (q *reconcileQueue[T]) processNext() bool {
 		q.mu.Unlock()
 	}
 	return true
+}
+
+// clearBackoff forgets a key's recorded backoff floor (on success or once its
+// payload is gone).
+func (q *reconcileQueue[T]) clearBackoff(id string) {
+	q.mu.Lock()
+	delete(q.notBefore, id)
+	q.mu.Unlock()
 }
 
 // stop shuts the queue down and waits for all workers (and the context watcher)
