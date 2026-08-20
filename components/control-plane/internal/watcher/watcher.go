@@ -9,6 +9,7 @@ import (
 
 	pb "github.com/openshift-online/hypershell/components/api-server/pkg/api/grpc/hypershell/v1"
 	"google.golang.org/grpc"
+	"google.golang.org/protobuf/proto"
 )
 
 type EventType int
@@ -148,12 +149,14 @@ func WatchGatewayReleases(ctx context.Context, conn *grpc.ClientConn, handler Ha
 
 func WatchGateways(ctx context.Context, conn *grpc.ClientConn, handler Handler[*pb.Gateway]) error {
 	client := pb.NewGatewayServiceClient(conn)
-	// A failed gateway reconcile must be re-driven durably: the watch stream does
-	// not replay state on reconnect, so without an out-of-band retry a transient
-	// failure (e.g. an API-server outage that also blocks recording a Failed
-	// phase) would strand the gateway until its spec next changes. The requeuer
-	// outlives individual stream connections so retries survive a reconnect.
-	rq := newRequeuer(ctx, "Gateway", handler)
+	// Gateway reconciliation is driven through a per-resource reconcile queue rather
+	// than invoked inline: the watch stream does not replay state on reconnect, so a
+	// reconcile that fails (e.g. an API-server outage that also blocks recording a
+	// Failed phase) would otherwise strand the gateway until its spec next changes.
+	// The queue serializes work per gateway, coalesces to the latest observed state,
+	// and retries failures indefinitely with capped backoff -- all on the watcher
+	// lifetime context so recovery survives a stream reconnect.
+	rq := newReconcileQueue(ctx, "Gateway", handler, withRetryTransform(clearGatewayPhaseForRetry))
 	defer rq.stop()
 	return watchLoop(ctx, "Gateway", func(ctx context.Context) error {
 		stream, err := client.WatchGateways(ctx, &pb.WatchGatewaysRequest{})
@@ -168,24 +171,34 @@ func WatchGateways(ctx context.Context, conn *grpc.ClientConn, handler Handler[*
 			if err != nil {
 				return fmt.Errorf("receiving gateway event: %w", err)
 			}
-			ev := Event[*pb.Gateway]{
+			rq.enqueue(Event[*pb.Gateway]{
 				Type:       toEventType(event.Type),
 				ResourceID: event.ResourceId,
 				Resource:   event.Gateway,
-			}
-			if err := handler.Handle(ctx, ev); err != nil {
-				log.Printf("ERROR handling gateway %s: %v", event.ResourceId, err)
-				// Retry with the original event payload: its pre-Provisioning phase
-				// bypasses the reconciler's phase gate, and ReconcileGateway is
-				// idempotent, so re-running it once the outage clears recovers the
-				// gateway (or finally records Failed).
-				rq.schedule(ev)
-			} else {
-				// A clean pass supersedes any pending recovery for this gateway.
-				rq.cancel(event.ResourceId)
-			}
+			})
 		}
 	})
+}
+
+// clearGatewayPhaseForRetry returns the event with the Gateway's phase cleared so
+// a recovery retry bypasses the reconciler's phase gate. The reconciler stamps
+// phase=Provisioning before it does the provisioning work, and that DB write emits
+// a watch event that coalesces into the queue's latest payload; a retry that
+// reused it verbatim would hit the phase gate (Provisioning => skip) and silently
+// no-op, re-stranding a gateway whose original provisioning failed before it could
+// record a terminal phase. Clearing the phase -- and only on retries -- restores
+// the gate-bypassing recovery the watch stream cannot provide, while the rest of
+// the payload still reflects the latest observed spec so an un-routed gateway is
+// torn down, not resurrected. proto.Clone avoids mutating the shared latest entry
+// (and copying the message value, which vet forbids).
+func clearGatewayPhaseForRetry(ev Event[*pb.Gateway]) Event[*pb.Gateway] {
+	if ev.Resource == nil {
+		return ev
+	}
+	clone := proto.Clone(ev.Resource).(*pb.Gateway)
+	clone.Phase = nil
+	ev.Resource = clone
+	return ev
 }
 
 func WatchGatewayNetworks(ctx context.Context, conn *grpc.ClientConn, handler Handler[*pb.GatewayNetwork]) error {
