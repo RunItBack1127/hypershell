@@ -113,6 +113,45 @@ func TestClearRouteTornDown_AllowsFreshTeardown(t *testing.T) {
 	}
 }
 
+// teardownSettled must trust the completion marker only while the Gateway record
+// carries no route or console address. A console-address publisher started during
+// provisioning runs on the uncancelled watch context and can write console_address
+// after teardown marked itself complete; if that happens the marker must be
+// ignored so the next tick re-runs teardown and clears the stale address.
+func TestTeardownSettled(t *testing.T) {
+	addr := func(s string) *string { return &s }
+	cases := []struct {
+		name        string
+		marked      bool
+		routeAddr   *string
+		consoleAddr *string
+		wantSettled bool
+	}{
+		{"not marked", false, nil, nil, false},
+		{"marked, no addresses", true, nil, nil, true},
+		{"marked, empty addresses", true, addr(""), addr(""), true},
+		{"marked, stale console address", true, nil, addr("https://console.example"), false},
+		{"marked, stale route address", true, addr("gw.example"), nil, false},
+		{"not marked, stale console address", false, nil, addr("https://console.example"), false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			h := &GatewayHealthReconciler{routeTornDown: map[string]bool{}}
+			if c.marked {
+				h.routeTornDown["gw-1"] = true
+			}
+			gw := &pb.Gateway{
+				Metadata:       &pb.ObjectReference{Id: "gw-1"},
+				RouteAddress:   c.routeAddr,
+				ConsoleAddress: c.consoleAddr,
+			}
+			if got := h.teardownSettled("gw-1", gw); got != c.wantSettled {
+				t.Fatalf("teardownSettled = %v, want %v", got, c.wantSettled)
+			}
+		})
+	}
+}
+
 func TestEvaluateRouteReadiness_ReadyBecomesRunning(t *testing.T) {
 	h := newHealthRec(fakeExposure{readiness: exposure.Readiness{Ready: true}}, fixedClock(time.Unix(0, 0)), 10*time.Minute)
 	for _, phase := range []string{"Provisioning", "Degraded"} {

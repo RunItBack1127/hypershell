@@ -490,10 +490,30 @@ func (r *GatewayReconciler) pollRouteReady(ctx context.Context, namespace string
 // serve, so the web UI's console button enables promptly rather than waiting for
 // the next health-reconciler tick. It is meant to run in the background and
 // stops once the address is published or the bounded window elapses.
+//
+// It runs on the long-lived watch context, which route removal does not cancel,
+// so it must not trust the routed Gateway snapshot captured when provisioning
+// started. If the route is removed while the console image is still pulling, the
+// health reconciler's teardown owns clearing console_address; a publisher acting
+// on the stale snapshot would otherwise re-publish the console link after
+// teardown, stranding a trusted address for a gateway that is no longer routed.
+// Re-read the current Gateway each poll and stop the moment it is no longer
+// routed (or has been deleted), leaving the address to teardown.
 func (r *GatewayReconciler) publishConsoleAddressWhenReady(ctx context.Context, gatewayID string, gw *pb.Gateway) {
 	client := pb.NewGatewayServiceClient(r.grpcConn)
 	poll(ctx, provisioningConsoleReadyInterval, provisioningConsoleReadyWait, func() bool {
-		return syncConsoleAddress(ctx, r.clientset, r.dynamicClient, client, gatewayID, gw, r.exposure != nil)
+		resp, err := client.GetGateway(ctx, &pb.GetGatewayRequest{Id: gatewayID})
+		if err != nil {
+			log.Printf("WARN console publisher: get gateway %s: %v", gatewayID, err)
+			return false
+		}
+		current := resp.GetGateway()
+		if current == nil || !isRoutedGateway(current) {
+			// No longer routed (or gone): teardown owns the console_address now.
+			// End the poll rather than publishing against the stale snapshot.
+			return true
+		}
+		return syncConsoleAddress(ctx, r.clientset, r.dynamicClient, client, gatewayID, current, r.exposure != nil)
 	})
 }
 

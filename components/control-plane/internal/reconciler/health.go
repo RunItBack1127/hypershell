@@ -308,7 +308,7 @@ func (h *GatewayHealthReconciler) selfHealConsole(ctx context.Context, gatewayID
 func (h *GatewayHealthReconciler) teardownRoute(ctx context.Context, client pb.GatewayServiceClient, gatewayID string, gw *pb.Gateway) {
 	// A prior clean teardown means the route and console are already absent; skip
 	// until the gateway is routed again (which clears the marker).
-	if h.routeTornDownAlready(gatewayID) {
+	if h.teardownSettled(gatewayID, gw) {
 		return
 	}
 	namespace, err := gatewayNamespace(gw)
@@ -351,6 +351,19 @@ func (h *GatewayHealthReconciler) teardownRoute(ctx context.Context, client pb.G
 	}
 	h.markRouteTornDown(gatewayID)
 	log.Printf("INFO route and console torn down in %s (gateway no longer routed)", namespace)
+}
+
+// teardownSettled reports whether a prior clean teardown can still be trusted for
+// this gateway: the completion marker is set AND the Gateway record carries no
+// route or console address. It exists to defend against a late address write --
+// the console-address publisher started during provisioning runs on the
+// long-lived watch context that route removal does not cancel, so it can write
+// console_address after a teardown marked itself complete. Requiring both stored
+// addresses to be empty makes the marker untrusted the moment one reappears, so
+// the next tick re-runs the teardown to clear it: teardown must converge on full
+// absence of resources and stored addresses, not stop on a stale cache.
+func (h *GatewayHealthReconciler) teardownSettled(gatewayID string, gw *pb.Gateway) bool {
+	return h.routeTornDownAlready(gatewayID) && gw.GetRouteAddress() == "" && gw.GetConsoleAddress() == ""
 }
 
 // routeTornDownAlready reports whether a clean route+console teardown has already
