@@ -53,10 +53,12 @@ func init() {
 	pkgserver.RegisterRoutes("gateways", func(apiV1Router *mux.Router, services pkgserver.ServicesInterface, authMiddleware environments.JWTMiddleware, authzMiddleware auth.AuthorizationMiddleware) {
 		envServices := services.(*environments.Services)
 		var ownerBinding OwnerBindingCreator
+		var ownerLookup GatewayOwnerLookup
 		var visibilityFilter GatewayVisibilityFilter
 		rbService := roleBindings.Service(envServices)
 		if rbService != nil {
 			ownerBinding = rbac.NewGatewayBootstrapper(rbService)
+			ownerLookup = rbac.NewGatewayOwnerLookup(rbService)
 			visibilityFilter = rbac.NewGatewayVisibilityFilter(func(ctx context.Context, userID string) ([]string, error) {
 				ids, svcErr := rbService.FindGatewayIDsByUserID(ctx, userID)
 				if svcErr != nil {
@@ -65,7 +67,7 @@ func init() {
 				return ids, nil
 			})
 		}
-		gatewayHandler := NewGatewayHandler(Service(envServices), generic.Service(envServices), ownerBinding, visibilityFilter)
+		gatewayHandler := NewGatewayHandler(Service(envServices), generic.Service(envServices), ownerBinding, ownerLookup, visibilityFilter)
 
 		gatewaysRouter := apiV1Router.PathPrefix("/gateways").Subrouter()
 		gatewaysRouter.HandleFunc("", gatewayHandler.List).Methods(http.MethodGet)
@@ -112,5 +114,4 @@ func init() {
 	db.RegisterMigration(migrationAddProvisioningFields())
 	db.RegisterMigration(migrationAddSupervisorImage())
 	db.RegisterMigration(migrationAddCredentialDriver())
-	db.RegisterMigration(migrationAddCreatedBy())
 }

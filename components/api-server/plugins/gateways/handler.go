@@ -26,23 +26,44 @@ type GatewayVisibilityFilter interface {
 	AccessibleGatewayIDs(ctx context.Context, userID string) ([]string, error)
 }
 
+// GatewayOwnerLookup resolves the username of the gateway:owner for a given gateway.
+type GatewayOwnerLookup interface {
+	FindOwnerUsername(ctx context.Context, gatewayID string) (string, error)
+}
+
 var _ handlers.RestHandler = gatewayHandler{}
 
 type gatewayHandler struct {
 	gateway          GatewayService
 	generic          services.GenericService
 	ownerBinding     OwnerBindingCreator
+	ownerLookup      GatewayOwnerLookup
 	visibilityFilter GatewayVisibilityFilter
 }
 
-func NewGatewayHandler(gateway GatewayService, generic services.GenericService, ownerBinding OwnerBindingCreator, visibilityFilter GatewayVisibilityFilter) *gatewayHandler {
+
+func NewGatewayHandler(gateway GatewayService, generic services.GenericService, ownerBinding OwnerBindingCreator, ownerLookup GatewayOwnerLookup, visibilityFilter GatewayVisibilityFilter) *gatewayHandler {
 	return &gatewayHandler{
 		gateway:          gateway,
 		generic:          generic,
 		ownerBinding:     ownerBinding,
+		ownerLookup:      ownerLookup,
 		visibilityFilter: visibilityFilter,
 	}
 }
+
+func (h gatewayHandler) resolveOwnerUsername(ctx context.Context, gatewayID string) string {
+	if h.ownerLookup == nil {
+		return ""
+	}
+	username, err := h.ownerLookup.FindOwnerUsername(ctx, gatewayID)
+	if err != nil {
+		glog.Warningf("failed to resolve owner username for gateway %s: %v", gatewayID, err)
+		return ""
+	}
+	return username
+}
+
 
 func (h gatewayHandler) Create(w http.ResponseWriter, r *http.Request) {
 	var gateway openapi.GatewayCreateRequest
@@ -52,10 +73,6 @@ func (h gatewayHandler) Create(w http.ResponseWriter, r *http.Request) {
 		Action: func() (interface{}, *errors.ServiceError) {
 			ctx := r.Context()
 			gatewayModel := ConvertGateway(gateway)
-
-			if username := auth.GetUsernameFromContext(ctx); username != "" {
-				gatewayModel.CreatedBy = &username
-			}
 
 			gatewayModel, err := h.gateway.Create(ctx, gatewayModel)
 			if err != nil {
@@ -69,7 +86,8 @@ func (h gatewayHandler) Create(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 
-			return PresentGateway(gatewayModel), nil
+			ownerUsername := h.resolveOwnerUsername(ctx, gatewayModel.ID)
+			return PresentGateway(gatewayModel, ownerUsername), nil
 		},
 		ErrorHandler: handlers.HandleError,
 	}
@@ -152,7 +170,8 @@ func (h gatewayHandler) Patch(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				return nil, err
 			}
-			return PresentGateway(gatewayModel), nil
+			ownerUsername := h.resolveOwnerUsername(ctx, gatewayModel.ID)
+			return PresentGateway(gatewayModel, ownerUsername), nil
 		},
 		ErrorHandler: handlers.HandleError,
 	}
@@ -214,7 +233,8 @@ func (h gatewayHandler) List(w http.ResponseWriter, r *http.Request) {
 			}
 
 			for _, gateway := range gateways {
-				converted := PresentGateway(&gateway)
+				ownerUsername := h.resolveOwnerUsername(ctx, gateway.ID)
+				converted := PresentGateway(&gateway, ownerUsername)
 				gatewayList.Items = append(gatewayList.Items, converted)
 			}
 			if listArgs.Fields != nil {
@@ -256,7 +276,8 @@ func (h gatewayHandler) Get(w http.ResponseWriter, r *http.Request) {
 					gateway.ID, gateway.Name, username, userID)
 			}
 
-			return PresentGateway(gateway), nil
+			ownerUsername := h.resolveOwnerUsername(ctx, gateway.ID)
+			return PresentGateway(gateway, ownerUsername), nil
 		},
 	}
 

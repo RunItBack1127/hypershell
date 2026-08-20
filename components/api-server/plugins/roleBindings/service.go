@@ -6,6 +6,7 @@ import (
 
 	"github.com/openshift-online/hypershell/components/api-server/pkg/rbac"
 	"github.com/openshift-online/hypershell/components/api-server/plugins/roles"
+	"github.com/openshift-online/hypershell/components/api-server/plugins/users"
 	"github.com/openshift-online/rh-trex-ai/pkg/api"
 	"github.com/openshift-online/rh-trex-ai/pkg/db"
 	"github.com/openshift-online/rh-trex-ai/pkg/errors"
@@ -21,6 +22,7 @@ type RoleBindingService interface {
 	FindBindingsByUserID(ctx context.Context, userID string) ([]rbac.BindingSummary, error)
 	FindByUserID(ctx context.Context, userID string) (RoleBindingList, *errors.ServiceError)
 	FindGatewayIDsByUserID(ctx context.Context, userID string) ([]string, *errors.ServiceError)
+	FindOwnerUsernameByGatewayID(ctx context.Context, gatewayID string) (string, error)
 	All(ctx context.Context) (RoleBindingList, *errors.ServiceError)
 	FindByIDs(ctx context.Context, ids []string) (RoleBindingList, *errors.ServiceError)
 	SyncJWTRoles(ctx context.Context, userID string, jwtRoles []string) error
@@ -33,12 +35,14 @@ func NewRoleBindingService(
 	lockFactory db.LockFactory,
 	rbDao RoleBindingDao,
 	roleDao roles.RoleDao,
+	userDao users.UserDao,
 	events services.EventService,
 ) RoleBindingService {
 	return &sqlRoleBindingService{
 		lockFactory: lockFactory,
 		rbDao:       rbDao,
 		roleDao:     roleDao,
+		userDao:     userDao,
 		events:      events,
 	}
 }
@@ -49,6 +53,7 @@ type sqlRoleBindingService struct {
 	lockFactory db.LockFactory
 	rbDao       RoleBindingDao
 	roleDao     roles.RoleDao
+	userDao     users.UserDao
 	events      services.EventService
 }
 
@@ -294,6 +299,25 @@ func (s *sqlRoleBindingService) FindGatewayIDsByUserID(ctx context.Context, user
 		return nil, errors.GeneralError("Unable to get gateway IDs for user: %s", err)
 	}
 	return ids, nil
+}
+
+func (s *sqlRoleBindingService) FindOwnerUsernameByGatewayID(ctx context.Context, gatewayID string) (string, error) {
+	ownerRole, roleErr := s.roleDao.GetByName(ctx, roles.RoleGatewayOwner)
+	if roleErr != nil {
+		return "", roleErr
+	}
+	userID, err := s.rbDao.FindOwnerByGatewayID(ctx, gatewayID, ownerRole.ID)
+	if err != nil {
+		return "", fmt.Errorf("find owner binding for gateway %s: %w", gatewayID, err)
+	}
+	if userID == nil {
+		return "", nil
+	}
+	user, err := s.userDao.Get(ctx, *userID)
+	if err != nil {
+		return "", fmt.Errorf("find owner user %s: %w", *userID, err)
+	}
+	return user.Username, nil
 }
 
 func (s *sqlRoleBindingService) All(ctx context.Context) (RoleBindingList, *errors.ServiceError) {

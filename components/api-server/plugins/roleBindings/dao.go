@@ -17,6 +17,7 @@ type RoleBindingDao interface {
 	FindByUserID(ctx context.Context, userID string) (RoleBindingList, error)
 	FindByIDs(ctx context.Context, ids []string) (RoleBindingList, error)
 	FindGatewayIDsByUserID(ctx context.Context, userID string) ([]string, error)
+	FindOwnerByGatewayID(ctx context.Context, gatewayID string, ownerRoleID string) (*string, error)
 	All(ctx context.Context) (RoleBindingList, error)
 }
 
@@ -94,6 +95,22 @@ func (d *sqlRoleBindingDao) FindGatewayIDsByUserID(ctx context.Context, userID s
 		return nil, err
 	}
 	return gatewayIDs, nil
+}
+
+func (d *sqlRoleBindingDao) FindOwnerByGatewayID(ctx context.Context, gatewayID string, ownerRoleID string) (*string, error) {
+	g2 := (*d.sessionFactory).New(ctx)
+	var userID string
+	err := g2.Model(&RoleBinding{}).
+		Where("gateway_id = ? AND role_id = ? AND user_id IS NOT NULL", gatewayID, ownerRoleID).
+		Limit(1).
+		Pluck("user_id", &userID).Error
+	if err != nil {
+		return nil, err
+	}
+	if userID == "" {
+		return nil, nil
+	}
+	return &userID, nil
 }
 
 func (d *sqlRoleBindingDao) All(ctx context.Context) (RoleBindingList, error) {
