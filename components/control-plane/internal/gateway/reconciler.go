@@ -123,8 +123,17 @@ func ReconcileGateway(
 
 	if opts.HasGatewayAPI {
 		if nsConfig.Gateway.Route.Enabled {
+			// Propagate this error rather than logging and swallowing it: the only
+			// hard failures reconcileGatewayAPIResources returns are a TLS-secret
+			// wait timeout and a fail-closed route-intent re-check (its best-effort
+			// console/NetworkPolicy/CA steps log internally and never return). Both
+			// leave a routed gateway without a usable route, so Handle must see the
+			// error and mark the gateway Failed -- a Failed gateway is not phase-
+			// gated, so the next watch event re-provisions and rebuilds the route.
+			// Swallowing it here would strand a partial route the phase gate then
+			// blocks any later event from repairing.
 			if err := reconcileGatewayAPIResources(ctx, dynamicClient, clientset, nsConfig, opts); err != nil {
-				log.Printf("WARN failed to reconcile Gateway API resources in %s: %v", nsConfig.Name, err)
+				return fmt.Errorf("reconcile Gateway API resources in %s: %w", nsConfig.Name, err)
 			}
 		} else {
 			if err := DeleteGatewayAPIResources(ctx, dynamicClient, clientset, nsConfig.Name, opts); err != nil {
