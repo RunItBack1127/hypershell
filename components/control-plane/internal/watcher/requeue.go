@@ -285,7 +285,12 @@ func (q *reconcileQueue[T]) enqueueWithForce(ev Event[T], force bool) {
 
 // knownKeys returns a snapshot of the payloads the queue is currently tracking
 // (one per resource with pending work). The seed uses it to reconcile an
-// authoritative list against what the queue still believes exists.
+// authoritative list against what the queue still believes exists. It is reached
+// only through the gatewaySeedSink interface (whose compile-time assertion lives
+// in watcher.go); golangci's unused analyzer does not trace that dispatch for a
+// generic type, so the nolint below suppresses the false positive.
+//
+//nolint:unused // reached via gatewaySeedSink interface dispatch; see doc above.
 func (q *reconcileQueue[T]) knownKeys() map[string]Event[T] {
 	q.mu.Lock()
 	defer q.mu.Unlock()
