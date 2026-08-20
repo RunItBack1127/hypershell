@@ -82,19 +82,30 @@ func gw(id, phase string) *pb.Gateway {
 	return g
 }
 
-// recordingSink captures what seedGateways does: enqueued events, and the keys it
-// prunes. Its known map seeds knownKeys so absence handling can be exercised.
+// recordingSink captures what seedGateways does: enqueued events, which of them
+// were forced past the phase gate, and the keys it prunes. Its known map seeds
+// knownKeys so absence handling can be exercised.
 type recordingSink struct {
 	enqueued map[string]Event[*pb.Gateway]
+	forced   map[string]bool
 	known    map[string]Event[*pb.Gateway]
 	pruned   []string
 }
 
 func newRecordingSink(known map[string]Event[*pb.Gateway]) *recordingSink {
-	return &recordingSink{enqueued: map[string]Event[*pb.Gateway]{}, known: known}
+	return &recordingSink{
+		enqueued: map[string]Event[*pb.Gateway]{},
+		forced:   map[string]bool{},
+		known:    known,
+	}
 }
 
 func (s *recordingSink) enqueue(ev Event[*pb.Gateway]) { s.enqueued[ev.ResourceID] = ev }
+
+func (s *recordingSink) enqueueForced(ev Event[*pb.Gateway]) {
+	s.enqueued[ev.ResourceID] = ev
+	s.forced[ev.ResourceID] = true
+}
 
 func (s *recordingSink) knownKeys() map[string]Event[*pb.Gateway] { return s.known }
 
@@ -104,10 +115,12 @@ func (s *recordingSink) prune(id string) {
 }
 
 // seedGateways must enqueue every gateway (the LIST half of LIST-then-WATCH) and
-// force only the active, gate-suppressed phases past the phase gate by clearing
-// their phase -- so a restart re-drives a stranded Provisioning/Degraded gateway
-// while healthy Running gateways are left to no-op at the gate (no re-provision
-// flap), and unphased/Failed gateways reconcile normally.
+// force only the active, gate-suppressed phases past the phase gate -- so a
+// restart re-drives a stranded Provisioning/Degraded gateway while healthy
+// Running gateways are left to no-op at the gate (no re-provision flap), and
+// unphased/Failed gateways reconcile normally. The phase bypass is carried by the
+// queue's sticky forced mark (applied at handler time), not baked into the seeded
+// payload, so the seeded payload keeps its phase.
 func TestSeedGateways_ForcesActivePhasesOnly(t *testing.T) {
 	lister := &fakeGatewayLister{items: []*pb.Gateway{
 		gw("prov", "Provisioning"),
@@ -128,23 +141,24 @@ func TestSeedGateways_ForcesActivePhasesOnly(t *testing.T) {
 		t.Fatalf("enqueued %d gateways, want all 5 seeded", len(got))
 	}
 
-	// Forced (recoverable) phases must have their phase cleared so the reconcile
-	// bypasses the gate; the source payload must not be mutated.
-	for _, id := range []string{"prov", "degraded"} {
-		if got[id].Resource.GetPhase() != "" {
-			t.Errorf("%s: phase = %q, want cleared (forced past gate)", id, got[id].Resource.GetPhase())
+	// Active (recoverable) phases must be enqueued forced so the queue bypasses the
+	// gate; every other phase must be enqueued unforced.
+	wantForced := map[string]bool{
+		"prov": true, "degraded": true,
+		"running": false, "failed": false, "nophase": false,
+	}
+	for id, want := range wantForced {
+		if sink.forced[id] != want {
+			t.Errorf("%s: forced = %v, want %v", id, sink.forced[id], want)
 		}
 	}
-	// Non-forced gateways keep their phase (Running/Failed) or remain unphased.
-	if got["running"].Resource.GetPhase() != "Running" {
-		t.Errorf("running: phase = %q, want Running (not forced)", got["running"].Resource.GetPhase())
-	}
-	if got["failed"].Resource.GetPhase() != "Failed" {
-		t.Errorf("failed: phase = %q, want Failed (not forced)", got["failed"].Resource.GetPhase())
-	}
 
-	// Seeding must not corrupt the shared inventory: clearGatewayPhaseForRetry
-	// clones, so the lister's originals keep their phase.
+	// The seeded payload keeps its phase -- the queue clears it at handler time, so
+	// the seed must not have baked a cleared phase into the payload (nor mutated the
+	// shared source).
+	if got["prov"].Resource.GetPhase() != "Provisioning" {
+		t.Errorf("prov: seeded phase = %q, want Provisioning preserved (queue clears at handler time)", got["prov"].Resource.GetPhase())
+	}
 	if lister.items[0].GetPhase() != "Provisioning" {
 		t.Errorf("source gateway mutated: phase = %q, want Provisioning preserved", lister.items[0].GetPhase())
 	}
@@ -167,6 +181,78 @@ func TestSeedGateways_Paginates(t *testing.T) {
 	}
 	if lister.calls < 2 {
 		t.Fatalf("made %d list calls, want >= 2 (pagination)", lister.calls)
+	}
+}
+
+// driftingLister returns a different inventory on successive full list passes, to
+// simulate offset-pagination skew where a concurrent mutation makes one pass omit
+// a still-live gateway. A new full pass is detected by a request for page 1. The
+// last configured pass repeats once exhausted.
+type driftingLister struct {
+	pb.GatewayServiceClient
+	passes [][]*pb.Gateway
+	pass   int
+}
+
+func (f *driftingLister) ListGateways(_ context.Context, in *pb.ListGatewaysRequest, _ ...grpc.CallOption) (*pb.ListGatewaysResponse, error) {
+	if in.Page == 1 {
+		f.pass++
+	}
+	idx := f.pass - 1
+	if idx >= len(f.passes) {
+		idx = len(f.passes) - 1
+	}
+	items := f.passes[idx]
+	// Each pass's inventory fits in a single page for these tests.
+	return &pb.ListGatewaysResponse{
+		Items:    items,
+		Metadata: &pb.ListMeta{Page: in.Page, Size: in.Size, Total: int32(len(items))},
+	}, nil
+}
+
+// seedGateways must not treat a single offset-paginated pass as a complete
+// startup inventory: pagination skew can omit a still-live gateway that, on a
+// fresh process, has no tracked retry and emits no event to recover it. It must
+// keep listing until two consecutive passes agree on the ID set, then seed the
+// stable inventory -- including a gateway an earlier pass skipped.
+func TestSeedGateways_RepeatsUntilInventoryStable(t *testing.T) {
+	lister := &driftingLister{passes: [][]*pb.Gateway{
+		{gw("a", "Running")},                     // pass 1 skips "b" (pagination skew)
+		{gw("a", "Running"), gw("b", "Running")}, // pass 2 sees both
+		{gw("a", "Running"), gw("b", "Running")}, // pass 3 matches pass 2 -> stable
+	}}
+
+	sink := newRecordingSink(nil)
+	if err := seedGateways(context.Background(), lister, sink); err != nil {
+		t.Fatalf("seedGateways: %v", err)
+	}
+
+	if _, ok := sink.enqueued["b"]; !ok {
+		t.Fatal("gateway skipped by the first pass must still be seeded once the inventory stabilizes")
+	}
+	if len(sink.enqueued) != 2 {
+		t.Fatalf("enqueued %d gateways, want 2 (the stable inventory)", len(sink.enqueued))
+	}
+}
+
+// If the inventory never stabilizes (sustained churn), the seed must NOT proceed
+// from an unstable pass: seeding an incomplete inventory could permanently strand
+// a pre-existing gateway, and a healthy stream that never reconnects would never
+// reseed to correct it. It must return an error so watchLoop reconnects and
+// retries the seed, and must not enqueue a partial inventory.
+func TestSeedGateways_ErrorsWhenInventoryNeverStabilizes(t *testing.T) {
+	lister := &driftingLister{passes: [][]*pb.Gateway{
+		{gw("a", "Running")},
+		{gw("b", "Running")},
+		{gw("a", "Running")},
+		{gw("b", "Running")},
+		{gw("a", "Running")},
+		{gw("b", "Running")},
+	}}
+
+	sink := newRecordingSink(nil)
+	if err := seedGateways(context.Background(), lister, sink); err == nil {
+		t.Fatal("seedGateways must error when the inventory never stabilizes, so watchLoop retries")
 	}
 }
 

@@ -255,6 +255,50 @@ func TestReconcileQueue_PendingDeleteNotResurrected(t *testing.T) {
 	time.Sleep(120 * time.Millisecond)
 }
 
+// A forced enqueue (a startup/reconnect seed of an active-phase gateway) must
+// bypass the phase gate on its FIRST handler attempt, and that bypass must survive
+// an equal-version live event overwriting the payload. The forced mark is tracked
+// independently of the payload for exactly this reason: the seed clones the source
+// with the same updated_at, so a same-version live event buffered during the LIST
+// is not version-dropped and overwrites the payload -- yet the transform must
+// still apply (NumRequeues is 0 on the first attempt, so only the forced mark can
+// carry the bypass).
+func TestReconcileQueue_ForcedBypassSurvivesEqualVersionOverwrite(t *testing.T) {
+	h := &recordingHandler{
+		enter:   make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	transform := func(ev Event[string]) Event[string] {
+		ev.Resource = "forced:" + ev.Resource
+		return ev
+	}
+	version := func(_ Event[string]) int64 { return 1 } // all payloads share a version
+
+	q := newReconcileQueue(context.Background(), "Test", h,
+		withRateLimiter[string](fastLimiter()), withWorkers[string](1),
+		withRetryTransform(transform), withVersion(version))
+	defer q.stop()
+
+	// Occupy the single worker so the forced enqueue and the overwriting live event
+	// both land while gw-1 is still pending.
+	q.enqueue(Event[string]{ResourceID: "blocker", Resource: "x"})
+	<-h.enter
+
+	q.enqueueForced(Event[string]{ResourceID: "gw-1", Resource: "seed"})
+	// An equal-version live event overwrites the forced payload. Version coalescing
+	// does not drop it (not strictly older), so the payload becomes "live"; the
+	// bypass must persist regardless.
+	q.enqueue(Event[string]{ResourceID: "gw-1", Resource: "live"})
+
+	h.release <- struct{}{} // release blocker; worker advances to gw-1
+	<-h.enter
+	got := h.lastSeen()
+	h.release <- struct{}{}
+	if got != "forced:live" {
+		t.Fatalf("first attempt saw %q, want %q (forced bypass must survive an equal-version overwrite and apply on the first attempt)", got, "forced:live")
+	}
+}
+
 // A retry must reconcile the latest observed payload, not the one that failed:
 // coalescing to newest desired state is what prevents a stale (e.g. still-routed)
 // payload from being replayed after the resource changed.

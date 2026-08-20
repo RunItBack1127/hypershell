@@ -180,31 +180,52 @@ func WatchGateways(ctx context.Context, conn *grpc.ClientConn, handler Handler[*
 		if _, err := stream.Header(); err != nil {
 			return fmt.Errorf("awaiting gateway watch subscription header: %w", err)
 		}
-		// Seed the queue from the current inventory before processing live events.
-		// The watch stream sends only future events and never replays existing
-		// state on (re)connect, so this LIST is the only path that recovers a
-		// gateway whose reconcile never completed -- e.g. one persisted at
-		// Provisioning when the controller died before creating its workload or
-		// recording a terminal phase. Returning on failure lets watchLoop back off
-		// and retry the seed, rather than watch live traffic while recoverable
-		// gateways stay stranded.
+		// Drain the watch stream concurrently while seeding. The API server's
+		// event broker drops events when its per-subscriber buffer (256 slots)
+		// fills, and seeding -- which performs multiple paginated LISTs plus
+		// point-read confirmations -- can take long enough for that to happen.
+		// If the stream is not read during the seed, dropped events are
+		// permanently lost (the stream never replays them), so a gateway whose
+		// only spec change occurred during the seed window would be stranded.
+		// Draining into the reconcile queue keeps the buffer empty; version-
+		// aware coalescing in the queue ensures a live event and its seed
+		// counterpart converge to the newest state regardless of arrival order.
+		streamErr := make(chan error, 1)
+		go func() {
+			defer close(streamErr)
+			for {
+				event, err := stream.Recv()
+				if err == io.EOF {
+					streamErr <- nil
+					return
+				}
+				if err != nil {
+					streamErr <- fmt.Errorf("receiving gateway event: %w", err)
+					return
+				}
+				rq.enqueue(Event[*pb.Gateway]{
+					Type:       toEventType(event.Type),
+					ResourceID: event.ResourceId,
+					Resource:   event.Gateway,
+				})
+			}
+		}()
+
+		// Seed the queue from the current inventory while the goroutine above
+		// drains live events. The watch stream sends only future events and
+		// never replays existing state on (re)connect, so this LIST is the
+		// only path that recovers a gateway whose reconcile never completed --
+		// e.g. one persisted at Provisioning when the controller died before
+		// creating its workload or recording a terminal phase. A seed failure
+		// is returned so watchLoop backs off and retries the entire connect.
 		if err := seedGateways(ctx, client, rq); err != nil {
 			return err
 		}
-		for {
-			event, err := stream.Recv()
-			if err == io.EOF {
-				return nil
-			}
-			if err != nil {
-				return fmt.Errorf("receiving gateway event: %w", err)
-			}
-			rq.enqueue(Event[*pb.Gateway]{
-				Type:       toEventType(event.Type),
-				ResourceID: event.ResourceId,
-				Resource:   event.Gateway,
-			})
-		}
+
+		// The seed completed; wait for the drain goroutine to finish (stream
+		// error or EOF). Canceling the attempt context (done by watchLoop)
+		// breaks the Recv and lets this return promptly on reconnect.
+		return <-streamErr
 	})
 }
 
@@ -245,13 +266,21 @@ func gatewayEventVersion(ev Event[*pb.Gateway]) int64 {
 const gatewaySeedPageSize = 500
 
 // gatewaySeedSink is the subset of the reconcile queue that seedGateways drives:
-// enqueue a gateway for reconciliation, snapshot the keys the queue still tracks,
-// and prune a key whose resource no longer exists.
+// enqueue a gateway for reconciliation (optionally forcing a phase-gate bypass for
+// recovery), snapshot the keys the queue still tracks, and prune a key whose
+// resource no longer exists.
 type gatewaySeedSink interface {
 	enqueue(Event[*pb.Gateway])
+	enqueueForced(Event[*pb.Gateway])
 	knownKeys() map[string]Event[*pb.Gateway]
 	prune(id string)
 }
+
+// The reconcile queue is the production gatewaySeedSink. This assertion documents
+// that contract and, because reconcileQueue is generic, keeps its seed-only
+// methods (enqueueForced, knownKeys, prune) recognized as used -- the unused
+// linter does not otherwise trace them through the interface for a generic type.
+var _ gatewaySeedSink = (*reconcileQueue[*pb.Gateway])(nil)
 
 // seedGateways lists the current gateway inventory and enqueues every gateway so
 // a controller (re)start re-drives reconciles the watch stream will never replay.
@@ -260,58 +289,56 @@ type gatewaySeedSink interface {
 // its spec later changes.
 //
 // Gateways in a phase the reconciler's phase gate suppresses (Provisioning,
-// Degraded) are seeded with the phase cleared -- the "forced retry for active
-// phases" recovery needs -- so the reconcile actually runs instead of being
-// skipped by the gate. Running gateways are seeded verbatim: their provisioning
-// completed, so they hit the gate and no-op, avoiding a needless re-provision
-// flap on every reconnect. Gateways with no phase (a create whose event was
-// missed while the controller was down) or a terminal Failed phase already pass
-// the gate, so they reconcile normally without forcing.
+// Degraded) are seeded through enqueueForced, which marks the key so the queue
+// clears the phase on the very first handler attempt -- the "forced retry for
+// active phases" recovery needs -- so the reconcile actually runs instead of
+// being skipped by the gate. The mark is sticky and independent of the payload,
+// so a same-version live event buffered during the list cannot overwrite the
+// bypass before it is applied. Running gateways are seeded verbatim: their
+// provisioning completed, so they hit the gate and no-op, avoiding a needless
+// re-provision flap on every reconnect. Gateways with no phase (a create whose
+// event was missed while the controller was down) or a terminal Failed phase
+// already pass the gate, so they reconcile normally without forcing.
 //
-// The list is also authoritative for absence, but only after confirmation. A
-// gateway the queue is still retrying but that the list omits may have been
-// deleted while the stream was disconnected (its delete event was never
-// replayed) -- or it may simply have been skipped by the paginated list, which
-// is not a consistent snapshot: a concurrent create or delete shifts offsets, so
-// a still-live gateway can slide across a page boundary and be missing from the
-// union of pages. Pruning on list-absence alone would cancel that live gateway's
-// only retry. So each omitted, still-tracked gateway is confirmed with a point
-// GetGateway, and pruned only on a NotFound; any other outcome (it still exists,
-// or the confirmation itself failed) leaves the retry in place. Cleanup of any
-// orphaned namespace is left to the NamespaceGCReconciler, which rechecks
-// liveness before it deletes -- safer than synthesizing a delete here. Absence is
-// only trusted after a fully successful list: any page error aborts before
-// pruning.
+// The inventory is gathered with listGatewaysStable, which repeats full passes
+// until two consecutive passes agree on the ID set. Offset pagination is not a
+// consistent snapshot: a concurrent create or delete shifts offsets, so a single
+// pass can silently skip a still-live gateway across a page boundary. On a fresh
+// process that gateway has no tracked retry and emits no event (it pre-existed
+// the watch), so a single-pass seed would strand it. Requiring a stable pass
+// closes that startup gap.
+//
+// The stable inventory is also authoritative for absence, but only after
+// confirmation. A gateway the queue is still retrying but that the inventory
+// omits may have been deleted while the stream was disconnected (its delete event
+// was never replayed) -- or skipped by an unlucky final pass. Pruning on absence
+// alone would cancel a live gateway's only retry, so each omitted, still-tracked
+// gateway is confirmed with a point GetGateway and pruned only on a NotFound; any
+// other outcome (it still exists, or the confirmation itself failed) leaves the
+// retry in place, and a confirmed-live gateway is re-seeded with the payload
+// GetGateway returned. Cleanup of any orphaned namespace is left to the
+// NamespaceGCReconciler, which rechecks liveness before it deletes -- safer than
+// synthesizing a delete here. Absence is only trusted after a successful list:
+// any page error aborts before pruning.
 func seedGateways(ctx context.Context, client pb.GatewayServiceClient, sink gatewaySeedSink) error {
-	listed := make(map[string]struct{})
-	var seeded, forced int
-	for page := int32(1); ; page++ {
-		resp, err := client.ListGateways(ctx, &pb.ListGatewaysRequest{Page: page, Size: gatewaySeedPageSize})
-		if err != nil {
-			return fmt.Errorf("listing gateways to seed reconcile queue: %w", err)
-		}
-		items := resp.GetItems()
-		for _, gw := range items {
-			listed[gw.GetMetadata().GetId()] = struct{}{}
-			if enqueueSeed(sink, gw) {
-				forced++
-			}
-			seeded++
-		}
-		// Stop on the authoritative Total, or a short/empty page (defensive, so a
-		// misreported Total cannot spin forever) -- mirrors listAllGateways.
-		total := int(resp.GetMetadata().GetTotal())
-		if len(items) == 0 || len(items) < gatewaySeedPageSize || (total > 0 && seeded >= total) {
-			break
+	inventory, err := listGatewaysStable(ctx, client)
+	if err != nil {
+		return err
+	}
+	var forced int
+	for _, gw := range inventory {
+		if enqueueSeed(sink, gw) {
+			forced++
 		}
 	}
+	seeded := len(inventory)
 
-	// Prune tracked keys the authoritative list omits -- but confirm each first,
-	// because offset pagination can omit a still-live gateway (see the doc comment).
+	// Prune tracked keys the stable inventory omits -- but confirm each first,
+	// because offset pagination can still omit a live gateway (see the doc comment).
 	// A pending delete is left alone so its teardown still runs.
 	var pruned int
 	for id, ev := range sink.knownKeys() {
-		if _, present := listed[id]; present || ev.Type == EventDeleted {
+		if _, present := inventory[id]; present || ev.Type == EventDeleted {
 			continue
 		}
 		// The list omitted this tracked gateway; confirm it is truly gone with a
@@ -345,9 +372,12 @@ func seedGateways(ctx context.Context, client pb.GatewayServiceClient, sink gate
 
 // enqueueSeed enqueues one gateway as a seed event and reports whether it was
 // forced past the phase gate. A gateway in a gate-suppressed active phase
-// (Provisioning, Degraded) has its phase cleared -- the seed of such a gateway is
-// exactly a forced retry of a reconcile a restart lost -- so the reconcile runs
-// instead of being skipped by the gate. Every other phase is seeded verbatim.
+// (Provisioning, Degraded) is enqueued forced -- the seed of such a gateway is
+// exactly a forced retry of a reconcile a restart lost -- so the queue clears its
+// phase on the first handler attempt and the reconcile runs instead of being
+// skipped by the gate. The phase is cleared by the queue (not baked into the
+// payload here) so a same-version live event that later overwrites the payload
+// cannot strip the bypass. Every other phase is seeded verbatim.
 func enqueueSeed(sink gatewaySeedSink, gw *pb.Gateway) (forced bool) {
 	ev := Event[*pb.Gateway]{
 		Type:       EventUpdated,
@@ -355,11 +385,86 @@ func enqueueSeed(sink gatewaySeedSink, gw *pb.Gateway) (forced bool) {
 		Resource:   gw,
 	}
 	if forceSeedRecovery(gw) {
-		ev = clearGatewayPhaseForRetry(ev)
-		forced = true
+		sink.enqueueForced(ev)
+		return true
 	}
 	sink.enqueue(ev)
-	return forced
+	return false
+}
+
+// listGatewaysStable returns the gateway inventory once two consecutive full
+// list passes agree on the set of IDs. Offset pagination is not a consistent
+// snapshot -- a concurrent create or delete shifts offsets between page fetches,
+// so a single pass can skip a still-live gateway across a page boundary. On a
+// fresh process such a gateway is never seeded and, having pre-existed the watch,
+// emits no event to recover it. Requiring a stable pass makes a skip observable
+// (the ID sets differ) and retried.
+//
+// If the set never settles within maxSeedListPasses (sustained churn), it returns
+// an error rather than seeding from an unstable pass: seeding an incomplete
+// inventory could permanently strand a pre-existing gateway, and a healthy watch
+// stream that never reconnects would never reseed to correct it. The error aborts
+// this connect attempt so watchLoop backs off and retries the whole seed on a
+// fresh stream.
+func listGatewaysStable(ctx context.Context, client pb.GatewayServiceClient) (map[string]*pb.Gateway, error) {
+	const maxSeedListPasses = 5
+	var prevIDs map[string]struct{}
+	for pass := 1; pass <= maxSeedListPasses; pass++ {
+		current, err := listGatewaysOnce(ctx, client)
+		if err != nil {
+			return nil, err
+		}
+		ids := make(map[string]struct{}, len(current))
+		for id := range current {
+			ids[id] = struct{}{}
+		}
+		if prevIDs != nil && sameIDSet(prevIDs, ids) {
+			return current, nil
+		}
+		prevIDs = ids
+	}
+	return nil, fmt.Errorf("gateway inventory did not stabilize after %d list passes; deferring seed so the watch reconnects and retries", maxSeedListPasses)
+}
+
+// listGatewaysOnce performs a single paginated pass over the gateway inventory,
+// returning it keyed by ID (which also dedupes an item a concurrent create caused
+// to appear on two pages).
+func listGatewaysOnce(ctx context.Context, client pb.GatewayServiceClient) (map[string]*pb.Gateway, error) {
+	inventory := make(map[string]*pb.Gateway)
+	for page := int32(1); ; page++ {
+		resp, err := client.ListGateways(ctx, &pb.ListGatewaysRequest{Page: page, Size: gatewaySeedPageSize})
+		if err != nil {
+			return nil, fmt.Errorf("listing gateways to seed reconcile queue: %w", err)
+		}
+		items := resp.GetItems()
+		for _, gw := range items {
+			inventory[gw.GetMetadata().GetId()] = gw
+		}
+		// Stop on the authoritative Total, or a short/empty page (defensive, so a
+		// misreported Total cannot spin forever) -- mirrors listAllGateways. The
+		// Total comparison uses the UNIQUE inventory count, not the raw rows seen:
+		// a concurrent delete can shift a row so the same gateway appears on two
+		// pages, and counting raw rows would let that duplicate reach Total while a
+		// distinct gateway is still missing -- exactly the omission this guards.
+		total := int(resp.GetMetadata().GetTotal())
+		if len(items) == 0 || len(items) < gatewaySeedPageSize || (total > 0 && len(inventory) >= total) {
+			break
+		}
+	}
+	return inventory, nil
+}
+
+// sameIDSet reports whether two ID sets are equal.
+func sameIDSet(a, b map[string]struct{}) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for id := range a {
+		if _, ok := b[id]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // forceSeedRecovery reports whether a seeded gateway must bypass the phase gate

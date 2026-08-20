@@ -77,6 +77,16 @@ type reconcileQueue[T any] struct {
 
 	mu     sync.Mutex
 	latest map[string]Event[T]
+	// forced is a sticky per-key recovery bit set by enqueueForced. It marks a key
+	// whose next real handler attempt must run through retryTransform even on its
+	// first attempt (NumRequeues == 0), so a forced payload (e.g. a startup seed of
+	// an active-phase gateway) bypasses the reconciler's phase gate. It is tracked
+	// independently of latest: a live event can coalesce a newer payload over the
+	// seed's -- even one with an equal version that overwrites the phase-cleared
+	// clone -- without erasing the bypass, because the bit, not the payload, drives
+	// the transform. It is cleared only when an actual handler attempt consumes it
+	// (or the key is pruned), never by a mere backoff re-defer.
+	forced map[string]bool
 	// notBefore is the earliest time a failed key may be handled again. It defends
 	// the AddRateLimited backoff against client-go's dirty-key semantics: the
 	// reconciler's own phase-status writes emit watch events that Add (mark dirty)
@@ -134,6 +144,7 @@ func newReconcileQueue[T any](baseCtx context.Context, kind string, handler Hand
 		limiter:   limiter,
 		queue:     workqueue.NewTypedRateLimitingQueue(limiter),
 		latest:    make(map[string]Event[T]),
+		forced:    make(map[string]bool),
 		notBefore: make(map[string]time.Time),
 		stopCh:    make(chan struct{}),
 	}
@@ -160,6 +171,21 @@ func newReconcileQueue[T any](baseCtx context.Context, kind string, handler Hand
 // enqueue records the latest payload for a resource and schedules it for
 // reconciliation, coalescing with any pending work for the same resource.
 func (q *reconcileQueue[T]) enqueue(ev Event[T]) {
+	q.enqueueWithForce(ev, false)
+}
+
+// enqueueForced is enqueue plus a sticky recovery mark (see the forced field): the
+// key's next real handler attempt runs through retryTransform even on its first
+// attempt, so a forced payload bypasses a caller's phase gate. The mark survives
+// later coalescing -- including an equal-version live event that overwrites the
+// forced payload -- so the bypass is not lost before it is applied. A forced
+// enqueue that is itself dropped (e.g. blocked by a pending terminal delete) does
+// not set the mark, so a resource mid-deletion is not force-recovered.
+func (q *reconcileQueue[T]) enqueueForced(ev Event[T]) {
+	q.enqueueWithForce(ev, true)
+}
+
+func (q *reconcileQueue[T]) enqueueWithForce(ev Event[T], force bool) {
 	q.mu.Lock()
 	// A delete always wins: overwrite whatever is pending and schedule it. For a
 	// non-delete, guard the pending payload before overwriting it.
@@ -177,6 +203,9 @@ func (q *reconcileQueue[T]) enqueue(ev Event[T]) {
 			// Version-aware coalescing: drop an event older than the pending payload
 			// so a stale snapshot never clobbers newer live state (and vice versa).
 			// The newer payload is already queued, so there is nothing to schedule.
+			// Equal versions do NOT drop -- but the forced bit below, not the
+			// payload, carries a seed's phase-gate bypass, so an equal-version live
+			// event overwriting the payload cannot erase the recovery.
 			if q.versionOf != nil && q.versionOf(ev) < q.versionOf(prev) {
 				q.mu.Unlock()
 				return
@@ -184,6 +213,9 @@ func (q *reconcileQueue[T]) enqueue(ev Event[T]) {
 		}
 	}
 	q.latest[ev.ResourceID] = ev
+	if force {
+		q.forced[ev.ResourceID] = true
+	}
 	q.mu.Unlock()
 	q.queue.Add(ev.ResourceID)
 }
@@ -209,6 +241,7 @@ func (q *reconcileQueue[T]) prune(id string) {
 	q.mu.Lock()
 	delete(q.latest, id)
 	delete(q.notBefore, id)
+	delete(q.forced, id)
 	q.mu.Unlock()
 }
 
@@ -249,6 +282,15 @@ func (q *reconcileQueue[T]) processNext() bool {
 
 	q.mu.Lock()
 	ev, ok := q.latest[id]
+	// Consume the forced bypass atomically with the payload snapshot: reading and
+	// clearing the mark under one lock closes the window in which a forced enqueue
+	// landing after this point (which also re-adds the key) would be erased by a
+	// separate, later clear. Such an enqueue instead re-sets the mark and is
+	// honored on the next attempt. This real handler attempt below consumes the
+	// mark; a failure requeues with NumRequeues>0, which keeps transforming, so
+	// recovery still persists across retries.
+	forced := q.forced[id]
+	delete(q.forced, id)
 	q.mu.Unlock()
 	if !ok {
 		// No payload recorded (e.g. a delete already reconciled and pruned it).
@@ -259,9 +301,11 @@ func (q *reconcileQueue[T]) processNext() bool {
 
 	// A requeued attempt is out-of-band recovery for an earlier failure; let the
 	// caller adapt the payload (gateways clear the phase so recovery bypasses the
-	// phase gate). First attempts run untransformed so the gate still governs
-	// ordinary create/update traffic.
-	if q.retryTransform != nil && q.queue.NumRequeues(id) > 0 {
+	// phase gate). A forced key gets the same transform on its first attempt so a
+	// startup/reconnect seed of an active-phase gateway bypasses the gate even
+	// though NumRequeues is 0. Ordinary first attempts run untransformed so the
+	// gate still governs ordinary create/update traffic.
+	if q.retryTransform != nil && (forced || q.queue.NumRequeues(id) > 0) {
 		ev = q.retryTransform(ev)
 	}
 
