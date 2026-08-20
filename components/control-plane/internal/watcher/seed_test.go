@@ -109,9 +109,20 @@ func (s *recordingSink) enqueueForced(ev Event[*pb.Gateway]) {
 
 func (s *recordingSink) knownKeys() map[string]Event[*pb.Gateway] { return s.known }
 
-func (s *recordingSink) prune(id string) {
+func (s *recordingSink) pruneIfNonDelete(id string, snapshot Event[*pb.Gateway]) bool {
+	cur, ok := s.known[id]
+	if !ok {
+		return false
+	}
+	if cur.Type == EventDeleted {
+		return false
+	}
+	if cur.Type != snapshot.Type {
+		return false
+	}
 	s.pruned = append(s.pruned, id)
 	delete(s.known, id)
+	return true
 }
 
 // seedGateways must enqueue every gateway (the LIST half of LIST-then-WATCH) and

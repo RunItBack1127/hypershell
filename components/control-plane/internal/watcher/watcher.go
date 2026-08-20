@@ -163,7 +163,13 @@ func WatchGateways(ctx context.Context, conn *grpc.ClientConn, handler Handler[*
 		withVersion(gatewayEventVersion))
 	defer rq.stop()
 	return watchLoop(ctx, "Gateway", func(ctx context.Context) error {
-		stream, err := client.WatchGateways(ctx, &pb.WatchGatewaysRequest{})
+		// Derive a cancelable child before creating the stream so either the
+		// receiver or the seed can cancel and join the other without waiting
+		// for watchLoop to cancel the parent attempt ctx.
+		runCtx, runCancel := context.WithCancel(ctx)
+		defer runCancel()
+
+		stream, err := client.WatchGateways(runCtx, &pb.WatchGatewaysRequest{})
 		if err != nil {
 			return fmt.Errorf("starting gateway watch: %w", err)
 		}
@@ -190,16 +196,26 @@ func WatchGateways(ctx context.Context, conn *grpc.ClientConn, handler Handler[*
 		// Draining into the reconcile queue keeps the buffer empty; version-
 		// aware coalescing in the queue ensures a live event and its seed
 		// counterpart converge to the newest state regardless of arrival order.
+
 		streamErr := make(chan error, 1)
 		go func() {
 			defer close(streamErr)
 			for {
 				event, err := stream.Recv()
 				if err == io.EOF {
+					// Cancel BEFORE publishing the result: the seed path classifies
+					// itself as the root cause only when runCtx is still live, so if
+					// the send landed first there would be a scheduler window where a
+					// concurrently-returning seed sees runCtx live, self-cancels, and
+					// masks this receiver termination. The channel is buffered, so
+					// canceling first cannot block. Ordering holds for the error
+					// branch below for the same reason.
+					runCancel()
 					streamErr <- nil
 					return
 				}
 				if err != nil {
+					runCancel()
 					streamErr <- fmt.Errorf("receiving gateway event: %w", err)
 					return
 				}
@@ -216,15 +232,35 @@ func WatchGateways(ctx context.Context, conn *grpc.ClientConn, handler Handler[*
 		// never replays existing state on (re)connect, so this LIST is the
 		// only path that recovers a gateway whose reconcile never completed --
 		// e.g. one persisted at Provisioning when the controller died before
-		// creating its workload or recording a terminal phase. A seed failure
-		// is returned so watchLoop backs off and retries the entire connect.
-		if err := seedGateways(ctx, client, rq); err != nil {
+		// creating its workload or recording a terminal phase. runCtx ties
+		// the seed to the receiver: a Recv error cancels runCtx, aborting the
+		// seed's in-flight RPCs so mutations during the dead window are not
+		// masked by an unchanged stable ID set.
+		if err := seedGateways(runCtx, client, rq); err != nil {
+			// Distinguish two causes so a genuine seed failure is never masked by
+			// the cancellation we would cause ourselves. If runCtx is already
+			// canceled, the receiver ended first (its Recv error/EOF canceled
+			// runCtx, which in turn aborted the seed's in-flight RPCs): the
+			// receiver is the root cause, so join it and prefer its error. If
+			// runCtx is still live, the seed failed on its own (a real List/Get
+			// error): cancel the receiver so its Recv unblocks, join it, and
+			// return the seed error -- the receiver's error is only the
+			// cancellation we just triggered.
+			if runCtx.Err() != nil {
+				recvErr := <-streamErr
+				if recvErr != nil {
+					return recvErr
+				}
+				return err
+			}
+			runCancel()
+			<-streamErr
 			return err
 		}
 
 		// The seed completed; wait for the drain goroutine to finish (stream
-		// error or EOF). Canceling the attempt context (done by watchLoop)
-		// breaks the Recv and lets this return promptly on reconnect.
+		// error or EOF). runCancel (via defer) or watchLoop canceling the
+		// parent attempt ctx breaks the Recv and lets this return promptly.
 		return <-streamErr
 	})
 }
@@ -268,18 +304,20 @@ const gatewaySeedPageSize = 500
 // gatewaySeedSink is the subset of the reconcile queue that seedGateways drives:
 // enqueue a gateway for reconciliation (optionally forcing a phase-gate bypass for
 // recovery), snapshot the keys the queue still tracks, and prune a key whose
-// resource no longer exists.
+// resource no longer exists -- but only if the current entry is still a non-delete
+// event, so a delete enqueued by the concurrent watch receiver is preserved.
 type gatewaySeedSink interface {
 	enqueue(Event[*pb.Gateway])
 	enqueueForced(Event[*pb.Gateway])
 	knownKeys() map[string]Event[*pb.Gateway]
-	prune(id string)
+	pruneIfNonDelete(id string, snapshot Event[*pb.Gateway]) bool
 }
 
 // The reconcile queue is the production gatewaySeedSink. This assertion documents
 // that contract and, because reconcileQueue is generic, keeps its seed-only
-// methods (enqueueForced, knownKeys, prune) recognized as used -- the unused
-// linter does not otherwise trace them through the interface for a generic type.
+// methods (enqueueForced, knownKeys, pruneIfNonDelete) recognized as used -- the
+// unused linter does not otherwise trace them through the interface for a generic
+// type.
 var _ gatewaySeedSink = (*reconcileQueue[*pb.Gateway])(nil)
 
 // seedGateways lists the current gateway inventory and enqueues every gateway so
@@ -335,9 +373,13 @@ func seedGateways(ctx context.Context, client pb.GatewayServiceClient, sink gate
 
 	// Prune tracked keys the stable inventory omits -- but confirm each first,
 	// because offset pagination can still omit a live gateway (see the doc comment).
-	// A pending delete is left alone so its teardown still runs.
+	// Any EventDeleted entry is skipped: a pending delete (from the snapshot or
+	// enqueued concurrently by the receiver) is left alone so its teardown still
+	// runs, and a terminal tombstone left by a completed delete is inert and must
+	// persist to keep blocking a stale non-delete resurrection.
 	var pruned int
-	for id, ev := range sink.knownKeys() {
+	knownSnapshot := sink.knownKeys()
+	for id, ev := range knownSnapshot {
 		if _, present := inventory[id]; present || ev.Type == EventDeleted {
 			continue
 		}
@@ -351,9 +393,13 @@ func seedGateways(ctx context.Context, client pb.GatewayServiceClient, sink gate
 				log.Printf("WARN could not confirm gateway %s absence during seed; keeping its retry: %v", id, err)
 				continue
 			}
-			// NotFound: the gateway really is gone. Prune its stale retry.
-			sink.prune(id)
-			pruned++
+			// NotFound: the gateway really is gone. pruneIfNonDelete checks the
+			// current queue entry under the lock: if the concurrent receiver
+			// enqueued a delete (or a newer update) after the knownKeys snapshot,
+			// that entry is preserved so its teardown still runs.
+			if sink.pruneIfNonDelete(id, ev) {
+				pruned++
+			}
 			continue
 		}
 		// The gateway still exists; the paginated list just missed it. Re-seed it

@@ -430,3 +430,323 @@ func TestReconcileQueue_ContextCancelShutsDown(t *testing.T) {
 		t.Fatal("stop did not return after context cancel; workers leaked")
 	}
 }
+
+// When a version-dropped forced seed is discarded, the force mark must propagate
+// onto the retained newer payload regardless of that payload's phase -- the seed
+// itself proves startup recovery was requested, and the retained phase is not
+// authoritative (the independent GatewayHealthReconciler may have written a newer
+// Running while the provisioning Handle is still failing). The retained payload
+// here plays the role of a newer Running that a naive "phase clears force" rule
+// would wrongly let strand the recovery. The key must also be (re)scheduled (Add)
+// because the retained payload may already have been processed and dropped from
+// the queue -- without the Add the force mark would be orphaned.
+func TestReconcileQueue_ForcePropagatesBehindNewerRetainedPayload(t *testing.T) {
+	h := &recordingHandler{
+		enter:   make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	transform := func(ev Event[string]) Event[string] {
+		ev.Resource = "forced:" + ev.Resource
+		return ev
+	}
+	version := func(ev Event[string]) int64 {
+		v := map[string]int64{"old-seed": 1, "newer-running": 2}
+		return v[ev.Resource]
+	}
+	q := newReconcileQueue(context.Background(), "Test", h,
+		withRateLimiter[string](fastLimiter()), withWorkers[string](1),
+		withRetryTransform(transform), withVersion(version))
+	defer q.stop()
+
+	// Occupy the worker so coalescing is visible.
+	q.enqueue(Event[string]{ResourceID: "blocker", Resource: "x"})
+	<-h.enter
+
+	// A newer Running-like payload arrives first.
+	q.enqueue(Event[string]{ResourceID: "gw-1", Resource: "newer-running"})
+	// An older forced seed is version-dropped but must still propagate force.
+	q.enqueueForced(Event[string]{ResourceID: "gw-1", Resource: "old-seed"})
+
+	h.release <- struct{}{} // release blocker; worker advances to gw-1
+	<-h.enter
+	got := h.lastSeen()
+	h.release <- struct{}{}
+
+	if got != "forced:newer-running" {
+		t.Fatalf("first attempt saw %q, want %q (force must propagate onto the retained newer payload regardless of phase)", got, "forced:newer-running")
+	}
+}
+
+// A strictly newer non-delete payload must NOT erase an existing force mark. The
+// phase it carries (e.g. Running) is written independently by the health
+// reconciler and does not prove the forced recovery's Handle succeeded; clearing
+// force here could strand a failed reconcile behind the phase gate. The mark must
+// survive and still transform the coalesced newer payload on the first attempt.
+func TestReconcileQueue_NewerRunningDoesNotEraseForce(t *testing.T) {
+	h := &recordingHandler{
+		enter:   make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	transform := func(ev Event[string]) Event[string] {
+		ev.Resource = "forced:" + ev.Resource
+		return ev
+	}
+	version := func(ev Event[string]) int64 {
+		v := map[string]int64{"seed": 1, "running": 2}
+		return v[ev.Resource]
+	}
+	q := newReconcileQueue(context.Background(), "Test", h,
+		withRateLimiter[string](fastLimiter()), withWorkers[string](1),
+		withRetryTransform(transform), withVersion(version))
+	defer q.stop()
+
+	// Occupy the worker.
+	q.enqueue(Event[string]{ResourceID: "blocker", Resource: "x"})
+	<-h.enter
+
+	// Forced seed arrives, then a strictly newer Running payload coalesces in. The
+	// force mark must survive so recovery still bypasses the phase gate.
+	q.enqueueForced(Event[string]{ResourceID: "gw-1", Resource: "seed"})
+	q.enqueue(Event[string]{ResourceID: "gw-1", Resource: "running"})
+
+	h.release <- struct{}{} // release blocker
+	<-h.enter
+	got := h.lastSeen()
+	h.release <- struct{}{}
+
+	if got != "forced:running" {
+		t.Fatalf("first attempt saw %q, want %q (a newer Running payload must not erase the force mark)", got, "forced:running")
+	}
+}
+
+// Force propagation on a version-drop must schedule the key (queue.Add) so the
+// forced recovery is actually processed. Without the Add, a key whose retained
+// payload was already handled could sit in q.latest with a forced mark that is
+// never consumed.
+func TestReconcileQueue_ForcePropagationSchedulesKey(t *testing.T) {
+	h := &recordingHandler{}
+	version := func(ev Event[string]) int64 {
+		v := map[string]int64{"newer": 2, "older-seed": 1}
+		return v[ev.Resource]
+	}
+	transform := func(ev Event[string]) Event[string] {
+		ev.Resource = "forced:" + ev.Resource
+		return ev
+	}
+	q := newReconcileQueue(context.Background(), "Test", h,
+		withRateLimiter[string](fastLimiter()), withWorkers[string](1),
+		withRetryTransform(transform), withVersion(version))
+	defer q.stop()
+
+	// Enqueue and let the worker process "newer" normally (no force).
+	q.enqueue(Event[string]{ResourceID: "gw-1", Resource: "newer"})
+	waitForCount(t, h, 1)
+
+	// Now enqueue a version-dropped forced seed. The payload stays "newer" but
+	// the force mark must propagate AND the key must be re-scheduled.
+	q.enqueueForced(Event[string]{ResourceID: "gw-1", Resource: "older-seed"})
+	waitForCount(t, h, 2)
+
+	h.mu.Lock()
+	got := h.seen[1]
+	h.mu.Unlock()
+
+	if got != "forced:newer" {
+		t.Fatalf("second attempt saw %q, want %q (force propagation must re-schedule the key)", got, "forced:newer")
+	}
+}
+
+// pruneIfNonDelete must skip a key whose version differs from the snapshot --
+// a newer payload enqueued by the concurrent receiver after the knownKeys
+// snapshot must not be erased.
+func TestReconcileQueue_PruneIfNonDeleteSkipsNewerVersion(t *testing.T) {
+	version := func(ev Event[string]) int64 {
+		v := map[string]int64{"old": 1, "new": 2}
+		return v[ev.Resource]
+	}
+	q := newReconcileQueue(context.Background(), "Test", &recordingHandler{},
+		withRateLimiter[string](fastLimiter()), withWorkers[string](0),
+		withVersion(version))
+	defer q.stop()
+
+	// Set up a tracked key with a newer version than the snapshot.
+	q.mu.Lock()
+	q.latest["gw-1"] = Event[string]{Type: EventUpdated, ResourceID: "gw-1", Resource: "new"}
+	q.mu.Unlock()
+
+	snapshot := Event[string]{Type: EventUpdated, ResourceID: "gw-1", Resource: "old"}
+	if q.pruneIfNonDelete("gw-1", snapshot) {
+		t.Fatal("pruneIfNonDelete must skip when current version differs from snapshot")
+	}
+
+	q.mu.Lock()
+	_, stillPresent := q.latest["gw-1"]
+	q.mu.Unlock()
+	if !stillPresent {
+		t.Fatal("the newer entry must not have been erased")
+	}
+}
+
+// pruneIfNonDelete must skip a pending delete even if versions match.
+func TestReconcileQueue_PruneIfNonDeleteSkipsPendingDelete(t *testing.T) {
+	q := newReconcileQueue(context.Background(), "Test", &recordingHandler{},
+		withRateLimiter[string](fastLimiter()), withWorkers[string](0))
+	defer q.stop()
+
+	q.mu.Lock()
+	q.latest["gw-1"] = Event[string]{Type: EventDeleted, ResourceID: "gw-1", Resource: "v1"}
+	q.mu.Unlock()
+
+	snapshot := Event[string]{Type: EventUpdated, ResourceID: "gw-1", Resource: "v1"}
+	if q.pruneIfNonDelete("gw-1", snapshot) {
+		t.Fatal("pruneIfNonDelete must not prune a pending delete")
+	}
+}
+
+// A delete clears any pending force mark so a deleted gateway is not
+// force-recovered after re-creation.
+func TestReconcileQueue_DeleteClearsForce(t *testing.T) {
+	h := &recordingHandler{
+		enter:   make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	q := newReconcileQueue(context.Background(), "Test", h,
+		withRateLimiter[string](fastLimiter()), withWorkers[string](1))
+	defer q.stop()
+
+	// Occupy the worker.
+	q.enqueue(Event[string]{ResourceID: "blocker", Resource: "x"})
+	<-h.enter
+
+	q.enqueueForced(Event[string]{ResourceID: "gw-1", Resource: "seed"})
+	q.enqueue(Event[string]{Type: EventDeleted, ResourceID: "gw-1", Resource: "gone"})
+
+	q.mu.Lock()
+	forced := q.forced["gw-1"]
+	evType := q.latest["gw-1"].Type
+	q.mu.Unlock()
+
+	h.release <- struct{}{}
+	// Drain remaining work.
+	go func() {
+		for {
+			select {
+			case <-h.enter:
+				h.release <- struct{}{}
+			case <-time.After(100 * time.Millisecond):
+				return
+			}
+		}
+	}()
+	time.Sleep(120 * time.Millisecond)
+
+	if forced {
+		t.Fatal("delete must clear the forced mark")
+	}
+	if evType != EventDeleted {
+		t.Fatalf("pending event type = %v, want EventDeleted", evType)
+	}
+}
+
+// waitForTombstone polls until the key collapses to a terminal tombstone
+// (EventDeleted with a zeroed payload), failing the test if it does not.
+func waitForTombstone(t *testing.T, q *reconcileQueue[string], id string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		q.mu.Lock()
+		cur, ok := q.latest[id]
+		q.mu.Unlock()
+		if ok && cur.Type == EventDeleted && cur.Resource == "" {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("key %s never collapsed to a terminal tombstone", id)
+}
+
+// After a delete's teardown succeeds the queue leaves a terminal tombstone, and a
+// stale forced seed (captured before the delete, so lower version) arriving later
+// must be fully rejected: it cannot resurrect the gateway, replace the tombstone,
+// or set the forced recovery bit. Without the tombstone, removing the key would
+// let this seed find no pending delete and re-provision a gateway that is gone.
+func TestReconcileQueue_TombstoneBlocksStaleForcedSeedAfterDelete(t *testing.T) {
+	h := &recordingHandler{}
+	transform := func(ev Event[string]) Event[string] {
+		ev.Resource = "forced:" + ev.Resource
+		return ev
+	}
+	version := func(ev Event[string]) int64 {
+		v := map[string]int64{"gone": 2, "stale-seed": 1}
+		return v[ev.Resource]
+	}
+	q := newReconcileQueue(context.Background(), "Test", h,
+		withRateLimiter[string](fastLimiter()), withWorkers[string](1),
+		withRetryTransform(transform), withVersion(version))
+	defer q.stop()
+
+	// Handle a delete to completion; the queue must leave a terminal tombstone.
+	q.enqueue(Event[string]{Type: EventDeleted, ResourceID: "gw-1", Resource: "gone"})
+	waitForCount(t, h, 1)
+	waitForTombstone(t, q, "gw-1")
+
+	// A stale forced seed (older version, captured before the delete) arrives.
+	q.enqueueForced(Event[string]{Type: EventUpdated, ResourceID: "gw-1", Resource: "stale-seed"})
+
+	q.mu.Lock()
+	forced := q.forced["gw-1"]
+	cur := q.latest["gw-1"]
+	q.mu.Unlock()
+	if forced {
+		t.Fatal("a stale forced seed after a completed delete must not set the forced bit")
+	}
+	if cur.Type != EventDeleted || cur.Resource != "" {
+		t.Fatalf("tombstone replaced: got type=%v resource=%q, want EventDeleted with a zeroed payload", cur.Type, cur.Resource)
+	}
+
+	// Give any errant reschedule a chance to run, then confirm the handler never
+	// saw the seed -- no resurrection or recovery attempt.
+	time.Sleep(50 * time.Millisecond)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, s := range h.seen {
+		if s == "stale-seed" || s == "forced:stale-seed" {
+			t.Fatalf("handler saw %q; a stale seed after a completed delete must not resurrect the gateway", s)
+		}
+	}
+}
+
+// A duplicate/replayed delete that coalesces in while the first delete is being
+// handled is fresh pending work: it must NOT be collapsed to a zeroed tombstone
+// (its handler needs the payload to tear down), and must be reprocessed with its
+// full payload. This runs with NO version callback so the two deletes are
+// version-equal -- the case the old version-equality guard got wrong; the
+// accepted-payload generation must detect the duplicate regardless.
+func TestReconcileQueue_DuplicateDeleteRetainsPayload(t *testing.T) {
+	h := &recordingHandler{
+		enter:   make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	q := newReconcileQueue(context.Background(), "Test", h,
+		withRateLimiter[string](fastLimiter()), withWorkers[string](1))
+	defer q.stop()
+
+	// First delete enters Handle and is held in-flight.
+	q.enqueue(Event[string]{Type: EventDeleted, ResourceID: "gw-1", Resource: "del-first"})
+	<-h.enter
+
+	// A replayed duplicate delete (same version -- there is no versionOf) coalesces
+	// in while the first is still handling.
+	q.enqueue(Event[string]{Type: EventDeleted, ResourceID: "gw-1", Resource: "del-second"})
+
+	h.release <- struct{}{} // first delete's Handle returns nil
+
+	// The worker must reprocess the duplicate with its full payload, not a zeroed
+	// tombstone.
+	<-h.enter
+	got := h.lastSeen()
+	h.release <- struct{}{}
+	if got != "del-second" {
+		t.Fatalf("reprocessed delete saw %q, want the duplicate's full payload %q", got, "del-second")
+	}
+}
