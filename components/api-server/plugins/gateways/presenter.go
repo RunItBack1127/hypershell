@@ -61,6 +61,7 @@ func PresentGateway(gateway *Gateway) openapi.Gateway {
 		Route:            gateway.Route,
 		DatabaseConfig:   gateway.DatabaseConfig,
 		CredentialDriver: gateway.CredentialDriver,
+		CreatedBy:        gateway.CreatedBy,
 	}
 
 	if gateway.ServerDnsNames != nil {

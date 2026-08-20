@@ -94,3 +94,20 @@ func migrationAddSupervisorImage() *gormigrate.Migration {
 		},
 	}
 }
+
+func migrationAddCreatedBy() *gormigrate.Migration {
+	type Gateway struct {
+		db.Model
+		CreatedBy *string
+	}
+
+	return &gormigrate.Migration{
+		ID: "2026081912000001",
+		Migrate: func(tx *gorm.DB) error {
+			return tx.AutoMigrate(&Gateway{})
+		},
+		Rollback: func(tx *gorm.DB) error {
+			return tx.Migrator().DropColumn(&Gateway{}, "created_by")
+		},
+	}
+}

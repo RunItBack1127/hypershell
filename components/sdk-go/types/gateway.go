@@ -14,6 +14,7 @@ type Gateway struct {
 	ObjectReference
 
 	ClusterID string `json:"cluster_id"`
+	CreatedBy string `json:"created_by,omitempty"`
 	DatabaseConfig string `json:"database_config,omitempty"`
 	DatabaseID string `json:"database_id"`
 	ExternalDNS string `json:"external_dns,omitempty"`

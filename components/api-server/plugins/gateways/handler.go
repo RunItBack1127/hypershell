@@ -52,6 +52,11 @@ func (h gatewayHandler) Create(w http.ResponseWriter, r *http.Request) {
 		Action: func() (interface{}, *errors.ServiceError) {
 			ctx := r.Context()
 			gatewayModel := ConvertGateway(gateway)
+
+			if username := auth.GetUsernameFromContext(ctx); username != "" {
+				gatewayModel.CreatedBy = &username
+			}
+
 			gatewayModel, err := h.gateway.Create(ctx, gatewayModel)
 			if err != nil {
 				return nil, err

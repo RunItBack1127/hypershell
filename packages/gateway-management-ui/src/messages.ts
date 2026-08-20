@@ -182,6 +182,11 @@ export const messages = defineMessages({
     defaultMessage: "Created",
     description: "Heading for a resource creation date column.",
   },
+  createdBy: {
+    id: "app.table.column.createdBy",
+    defaultMessage: "Created by",
+    description: "Label for the user who created a resource.",
+  },
   deleteGateway: {
     id: "app.gateway.delete",
     defaultMessage: "Delete gateway",

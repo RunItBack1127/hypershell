@@ -395,6 +395,10 @@
     "defaultMessage": "Created",
     "description": "Heading for a resource creation date column."
   },
+  "app.table.column.createdBy": {
+    "defaultMessage": "Created by",
+    "description": "Label for the user who created a resource."
+  },
   "app.table.column.status": {
     "defaultMessage": "Status",
     "description": "Heading for a resource status column."

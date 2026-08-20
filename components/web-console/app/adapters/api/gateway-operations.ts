@@ -99,6 +99,7 @@ function toGatewayRecord(gateway: Gateway): GatewayRecord {
   return {
     clusterId: gateway.cluster_id,
     ...(gateway.created_at ? { createdAt: gateway.created_at } : {}),
+    ...(gateway.created_by ? { createdBy: gateway.created_by } : {}),
     databaseId: gateway.database_id,
     externalDns:
       gateway.external_dns || endpointFromRouteAddress(gateway.route_address),

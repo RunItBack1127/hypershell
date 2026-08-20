@@ -283,6 +283,10 @@ components:
             credential_driver:
               type: string
               description: JSON-encoded credential storage driver configuration
+            created_by:
+              type: string
+              readOnly: true
+              description: Username of the user who created this gateway
     GatewayCreateRequest:
       type: object
       required:

@@ -32,6 +32,7 @@ type Gateway struct {
 	Route            *string `json:"route" gorm:"type:jsonb"`
 	DatabaseConfig   *string `json:"database_config" gorm:"type:jsonb"`
 	CredentialDriver *string `json:"credential_driver" gorm:"type:jsonb"`
+	CreatedBy        *string `json:"created_by"`
 }
 
 type GatewayList []*Gateway

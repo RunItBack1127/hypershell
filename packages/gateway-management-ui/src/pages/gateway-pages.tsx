@@ -367,6 +367,13 @@ export function GatewaysPage({
       width: 15,
     },
     {
+      id: "createdBy",
+      label: intl.formatMessage(messages.createdBy),
+      render: ({ createdBy }) =>
+        createdBy ?? intl.formatMessage(messages.notAvailable),
+      width: 15,
+    },
+    {
       id: "endpoint",
       label: intl.formatMessage(messages.gatewayEndpoint),
       render: ({ endpoint }) => (
@@ -644,6 +651,16 @@ export function GatewayPage({
                   {visibleGateway.databaseId}
                 </DescriptionListDescription>
               </DescriptionListGroup>
+              {visibleGateway.createdBy ? (
+                <DescriptionListGroup>
+                  <DescriptionListTerm>
+                    <FormattedMessage {...messages.createdBy} />
+                  </DescriptionListTerm>
+                  <DescriptionListDescription>
+                    {visibleGateway.createdBy}
+                  </DescriptionListDescription>
+                </DescriptionListGroup>
+              ) : null}
             </DescriptionList>
           </Tab>
         </Tabs>

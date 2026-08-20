@@ -6,6 +6,7 @@ import type { ObjectReference, ListMeta } from './base.js';
 
 export type Gateway = ObjectReference & {
   cluster_id: string;
+  created_by?: string;
   credential_driver: string;
   database_config: string;
   database_id: string;
