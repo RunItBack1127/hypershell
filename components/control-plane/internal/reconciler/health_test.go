@@ -139,6 +139,51 @@ func TestTeardownSettled(t *testing.T) {
 	}
 }
 
+// The residual-absence probe must be bounded: it re-verifies only within a
+// window after teardown (while a stale provision could still resurrect
+// resources), then trusts the completion marker so a settled non-routed gateway
+// adds no per-tick Keycloak/apiserver traffic at fleet scale.
+func TestWithinVerifyWindow(t *testing.T) {
+	base := time.Unix(1000, 0)
+	cur := base
+	h := &GatewayHealthReconciler{
+		now:             func() time.Time { return cur },
+		routeTornDown:   make(map[string]bool),
+		routeTornDownAt: make(map[string]time.Time),
+	}
+
+	// No recorded teardown time: verify defensively rather than trust an
+	// unstamped marker.
+	if !h.withinVerifyWindow("gw-1") {
+		t.Fatal("want verify=true when no teardown time is recorded")
+	}
+
+	// markRouteTornDown stamps the completion time; immediately after, we are
+	// inside the window.
+	h.markRouteTornDown("gw-1")
+	if !h.withinVerifyWindow("gw-1") {
+		t.Fatal("want verify=true immediately after teardown")
+	}
+
+	// Just inside the window.
+	cur = base.Add(routeTeardownVerifyWindow - time.Second)
+	if !h.withinVerifyWindow("gw-1") {
+		t.Fatal("want verify=true just inside the window")
+	}
+
+	// Beyond the window: trust the marker, stop probing.
+	cur = base.Add(routeTeardownVerifyWindow + time.Second)
+	if h.withinVerifyWindow("gw-1") {
+		t.Fatal("want verify=false once the window has elapsed")
+	}
+
+	// Clearing the marker (gateway routed again) resets to verify-on-next-teardown.
+	h.clearRouteTornDown("gw-1")
+	if _, ok := h.routeTornDownAt["gw-1"]; ok {
+		t.Fatal("clearRouteTornDown must forget the recorded teardown time")
+	}
+}
+
 func TestEvaluateRouteReadiness_ReadyBecomesRunning(t *testing.T) {
 	h := newHealthRec(fakeExposure{readiness: exposure.Readiness{Ready: true}}, fixedClock(time.Unix(0, 0)), 10*time.Minute)
 	for _, phase := range []string{"Provisioning", "Degraded"} {

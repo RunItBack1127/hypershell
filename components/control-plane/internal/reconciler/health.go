@@ -31,6 +31,18 @@ const defaultRouteReadyTimeout = 10 * time.Minute
 // when retrieving the full gateway fleet for health observation.
 const defaultListGatewaysPageSize = 100
 
+// routeTeardownVerifyWindow bounds how long after a clean route/console teardown
+// the health loop keeps re-verifying that the owned resources are actually absent.
+// A stale in-flight provisioning pass can only resurrect resources for a short
+// time after un-routing (it is bounded by the provisioning TLS-secret wait, and
+// the fail-closed route-intent re-check stops any pass from creating route/console
+// resources for a non-routed gateway). Beyond this window that race has drained,
+// so the completion marker is trusted without probing -- keeping a settled,
+// non-routed gateway from adding per-tick Keycloak and apiserver traffic that
+// would fleet-amplify in the serial health loop. Comfortably larger than the
+// provisioning path's 60s TLS wait plus reconcile time.
+const routeTeardownVerifyWindow = 5 * time.Minute
+
 // GatewayHealthReconciler continuously observes the health of provisioned
 // gateway Deployments and, for routed gateways, the readiness of their external
 // exposure, and keeps each Gateway's `phase` and `status` synchronized with
@@ -49,6 +61,15 @@ type GatewayHealthReconciler struct {
 	isOpenShift         bool
 	skipNetworkPolicies bool
 
+	// consoleClientChecker is a single, long-lived Keycloak client reused across
+	// every tick's residual-absence checks. Constructed once (when Keycloak is
+	// configured) so its token cache is preserved: a fresh client per check would
+	// perform a client-credentials token request on every settled gateway every
+	// tick, fleet-amplifying admin authentication in the serial health loop. Nil
+	// when Keycloak is unconfigured. The health loop is serial, so a single shared
+	// client needs no additional synchronization.
+	consoleClientChecker gateway.ConsoleClientChecker
+
 	// now is the clock, overridable in tests.
 	now func() time.Time
 
@@ -65,27 +86,47 @@ type GatewayHealthReconciler struct {
 	// so a teardown that failed part-way keeps retrying until everything is gone.
 	// In-memory only: on restart a single confirming teardown pass re-runs, which
 	// is acceptable.
+	//
+	// routeTornDownAt records when each clean teardown completed, so residual
+	// absence is re-verified only within a bounded window afterwards (see
+	// routeTeardownVerifyWindow). Beyond that window the marker is trusted without
+	// probing, so a settled non-routed gateway adds no steady-state Keycloak or
+	// apiserver traffic.
 	mu                 sync.Mutex
 	routeNotReadySince map[string]time.Time
 	routeTornDown      map[string]bool
+	routeTornDownAt    map[string]time.Time
 }
 
 func NewGatewayHealthReconciler(clientset *kubernetes.Clientset, dynamicClient dynamic.Interface, grpcConn *grpc.ClientConn, exposurePort exposure.Port, keycloakConfig *gateway.KeycloakConfig) *GatewayHealthReconciler {
+	// Build one long-lived Keycloak client for residual-absence checks so its
+	// token cache survives across ticks (see consoleClientChecker).
+	var consoleClientChecker gateway.ConsoleClientChecker
+	if keycloakConfig != nil {
+		consoleClientChecker = keycloak.NewClient(
+			keycloakConfig.ServerURL,
+			keycloakConfig.Realm,
+			keycloakConfig.ClientID,
+			keycloakConfig.ClientSecret,
+		)
+	}
 	// Mirror GatewayReconciler's environment detection so the health loop's
 	// console self-heal produces the same resources the provisioning path would.
 	return &GatewayHealthReconciler{
-		clientset:           clientset,
-		dynamicClient:       dynamicClient,
-		grpcConn:            grpcConn,
-		interval:            defaultHealthInterval,
-		exposure:            exposurePort,
-		routeReadyTimeout:   routeReadyTimeout(),
-		keycloakConfig:      keycloakConfig,
-		isOpenShift:         gateway.DetectOpenShift(clientset),
-		skipNetworkPolicies: os.Getenv("GATEWAY_SKIP_NETWORK_POLICIES") == "true",
-		now:                 time.Now,
-		routeNotReadySince:  make(map[string]time.Time),
-		routeTornDown:       make(map[string]bool),
+		clientset:            clientset,
+		dynamicClient:        dynamicClient,
+		grpcConn:             grpcConn,
+		interval:             defaultHealthInterval,
+		exposure:             exposurePort,
+		routeReadyTimeout:    routeReadyTimeout(),
+		keycloakConfig:       keycloakConfig,
+		consoleClientChecker: consoleClientChecker,
+		isOpenShift:          gateway.DetectOpenShift(clientset),
+		skipNetworkPolicies:  os.Getenv("GATEWAY_SKIP_NETWORK_POLICIES") == "true",
+		now:                  time.Now,
+		routeNotReadySince:   make(map[string]time.Time),
+		routeTornDown:        make(map[string]bool),
+		routeTornDownAt:      make(map[string]time.Time),
 	}
 }
 
@@ -321,22 +362,23 @@ func (h *GatewayHealthReconciler) teardownRoute(ctx context.Context, client pb.G
 	// actually absent; if any reappeared -- or absence cannot be confirmed --
 	// drop the marker and re-run teardown so cleanup converges on real absence.
 	if h.teardownSettled(gatewayID, gw) {
-		// Include the external Keycloak console client in the absence check when
-		// Keycloak is configured: it is a realm object, so a stale provisioning pass
-		// that recreated only the client would be invisible to the Kubernetes-only
-		// probes and let teardown settle while the client leaks.
-		var consoleClient gateway.ConsoleClientChecker
+		// Beyond the verify window the stale-provision resurrection race has
+		// drained, so trust the marker without probing -- this is what keeps a
+		// settled, non-routed gateway from adding per-tick Keycloak/apiserver
+		// traffic at fleet scale.
+		if !h.withinVerifyWindow(gatewayID) {
+			return
+		}
+		// Within the window, verify actual absence. Include the external Keycloak
+		// console client (a realm object a Kubernetes-only probe cannot see) via the
+		// single long-lived checker so its token cache is reused. If any resource
+		// reappeared -- or absence cannot be confirmed -- drop the marker and re-run
+		// teardown so cleanup converges on real absence.
 		consoleClientID := ""
-		if h.keycloakConfig != nil && gw.GetName() != "" && gatewayID != "" {
-			consoleClient = keycloak.NewClient(
-				h.keycloakConfig.ServerURL,
-				h.keycloakConfig.Realm,
-				h.keycloakConfig.ClientID,
-				h.keycloakConfig.ClientSecret,
-			)
+		if h.consoleClientChecker != nil && gw.GetName() != "" && gatewayID != "" {
 			consoleClientID = fmt.Sprintf("%s-%s-console", gw.GetName(), gatewayID)
 		}
-		absent, perr := gateway.RouteResourcesAbsent(ctx, h.dynamicClient, h.clientset, namespace, consoleClient, consoleClientID)
+		absent, perr := gateway.RouteResourcesAbsent(ctx, h.dynamicClient, h.clientset, namespace, h.consoleClientChecker, consoleClientID)
 		switch {
 		case perr != nil:
 			log.Printf("WARN route teardown: cannot confirm resource absence in %s; re-running teardown: %v", namespace, perr)
@@ -410,11 +452,17 @@ func (h *GatewayHealthReconciler) routeTornDownAlready(gatewayID string) bool {
 	return h.routeTornDown[gatewayID]
 }
 
-// markRouteTornDown records that the gateway's route and console are fully absent.
+// markRouteTornDown records that the gateway's route and console are fully absent,
+// stamping the completion time so residual absence is re-verified only within the
+// bounded verify window afterwards.
 func (h *GatewayHealthReconciler) markRouteTornDown(gatewayID string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.routeTornDown[gatewayID] = true
+	if h.routeTornDownAt == nil {
+		h.routeTornDownAt = make(map[string]time.Time)
+	}
+	h.routeTornDownAt[gatewayID] = h.now()
 }
 
 // clearRouteTornDown forgets any recorded teardown for a gateway, so a later
@@ -423,6 +471,23 @@ func (h *GatewayHealthReconciler) clearRouteTornDown(gatewayID string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	delete(h.routeTornDown, gatewayID)
+	delete(h.routeTornDownAt, gatewayID)
+}
+
+// withinVerifyWindow reports whether the gateway's clean teardown completed
+// recently enough that a stale provisioning pass could still have resurrected its
+// route/console resources, so their absence is worth re-verifying this tick.
+// Outside the window (or with no recorded time) the completion marker is trusted.
+func (h *GatewayHealthReconciler) withinVerifyWindow(gatewayID string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	at, ok := h.routeTornDownAt[gatewayID]
+	if !ok {
+		// No recorded completion time (e.g. a marker set before this field existed,
+		// or a restart): verify once rather than trusting an unstamped marker.
+		return true
+	}
+	return h.now().Sub(at) < routeTeardownVerifyWindow
 }
 
 // evaluateRouteReadiness decides the phase for a routed gateway whose Deployment
