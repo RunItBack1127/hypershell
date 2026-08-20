@@ -206,6 +206,7 @@ data:
           "standardFlowEnabled": false,
           "directAccessGrantsEnabled": false,
           "secret": "control-plane-secret",
+          "defaultClientScopes": ["profile"],
           "protocolMappers": [
             {
               "name": "audience",
