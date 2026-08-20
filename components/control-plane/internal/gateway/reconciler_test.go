@@ -2,15 +2,95 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	k8stesting "k8s.io/client-go/testing"
+
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	k8sfake "k8s.io/client-go/kubernetes/fake"
 )
+
+// routeResourceListKinds registers a list kind for every GVR RouteResourcesAbsent
+// probes through the dynamic client, so the fake can resolve each Get.
+func routeResourceListKinds() map[schema.GroupVersionResource]string {
+	return map[schema.GroupVersionResource]string{
+		{Group: "gateway.networking.k8s.io", Version: "v1", Resource: "grpcroutes"}:         "GRPCRouteList",
+		{Group: "gateway.networking.k8s.io", Version: "v1", Resource: "backendtlspolicies"}: "BackendTLSPolicyList",
+		{Group: "gateway.networking.k8s.io", Version: "v1", Resource: "httproutes"}:         "HTTPRouteList",
+		{Group: "networking.k8s.io", Version: "v1", Resource: "networkpolicies"}:            "NetworkPolicyList",
+		{Group: "apps", Version: "v1", Resource: "deployments"}:                             "DeploymentList",
+	}
+}
+
+// TestRouteResourcesAbsent is the health loop's convergence backstop: teardown
+// trusts its completion marker only while these probes confirm every route- and
+// console-owned resource is actually gone, so a stale provisioning pass that
+// recreates one after teardown cannot hide behind cleared address fields.
+func TestRouteResourcesAbsent(t *testing.T) {
+	const ns = "openshell-abc"
+
+	t.Run("all absent returns true", func(t *testing.T) {
+		dc := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), routeResourceListKinds())
+		cs := k8sfake.NewSimpleClientset()
+		absent, err := RouteResourcesAbsent(context.Background(), dc, cs, ns)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !absent {
+			t.Fatal("want absent=true when no owned resources exist")
+		}
+	})
+
+	t.Run("a resurrected dynamic resource returns false", func(t *testing.T) {
+		dc := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), routeResourceListKinds(),
+			labeledResource("gateway.networking.k8s.io/v1", "GRPCRoute", ns, "openshell-gateway", true),
+		)
+		cs := k8sfake.NewSimpleClientset()
+		absent, err := RouteResourcesAbsent(context.Background(), dc, cs, ns)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if absent {
+			t.Fatal("want absent=false when the GRPCRoute reappeared")
+		}
+	})
+
+	t.Run("a resurrected typed resource returns false", func(t *testing.T) {
+		dc := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), routeResourceListKinds())
+		cs := k8sfake.NewSimpleClientset(&corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "openshell-backend-ca"},
+		})
+		absent, err := RouteResourcesAbsent(context.Background(), dc, cs, ns)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if absent {
+			t.Fatal("want absent=false when the backend-CA ConfigMap reappeared")
+		}
+	})
+
+	t.Run("an unobservable probe returns an error, never false-absent", func(t *testing.T) {
+		dc := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), routeResourceListKinds())
+		cs := k8sfake.NewSimpleClientset()
+		cs.PrependReactor("get", "configmaps", func(k8stesting.Action) (bool, runtime.Object, error) {
+			return true, nil, fmt.Errorf("apiserver unavailable")
+		})
+		absent, err := RouteResourcesAbsent(context.Background(), dc, cs, ns)
+		if err == nil {
+			t.Fatal("want an error when a probe cannot observe the resource")
+		}
+		if absent {
+			t.Fatal("unknown state must never be reported as absent")
+		}
+	})
+}
 
 // labeledResource builds an unstructured namespaced object, optionally carrying
 // the hypershell.redhat.io/managed label the gateway stamps on everything it

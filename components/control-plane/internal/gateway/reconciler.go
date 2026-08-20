@@ -343,6 +343,66 @@ func DeleteGatewayAPIResources(ctx context.Context, dynamicClient dynamic.Interf
 	return errors.Join(errs...)
 }
 
+// RouteResourcesAbsent reports whether every route- and console-owned Kubernetes
+// resource this control plane creates for a routed gateway is absent from the
+// namespace. It lets the health loop's route teardown converge on the gateway's
+// actual observed state rather than trusting a cached completion marker: a stale
+// provisioning pass can recreate these resources after a teardown believed
+// itself finished, and cleared address fields do not prove the resources are
+// gone. Unknown state must never be read as absence.
+//
+// It returns (true, nil) only when every probed resource is confirmed NotFound.
+// The first resource found present short-circuits to (false, nil). Any GET that
+// fails for a reason other than NotFound is returned as an error so the caller
+// treats absence as unconfirmed (and re-runs teardown) rather than trusting an
+// unknown state. The Keycloak console client is not probed here -- it is not a
+// Kubernetes object and its deletion is idempotent, so a teardown re-run
+// (triggered by any resurrected resource above) removes it.
+func RouteResourcesAbsent(ctx context.Context, dynamicClient dynamic.Interface, clientset kubernetes.Interface, namespace string) (bool, error) {
+	grpcRouteGVR := schema.GroupVersionResource{Group: "gateway.networking.k8s.io", Version: "v1", Resource: "grpcroutes"}
+	btlsGVR := schema.GroupVersionResource{Group: "gateway.networking.k8s.io", Version: "v1", Resource: "backendtlspolicies"}
+	httpRouteGVR := schema.GroupVersionResource{Group: "gateway.networking.k8s.io", Version: "v1", Resource: "httproutes"}
+	netpolGVR := schema.GroupVersionResource{Group: "networking.k8s.io", Version: "v1", Resource: "networkpolicies"}
+
+	dynamicProbes := []struct {
+		gvr  schema.GroupVersionResource
+		name string
+	}{
+		{grpcRouteGVR, "openshell-gateway"},
+		{btlsGVR, "openshell-gateway"},
+		{netpolGVR, "openshell-gateway-allow-router"},
+		{httpRouteGVR, consoleName},
+		{schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}, consoleName},
+		{netpolGVR, "openshell-console-allow-router"},
+		{netpolGVR, "openshell-gateway-allow-console"},
+	}
+	for _, p := range dynamicProbes {
+		if _, err := dynamicClient.Resource(p.gvr).Namespace(namespace).Get(ctx, p.name, metav1.GetOptions{}); err == nil {
+			return false, nil
+		} else if !k8serrors.IsNotFound(err) {
+			return false, fmt.Errorf("probe %s/%s in %s: %w", p.gvr.Resource, p.name, namespace, err)
+		}
+	}
+
+	if _, err := clientset.CoreV1().ConfigMaps(namespace).Get(ctx, "openshell-backend-ca", metav1.GetOptions{}); err == nil {
+		return false, nil
+	} else if !k8serrors.IsNotFound(err) {
+		return false, fmt.Errorf("probe configmap openshell-backend-ca in %s: %w", namespace, err)
+	}
+	if _, err := clientset.CoreV1().Services(namespace).Get(ctx, consoleName, metav1.GetOptions{}); err == nil {
+		return false, nil
+	} else if !k8serrors.IsNotFound(err) {
+		return false, fmt.Errorf("probe service %s in %s: %w", consoleName, namespace, err)
+	}
+	if _, err := clientset.CoreV1().Secrets(namespace).Get(ctx, consoleSecretName, metav1.GetOptions{}); err == nil {
+		return false, nil
+	} else if !k8serrors.IsNotFound(err) {
+		return false, fmt.Errorf("probe secret %s in %s: %w", consoleSecretName, namespace, err)
+	}
+
+	return true, nil
+}
+
 func namespaceExists(ctx context.Context, clientset *kubernetes.Clientset, namespace string) bool {
 	_, err := clientset.CoreV1().Namespaces().Get(ctx, namespace, metav1.GetOptions{})
 	return err == nil
@@ -1424,17 +1484,20 @@ func reconcileGatewayAPIResources(ctx context.Context, dynamicClient dynamic.Int
 	// The wait above can run for up to a minute. A route removal (or gateway
 	// deletion) during it is observed only by the independent health loop -- the
 	// watcher phase gate blocks a re-provision -- which tears down this gateway's
-	// route and console and clears both stored addresses. Re-check live route
-	// intent before creating the remaining route- and console-owned resources so
-	// this in-flight pass does not recreate them behind that teardown: with both
-	// addresses cleared, the health loop's torn-down cache would otherwise hide
-	// the orphaned resources indefinitely. A transient check error is not fatal --
-	// proceed as before rather than fail an otherwise-healthy provision.
+	// route and console. Re-check live route intent before creating the remaining
+	// route- and console-owned resources so this in-flight pass does not race that
+	// teardown. Fail closed: unknown intent must not authorize new resources, so a
+	// check error aborts the pass (the gateway parks at Failed and is retried on
+	// the next watch resync) rather than risk creating resources behind a
+	// concurrent teardown. The health loop's route teardown verifies actual
+	// resource absence (RouteResourcesAbsent), so it still removes anything a
+	// narrow check-then-act window lets slip through.
 	if opts.RouteStillDesired != nil {
 		desired, err := opts.RouteStillDesired(ctx)
 		if err != nil {
-			log.Printf("WARN could not re-check route intent for gateway in %s; proceeding: %v", namespace, err)
-		} else if !desired {
+			return fmt.Errorf("re-check route intent in %s: %w", namespace, err)
+		}
+		if !desired {
 			log.Printf("INFO gateway in %s no longer routed after TLS wait; skipping route/console resource creation (health loop owns teardown)", namespace)
 			return nil
 		}

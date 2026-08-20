@@ -306,15 +306,31 @@ func (h *GatewayHealthReconciler) selfHealConsole(ctx context.Context, gatewayID
 // Failures are logged, never propagated: route teardown must not perturb the
 // gateway's own health phase.
 func (h *GatewayHealthReconciler) teardownRoute(ctx context.Context, client pb.GatewayServiceClient, gatewayID string, gw *pb.Gateway) {
-	// A prior clean teardown means the route and console are already absent; skip
-	// until the gateway is routed again (which clears the marker).
-	if h.teardownSettled(gatewayID, gw) {
-		return
-	}
 	namespace, err := gatewayNamespace(gw)
 	if err != nil {
 		log.Printf("WARN route teardown for %s: %v", gatewayID, err)
 		return
+	}
+	// A prior clean teardown lets us skip the (expensive) per-tick delete and
+	// Keycloak traffic -- but the marker is only a cache and cleared address
+	// fields do not prove the resources are gone. A stale provisioning pass can
+	// recreate the route/console resources after a teardown believed itself
+	// complete (the post-TLS-wait re-check narrows but cannot fully close that
+	// window). So before trusting the marker, verify the owned resources are
+	// actually absent; if any reappeared -- or absence cannot be confirmed --
+	// drop the marker and re-run teardown so cleanup converges on real absence.
+	if h.teardownSettled(gatewayID, gw) {
+		absent, perr := gateway.RouteResourcesAbsent(ctx, h.dynamicClient, h.clientset, namespace)
+		switch {
+		case perr != nil:
+			log.Printf("WARN route teardown: cannot confirm resource absence in %s; re-running teardown: %v", namespace, perr)
+			h.clearRouteTornDown(gatewayID)
+		case absent:
+			return
+		default:
+			log.Printf("INFO route/console resources reappeared in %s (stale provision after teardown); re-running teardown", namespace)
+			h.clearRouteTornDown(gatewayID)
+		}
 	}
 	opts := gateway.ReconcileOpts{
 		IsOpenShift:         h.isOpenShift,
@@ -353,15 +369,19 @@ func (h *GatewayHealthReconciler) teardownRoute(ctx context.Context, client pb.G
 	log.Printf("INFO route and console torn down in %s (gateway no longer routed)", namespace)
 }
 
-// teardownSettled reports whether a prior clean teardown can still be trusted for
-// this gateway: the completion marker is set AND the Gateway record carries no
-// route or console address. It exists to defend against a late address write --
-// the console-address publisher started during provisioning runs on the
-// long-lived watch context that route removal does not cancel, so it can write
-// console_address after a teardown marked itself complete. Requiring both stored
-// addresses to be empty makes the marker untrusted the moment one reappears, so
-// the next tick re-runs the teardown to clear it: teardown must converge on full
-// absence of resources and stored addresses, not stop on a stale cache.
+// teardownSettled is the cheap first gate teardownRoute consults before doing
+// the more expensive owned-resource absence probe: it reports whether the
+// completion marker is set AND the Gateway record carries no route or console
+// address. Requiring both stored addresses to be empty defends against a late
+// address write -- the console-address publisher started during provisioning
+// runs on the long-lived watch context that route removal does not cancel, so it
+// can write console_address after a teardown marked itself complete; the moment
+// one address reappears the marker is untrusted and teardown re-runs to clear it.
+// A true result here does NOT by itself authorize skipping teardown: the caller
+// still verifies actual resource absence (RouteResourcesAbsent), because empty
+// address fields do not prove a stale provisioning pass hasn't recreated the
+// route/console resources. Teardown must converge on full absence of resources
+// and stored addresses, never stop on a stale cache.
 func (h *GatewayHealthReconciler) teardownSettled(gatewayID string, gw *pb.Gateway) bool {
 	return h.routeTornDownAlready(gatewayID) && gw.GetRouteAddress() == "" && gw.GetConsoleAddress() == ""
 }
