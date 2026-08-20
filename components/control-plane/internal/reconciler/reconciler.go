@@ -17,6 +17,8 @@ import (
 	"github.com/openshift-online/hypershell/components/control-plane/internal/keycloak"
 	"github.com/openshift-online/hypershell/components/control-plane/internal/watcher"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
@@ -382,6 +384,7 @@ func (r *GatewayReconciler) Handle(ctx context.Context, event watcher.Event[*pb.
 		GatewayName:           gw.Name,
 		UpdateOIDC:            r.makeOIDCUpdater(event.ResourceID),
 		Exposure:              r.exposure,
+		RouteStillDesired:     r.makeRouteStillDesired(event.ResourceID),
 	}
 
 	r.updateGatewayPhase(ctx, event.ResourceID, "Provisioning")
@@ -504,6 +507,12 @@ func (r *GatewayReconciler) publishConsoleAddressWhenReady(ctx context.Context, 
 	poll(ctx, provisioningConsoleReadyInterval, provisioningConsoleReadyWait, func() bool {
 		resp, err := client.GetGateway(ctx, &pb.GetGatewayRequest{Id: gatewayID})
 		if err != nil {
+			if status.Code(err) == codes.NotFound {
+				// The gateway was deleted while the console image pulled: there is
+				// nothing left to publish against. Stop polling rather than retrying
+				// a NotFound until the window elapses.
+				return true
+			}
 			log.Printf("WARN console publisher: get gateway %s: %v", gatewayID, err)
 			return false
 		}
@@ -515,6 +524,32 @@ func (r *GatewayReconciler) publishConsoleAddressWhenReady(ctx context.Context, 
 		}
 		return syncConsoleAddress(ctx, r.clientset, r.dynamicClient, client, gatewayID, current, r.exposure != nil)
 	})
+}
+
+// makeRouteStillDesired returns a callback the provisioning path invokes after
+// the (up-to-60s) server-TLS wait, before it creates the remaining route- and
+// console-owned resources, to confirm the gateway is still routed according to
+// its live API-server record. A route removal (or gateway deletion) during that
+// wait is observed only by the independent health loop -- the watcher phase gate
+// blocks a re-provision -- which tears the gateway down and clears its stored
+// addresses; without this re-check the in-flight pass would recreate the
+// BackendTLSPolicy, backend-CA ConfigMap, router NetworkPolicy, console, and
+// Keycloak client behind that teardown, and the health loop's torn-down cache
+// (keyed on empty addresses) would then hide the orphans indefinitely. Returns
+// false on NotFound (the gateway is gone, so nothing is desired) and propagates
+// transient errors so the caller can decide (it proceeds conservatively).
+func (r *GatewayReconciler) makeRouteStillDesired(gatewayID string) func(context.Context) (bool, error) {
+	return func(ctx context.Context) (bool, error) {
+		client := pb.NewGatewayServiceClient(r.grpcConn)
+		resp, err := client.GetGateway(ctx, &pb.GetGatewayRequest{Id: gatewayID})
+		if err != nil {
+			if status.Code(err) == codes.NotFound {
+				return false, nil
+			}
+			return false, err
+		}
+		return isRoutedGateway(resp.GetGateway()), nil
+	}
 }
 
 // poll invokes attempt immediately and then every interval until it returns

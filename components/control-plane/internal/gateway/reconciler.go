@@ -1421,6 +1421,25 @@ func reconcileGatewayAPIResources(ctx context.Context, dynamicClient dynamic.Int
 		return fmt.Errorf("wait for server TLS secret in %s: %w", namespace, err)
 	}
 
+	// The wait above can run for up to a minute. A route removal (or gateway
+	// deletion) during it is observed only by the independent health loop -- the
+	// watcher phase gate blocks a re-provision -- which tears down this gateway's
+	// route and console and clears both stored addresses. Re-check live route
+	// intent before creating the remaining route- and console-owned resources so
+	// this in-flight pass does not recreate them behind that teardown: with both
+	// addresses cleared, the health loop's torn-down cache would otherwise hide
+	// the orphaned resources indefinitely. A transient check error is not fatal --
+	// proceed as before rather than fail an otherwise-healthy provision.
+	if opts.RouteStillDesired != nil {
+		desired, err := opts.RouteStillDesired(ctx)
+		if err != nil {
+			log.Printf("WARN could not re-check route intent for gateway in %s; proceeding: %v", namespace, err)
+		} else if !desired {
+			log.Printf("INFO gateway in %s no longer routed after TLS wait; skipping route/console resource creation (health loop owns teardown)", namespace)
+			return nil
+		}
+	}
+
 	caData := ""
 	tlsSecret, err := clientset.CoreV1().Secrets(namespace).Get(ctx, "openshell-server-tls", metav1.GetOptions{})
 	if err == nil {

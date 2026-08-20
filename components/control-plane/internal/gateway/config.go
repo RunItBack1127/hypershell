@@ -185,6 +185,13 @@ type ReconcileOpts struct {
 	// address. Nil when no exposure backend is configured (e.g. clusters without
 	// the Gateway API), in which case no route address is published.
 	Exposure exposure.Port
+	// RouteStillDesired, when set, reports whether the Gateway is still routed
+	// according to its current API-server record (false if it has since been
+	// un-routed or deleted). The provisioning path calls it after the potentially
+	// long TLS-secret wait, before creating the remaining route- and console-owned
+	// resources, so an in-flight pass does not recreate them behind a concurrent
+	// health-loop teardown. Nil disables the re-check (the pass proceeds).
+	RouteStillDesired func(ctx context.Context) (bool, error)
 }
 
 // KeycloakClientAPI is the subset of keycloak.Client needed by the gateway package.
