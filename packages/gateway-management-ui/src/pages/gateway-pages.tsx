@@ -274,12 +274,18 @@ export function GatewaysPage({
         items: result.items.map((gateway) =>
           toGatewayConnection(gateway, intl.formatMessage(messages.hubCluster)),
         ),
-        shouldPollStatus: result.items.some((gateway) =>
-          gatewayNeedsStatusPolling(
-            gateway,
-            trackConsoleWait(gateway.id, gateway),
-          ),
-        ),
+        // Map before reducing: trackConsoleWait records each gateway's
+        // console-wait start as a side effect, so every returned gateway must be
+        // observed. some() short-circuits, which would leave later gateways
+        // without a wait clock.
+        shouldPollStatus: result.items
+          .map((gateway) =>
+            gatewayNeedsStatusPolling(
+              gateway,
+              trackConsoleWait(gateway.id, gateway),
+            ),
+          )
+          .some(Boolean),
       };
     },
     queryKey: gatewayListQueryKey(gatewayRequest),
