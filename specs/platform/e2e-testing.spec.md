@@ -5,7 +5,9 @@
 **Jira:** HYPERSHELL-18
 **Related:** `local-development.spec.md` -- Kind cluster setup;
              `control-plane.spec.md` -- reconciler behavior;
-             `openshell-gateway-routing.spec.md` -- GRPCRoute provisioning
+             `openshell-gateway-routing.spec.md` -- GRPCRoute provisioning;
+             `openshell-gateway-namespace-gc.spec.md` -- gateway deletion + namespace GC;
+             `openshell-gateway-sandbox-count.spec.md` -- active sandbox count accounting
 
 ## Purpose
 
@@ -59,7 +61,11 @@ PR opened/updated
     │
     ├── [skip if no e2e-relevant components changed]
     │
-    ├── make kind-up IMAGE_TAG=<konflux-digest> (create Kind cluster with PR images)
+    ├── make kind-up (create Kind cluster with baseline images, overlapping Konflux builds)
+    │
+    ├── wait for each changed component's Konflux on-pull-request build to conclude
+    │
+    ├── scripts/kind/set-component-images.sh (swap in Konflux-built images by digest)
     │
     ├── E2E_INFRA_DRIVER=kind bash tests/e2e/e2e-openshell.sh
     │
@@ -191,23 +197,24 @@ Each driver script SHALL export the following shell functions. The main test scr
 
 ### Requirement: E2E Test Suite Coverage
 
-The e2e test suite SHALL validate the following 7 areas, extending the original test structure from `components/pr-test/e2e-openshell.sh`. All test areas SHALL be infrastructure-agnostic -- they call driver functions for infra-specific operations and use the Kubernetes API for resource inspection.
+The e2e test suite SHALL validate the following 8 areas, extending the original test structure from `components/pr-test/e2e-openshell.sh`. All test areas SHALL be infrastructure-agnostic -- they call driver functions for infra-specific operations and use the Kubernetes API for resource inspection.
 
 1. **Gateway provisioning via HyperShell API** -- create a gateway via the REST API and wait for the control plane to reconcile it to `Running` phase
 2. **Gateway infrastructure verification** -- confirm the gateway deployment, service, TLS secret, and certgen job exist and are healthy
 3. **Route discovery + openshell CLI registration** -- discover the gateway endpoint via the driver, register it with the openshell CLI
 4. **Gateway connectivity** -- verify the openshell CLI can connect to the gateway and report status (over trusted TLS, no insecure bypass -- see Gateway TLS Trust)
-5. **Sandbox lifecycle** -- create a sandbox as the admin user, wait for the pod to reach `Running` state
+5. **Sandbox lifecycle** -- create a sandbox as the admin user, wait for the pod to reach `Running` state, and verify the gateway's `active_sandbox_count` accounting reflects sandbox create and delete (see Active Sandbox Count Accounting)
 6. **Sandbox interaction** -- execute commands inside the sandbox (`uname -a`, `ls /workspace`)
 7. **Developer user RBAC verification** -- authenticate as the `developer` user (the `openshell-user` tier) and confirm it MAY create a sandbox but MAY NOT create a gateway via the HyperShell API (see Developer RBAC Enforcement)
+8. **Gateway deletion + namespace garbage collection** -- validate both garbage-collection paths from `openshell-gateway-namespace-gc.spec.md`: (a) seed a synthetic orphaned managed namespace after gateway provisioning and validate periodic `NamespaceGCReconciler` reap + `GarbageCollected` Event in step 11 (while steps 3–10 run in parallel with the reaper); (b) delete-driven reap of the gateway's managed namespace (see Gateway Deletion and Namespace GC)
 
-The admin-user OIDC flow that authenticates areas 1--6 is validated separately (see OIDC Authentication in E2E Tests).
+The admin-user OIDC flow that authenticates areas 1--6 and 8 is validated separately (see OIDC Authentication in E2E Tests).
 
 #### Scenario: Full Suite Execution
 
 - GIVEN a running HyperShell environment (Kind or OpenShift)
 - WHEN the e2e test suite runs
-- THEN all 7 test areas SHALL be executed in sequence
+- THEN all 8 test areas SHALL be executed in sequence
 - AND results SHALL be reported as pass/fail counts with per-test detail
 
 #### Scenario: Gateway Provisioning
@@ -229,6 +236,37 @@ The admin-user OIDC flow that authenticates areas 1--6 is validated separately (
 - WHEN `sandbox create --name <name>` is invoked
 - THEN a pod matching `default--<name>` SHALL appear in the gateway namespace
 - AND the pod SHALL reach `Running` state within `E2E_SANDBOX_TIMEOUT` seconds
+
+### Requirement: Active Sandbox Count Accounting
+
+The e2e test suite SHALL validate that a gateway's read-only `active_sandbox_count`
+field, reported by the HyperShell API, tracks sandbox creation and deletion. The
+suite SHALL create two to three sandboxes on a `Running` gateway, poll the API
+until `active_sandbox_count` reflects the created sandboxes, then delete one or
+more and poll until the count decrements accordingly. The suite SHALL reuse the
+existing sandbox create/delete steps and the API-polling helper. Because the
+count is an advisory recent value that may lag real time (see
+`openshell-gateway-sandbox-count.spec.md`), assertions SHALL poll up to
+`E2E_SANDBOX_TIMEOUT` seconds for the expected value rather than checking once.
+
+#### Scenario: Count increments as sandboxes are created
+
+- GIVEN a `Running` gateway with `active_sandbox_count` of 0
+- WHEN two to three sandboxes are created on that gateway and their pods reach
+  `Running` state
+- THEN polling `GET /api/hypershell/v1/gateways/<id>` SHALL report an
+  `active_sandbox_count` equal to the number of sandboxes created, within
+  `E2E_SANDBOX_TIMEOUT` seconds
+- AND a timeout without the expected count SHALL be reported as a test failure
+
+#### Scenario: Count decrements as sandboxes are deleted
+
+- GIVEN a `Running` gateway whose `active_sandbox_count` reflects the created
+  sandboxes
+- WHEN one or more of those sandboxes are deleted and their pods terminate
+- THEN polling the API SHALL report an `active_sandbox_count` reduced by the
+  number of sandboxes deleted, within `E2E_SANDBOX_TIMEOUT` seconds
+- AND the suite SHALL delete any remaining sandboxes to leave a clean state
 
 ### Requirement: Developer RBAC Enforcement
 
@@ -256,6 +294,102 @@ The e2e test suite SHALL verify the RBAC boundary of the `openshell-user` tier b
 - THEN the test SHALL record a failure (RBAC not enforced)
 - AND the test SHALL delete the erroneously-created gateway to leave a clean state
 
+### Requirement: Gateway Deletion and Namespace GC
+
+The e2e test suite SHALL validate both garbage-collection paths described in
+`openshell-gateway-namespace-gc.spec.md`:
+
+1. **Periodic reaper** -- the `NamespaceGCReconciler` sweeps managed namespaces
+   with no live Gateway, respects the grace period, records a `GarbageCollected`
+   Kubernetes Event in the control-plane namespace via `recordGCEvent`, then
+   deletes the namespace.
+2. **Delete-driven reap** -- deleting a Gateway through the HyperShell API drives
+   the control plane to remove the gateway record and reap its managed namespace
+   (`DeleteManagedNamespace`; this path does not emit the periodic GC Event).
+
+#### Periodic orphan namespace GC (Kind e2e)
+
+To exercise the periodic path without waiting for production defaults (5m sweep /
+10m grace), the Kind overlay SHALL patch the control-plane deployment with
+`GATEWAY_NAMESPACE_GC_INTERVAL` and `GATEWAY_NAMESPACE_GC_GRACE_PERIOD` set to
+short Go duration strings (for example `30s`; any positive value accepted by
+`time.ParseDuration` is valid). Immediately after gateway provisioning succeeds,
+the suite SHALL seed a synthetic orphaned managed namespace (`openshell-e2e-orphan-*`)
+labeled with both required management labels (`hypershell.redhat.io/managed=true`
+and `app.kubernetes.io/managed-by=hypershell-control-plane`) and a name matching
+the gateway prefix (not `openshell-db-*`), annotate it with a
+backdated `hypershell.redhat.io/gc-eligible-since` timestamp so the next sweep can
+reap without waiting a full grace period. Steps 3–10 SHALL run while the periodic
+reaper may delete that namespace in the background, so the suite is not blocked
+waiting on the sweep interval. In step 11 the suite SHALL validate delete-driven
+gateway namespace GC first, then assert the orphan namespace was reaped and a
+`GarbageCollected` Event exists in the control-plane namespace
+(`E2E_HS_NAMESPACE`, default `hypershell-system`) with `involvedObject.name`
+equal to the orphan namespace name. The orphan reap deadline SHALL be measured
+from seed time (`E2E_ORPHAN_GC_TIMEOUT` seconds after creation); if the namespace
+is already gone when step 11 runs, validation SHALL pass without additional
+waiting. Failure to reap or to record the Event SHALL be reported with GC
+diagnostics (namespace state and control-plane logs).
+
+#### Delete-driven gateway namespace GC
+
+Before deletion the suite SHALL confirm the gateway's managed namespace exists,
+so its later disappearance is a real garbage-collection signal rather than a
+namespace that never existed. After issuing
+`DELETE /api/hypershell/v1/gateways/<id>`, the suite SHALL poll until the gateway
+record returns `404` (the delete event has been processed) and until the managed
+namespace is gone, within `E2E_GC_TIMEOUT` seconds. A namespace that is not reaped
+within the timeout SHALL be reported as a test failure with GC diagnostics (the
+namespace's remaining state and control-plane logs).
+
+Deletion SHALL NOT be gated on the gateway's active sandbox count: even with
+active sandboxes the delete is accepted and the namespace is reaped, cascading
+removal of the in-namespace sandbox resources (see
+`openshell-gateway-namespace-gc.spec.md` and `openshell-gateway-database.spec.md`).
+
+#### Scenario: Periodic orphan namespace garbage collected
+
+- GIVEN the Kind overlay has shortened `GATEWAY_NAMESPACE_GC_INTERVAL` and
+  `GATEWAY_NAMESPACE_GC_GRACE_PERIOD` (for example `30s`)
+- AND a synthetic managed namespace was seeded after gateway provisioning with
+  both management labels, a gateway-style name, and a backdated
+  `hypershell.redhat.io/gc-eligible-since`
+  annotation, with no live Gateway backing it
+- AND steps 3–10 have run while the periodic reaper may have deleted it
+- WHEN the suite validates orphan GC in step 11 (after delete-driven GC)
+- THEN the namespace SHALL be gone within `E2E_ORPHAN_GC_TIMEOUT` seconds of
+  seeding
+- AND a namespace still present after that deadline SHALL be reported as a
+  failure with GC diagnostics
+
+#### Scenario: GarbageCollected Event recorded for periodic reap
+
+- GIVEN the periodic reaper has deleted the synthetic orphan namespace
+- WHEN the suite queries Events in the control-plane namespace
+- THEN a `GarbageCollected` Event SHALL exist with `involvedObject.name` equal to
+  the orphan namespace name
+- AND the absence of such an Event SHALL be reported as a test failure
+
+#### Scenario: Namespace present before deletion
+
+- GIVEN a `Running` gateway whose managed namespace exists
+- WHEN the suite checks for the namespace before deleting the gateway
+- THEN the namespace SHALL be present
+- AND its absence SHALL be reported as a failure, because the GC check cannot then be validated
+
+#### Scenario: Gateway record removed after delete
+
+- GIVEN the gateway has been deleted via `DELETE /api/hypershell/v1/gateways/<id>` (accepted with `204 No Content`)
+- WHEN the suite polls `GET /api/hypershell/v1/gateways/<id>`
+- THEN the API SHALL report `404` once the control plane has processed the delete event
+
+#### Scenario: Managed namespace garbage collected
+
+- GIVEN the gateway delete has been accepted
+- WHEN the suite polls for the gateway's managed namespace
+- THEN the namespace SHALL be gone within `E2E_GC_TIMEOUT` seconds
+- AND a namespace still present after the timeout SHALL be reported as a failure with GC diagnostics (namespace state and control-plane logs)
+
 ### Requirement: Gateway TLS Trust (No Insecure Bypass)
 
 The e2e test suite SHALL connect to the gateway over trusted TLS and SHALL NOT disable certificate verification. The `OPENSHELL_GATEWAY_INSECURE=true` bypass SHALL NOT be used. Instead, the suite SHALL trust the cluster's self-signed CA: it extracts the CA certificate issued by cert-manager (the same CA that signs the gateway's serving certificate and the `*.gw.localhost` wildcard listener cert) and points the openshell CLI at it via `SSL_CERT_FILE`. This ensures the e2e path exercises the same TLS trust chain a real client uses, rather than skipping validation.
@@ -276,14 +410,14 @@ The e2e test suite SHALL connect to the gateway over trusted TLS and SHALL NOT d
 
 ### Requirement: CI E2E Workflow
 
-The system SHALL provide a GitHub Actions workflow at `.github/workflows/e2e.yml` that runs the e2e test suite against a Kind cluster on every pull request and push to `main`. The workflow SHALL follow the same structural patterns as `.github/workflows/lint.yml` (concurrency groups, component detection, conditional jobs, summary gate). The workflow SHALL gate on Konflux image builds completing and pull those images by digest -- it SHALL NOT rebuild component images itself.
+The system SHALL provide a GitHub Actions workflow at `.github/workflows/e2e.yml` that runs the e2e test suite against a Kind cluster on every pull request, on every merge-queue entry (`merge_group`), and on push to `main`. The workflow SHALL follow the same structural patterns as `.github/workflows/lint.yml` (concurrency groups, component detection, conditional jobs, summary gate). The workflow SHALL gate on Konflux image builds completing and pull those images by digest -- it SHALL NOT rebuild component images itself.
 
 #### Scenario: PR Triggers Workflow
 
 - GIVEN a pull request is opened or updated
 - AND Konflux has built images for changed components
 - WHEN the `e2e` workflow triggers
-- THEN it SHALL: check out the repository, detect which components changed (using `.github/scripts/detect-components.sh`), create a Kind cluster via `make kind-up` with Konflux image digests passed via `IMAGE_TAG`, run `tests/e2e/e2e-openshell.sh` with `E2E_INFRA_DRIVER=kind`, and report the CI status
+- THEN it SHALL: check out the repository, detect which components changed (using `.github/scripts/detect-components.sh`), create a Kind cluster via `make kind-up` with baseline images (overlapping cluster creation with the Konflux builds in progress), wait for each changed component's Konflux on-pull-request build to conclude, swap in the Konflux-built image digests via `scripts/kind/set-component-images.sh`, run `tests/e2e/e2e-openshell.sh` with `E2E_INFRA_DRIVER=kind`, and report the CI status
 
 #### Scenario: Tests Pass
 
@@ -300,17 +434,53 @@ The system SHALL provide a GitHub Actions workflow at `.github/workflows/e2e.yml
 
 #### Scenario: Skip for Irrelevant Changes
 
-- GIVEN the PR modifies only files outside the e2e-relevant component paths (e.g., only `docs/`, `packages/gateway-management-ui/`, or `components/sdk-typescript/`)
+- GIVEN the PR modifies only files outside the e2e-relevant component paths (e.g., only `docs/` or `components/sdk-typescript/`)
 - WHEN the `e2e` workflow evaluates the change detection outputs
 - THEN the e2e job SHALL be skipped
 - AND the workflow SHALL report `success` (to avoid blocking merges)
 
 #### Scenario: Infrastructure-Only Changes (No Source Components)
 
-- GIVEN the PR modifies e2e-relevant files (Makefile, `.github/`, `deploy/`, `tests/e2e/`) but no files under `components/api-server/`, `components/control-plane/`, or `components/web-console/`
+- GIVEN the PR modifies e2e-relevant files (Makefile, `.github/`, `deploy/`, `tests/e2e/`) but no files under `components/api-server/`, `components/control-plane/`, `components/web-console/`, or `packages/gateway-management-ui/`
+- AND the PR does not change any component's Konflux pipeline definition (`.tekton/hypershell-<component>-main-pull-request.yaml`) or the root `Dockerfile`
 - WHEN the `e2e` workflow evaluates the change detection outputs
 - THEN the e2e job SHALL run using baseline registry images (no Konflux build wait)
 - AND the workflow SHALL NOT poll for Konflux check runs
+
+#### Scenario: Component Pipeline Definition Changed
+
+- GIVEN the PR changes a component's Konflux pull-request pipeline definition (`.tekton/hypershell-<component>-main-pull-request.yaml`), or the root `Dockerfile` for control-plane, without touching that component's source tree
+- AND Konflux therefore fires that component's on-pull-request build, because its CEL trigger matches the pipeline file itself
+- WHEN the `e2e` workflow evaluates the change detection outputs
+- THEN it SHALL wait for that component's on-pull-request build and consume its `on-pr-<head_sha>` image, exactly as if the component source had changed
+- AND the workflow's build detection SHALL mirror each component's Konflux CEL trigger, so it never falls back to a baseline image while Konflux is building an on-pr image the PR produced
+
+#### Scenario: Gateway Management UI Package Changed
+
+- GIVEN the PR modifies files only in `packages/gateway-management-ui/`
+- AND Konflux has built and pushed the web console image
+- WHEN the e2e workflow runs
+- THEN it SHALL wait for the web-console Konflux on-pull-request build
+- AND it SHALL pull the Konflux-built web console image
+- AND the API server and control plane SHALL use baseline registry images
+
+#### Scenario: Merge Queue Gate
+
+- GIVEN a pull request enters the GitHub merge queue
+- AND the merge queue pushes the batched merge commit to a `gh-readonly-queue/main/...` branch
+- WHEN the `e2e` workflow triggers on the `merge_group` event
+- THEN it SHALL always run the e2e job (the merge queue is the pre-merge gate, so change detection SHALL NOT skip it)
+- AND for each component whose source the merge batch changed it SHALL wait for that component's dedicated merge-queue Konflux build, keyed on the merge-commit SHA (`github.sha`)
+- AND components the merge batch did not change SHALL use baseline registry images
+- AND the browser distributed-trace verification SHALL NOT run on `merge_group` (it is covered at pull-request time and re-verified on push to `main`)
+
+#### Scenario: Merge Queue Images Are Distinct and Ephemeral
+
+- GIVEN the merge queue builds images through the dedicated Konflux merge-queue pipelines (`.tekton/hypershell-<component>-main-merge-queue.yaml`)
+- WHEN a merge-queue pipeline fires on a push whose target branch starts with `gh-readonly-queue/main/`
+- THEN it SHALL push an ephemeral `on-merge-queue-<merge_sha>` image tag (`image-expires-after` set) that is distinct from the pull-request pipelines' `on-pr-<head_sha>` tag, so a merge-queue build is never confused with an already-tested PR image
+- AND the merge-queue pipeline SHALL NOT auto-release (`release.appstudio.openshift.io/auto-release: "false"`)
+- AND the pull-request pipelines SHALL fire only on the `pull_request` event, not on merge-queue pushes
 
 #### Scenario: Workflow Timeout
 
@@ -337,12 +507,13 @@ The CI workflow SHALL NOT build component images itself. Images are built by Kon
 - WHEN the e2e workflow runs
 - THEN it SHALL pull both Konflux-built images by digest
 
-#### Scenario: Image Override via Make Target
+#### Scenario: Image Override via Make Target (Local/Dev)
 
-- GIVEN Konflux-built images are available at specific digests
-- WHEN the CI workflow runs `make kind-up` with image overrides (e.g., `IMAGE_TAG=sha256:abc123` or per-component image variables)
-- THEN the Kind cluster SHALL deploy using the specified Konflux images
+- GIVEN a developer wants to test specific Konflux-built images locally
+- WHEN they run `make kind-up` with image overrides (e.g., `IMAGE_TAG=sha256:abc123` or per-component image variables)
+- THEN the Kind cluster SHALL deploy using the specified images
 - AND no local image build or `kind load` step SHALL be required
+- NOTE: the CI workflow does not use this path -- it creates the cluster with baseline images via `make kind-up` and swaps in Konflux-built digests afterward via `scripts/kind/set-component-images.sh`, once each changed component's build has concluded, so cluster creation overlaps the Konflux builds instead of waiting on them first
 
 ### Requirement: CI Artifact Collection
 
@@ -377,7 +548,7 @@ The `deploy/` directory SHALL use a kustomize base/overlay structure to support 
 - GIVEN `deploy/kind/kustomization.yaml` references `../base` as a resource
 - WHEN `kustomize build deploy/kind/` is executed
 - THEN the output SHALL include all base resources (namespace, postgres, api-server, controller, controller-rbac, web-console)
-- AND Kind-specific resources: networking Gateway with `gatewayClassName: cloud-provider-kind`, cert-manager certificates for `*.hypershell.localhost` and `*.gw.localhost`, HTTPRoutes for component services, CoreDNS Corefile, OIDC secrets, and Kustomize patches for OIDC configuration (JWT flags, Keycloak hostname, control-plane and web-console OIDC env vars)
+- AND Kind-specific resources: networking Gateway with `gatewayClassName: cloud-provider-kind`, cert-manager certificates for `*.hypershell.localhost` and `*.gw.localhost`, HTTPRoutes for component services, CoreDNS Corefile, OIDC secrets, and Kustomize patches for OIDC configuration (JWT flags, Keycloak hostname, control-plane and web-console OIDC env vars) and shortened namespace GC timing (`GATEWAY_NAMESPACE_GC_INTERVAL` and `GATEWAY_NAMESPACE_GC_GRACE_PERIOD`, for example `30s`, so e2e can exercise the periodic reaper)
 
 #### Scenario: OpenShift Overlay
 
@@ -472,6 +643,8 @@ deploy/
 | `E2E_GATEWAY_NAME` | `e2e-gw` | Gateway name for the e2e test |
 | `E2E_SANDBOX_TIMEOUT` | `120` | Seconds to wait for sandbox pod readiness |
 | `E2E_PROVISION_TIMEOUT` | `180` | Seconds to wait for gateway provisioning |
+| `E2E_GC_TIMEOUT` | `180` | Seconds to wait for the managed namespace to be garbage collected after a gateway delete |
+| `E2E_ORPHAN_GC_TIMEOUT` | `90` | Seconds from orphan namespace seed time for the periodic reaper to delete the synthetic orphan (validated in step 11) |
 | `E2E_SKIP_CLEANUP` | `0` | Set to `1` to keep test resources after run |
 | `E2E_OIDC_USERNAME` | `admin` | Admin OIDC user (member of `hypershell-admins` + `hypershell-users`) used for areas 1--6 |
 | `E2E_OIDC_PASSWORD` | `admin` | Password for the admin OIDC user (local dev only) |
@@ -479,6 +652,8 @@ deploy/
 | `E2E_DEV_PASSWORD` | `developer` | Password for the developer OIDC user (local dev only) |
 | `OPENSHELL_BIN` | `openshell` | Path to the openshell CLI binary |
 | `SSL_CERT_FILE` | (set by the suite) | Path to the extracted cluster CA so the openshell CLI trusts the gateway's TLS cert (replaces the removed `OPENSHELL_GATEWAY_INSECURE` bypass) |
+| `E2E_CONSOLE_URL` | `https://console.hypershell.localhost` | Base URL of the deployed web console for the browser trace verification |
+| `E2E_JAEGER_URL` | `https://jaeger.hypershell.localhost` | Base URL of the Jaeger query API queried by the trace verification |
 
 ### Requirement: OIDC Authentication in E2E Tests
 
@@ -523,6 +698,30 @@ The test suite SHALL verify OIDC integration as part of its standard flow:
 - GIVEN the CI e2e workflow
 - WHEN the Kind cluster is created
 - THEN `make kind-up` SHALL be invoked with `KIND_ENABLE_OIDC=true`
+
+### Requirement: Web Console Distributed Trace Verification
+
+The CI e2e workflow SHALL verify web console distributed tracing end to end, satisfying `web-console/tracing.spec.md` (`WEB-TRACE-11`). The Kind cluster SHALL be created with tracing enabled (`KIND_JAEGER=true`) so Jaeger is deployed and the web-console BFF exports to it. After the bash suite runs, the workflow SHALL drive a representative gateway workflow through a real browser against the deployed console and assert that Jaeger holds one trace joining the browser and the BFF. The check SHALL use the same Node and Chromium setup as the web-console lint job and SHALL run from the deployed console, not a mocked dev server. The trace check SHALL fail the workflow if no cross-service trace appears within a bounded polling window, and failure diagnostics SHALL include Jaeger workload status and logs and the web-console tracing configuration.
+
+#### Scenario: Tracing Enabled for E2E
+
+- GIVEN the CI e2e workflow
+- WHEN the Kind cluster is created
+- THEN `make kind-up` SHALL be invoked with `KIND_JAEGER=true`
+- AND Jaeger SHALL be deployed and the web-console BFF SHALL be configured to export to it
+
+#### Scenario: Cross-Service Trace Asserted
+
+- GIVEN the cluster is running with tracing enabled and the console is reachable
+- WHEN the trace verification drives a gateway workflow in a real browser and queries Jaeger
+- THEN it SHALL find one trace whose spans include a bounded browser workflow span and the BFF server span joined by the same trace identifier
+- AND the workflow SHALL fail if no such trace appears within the polling window
+
+#### Scenario: Trace Failure Diagnostics
+
+- GIVEN the trace verification fails
+- WHEN the workflow reaches its post-test phase
+- THEN it SHALL collect Jaeger workload status and logs and the web-console tracing configuration alongside the existing diagnostics
 
 ## Design Decisions
 
