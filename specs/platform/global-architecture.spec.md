@@ -7,6 +7,10 @@
 
 HyperShell deploys as a global fleet management platform spanning multiple clouds and regions. The architecture uses a **three-tier hub-and-spoke topology**: a Global Hub provides federated identity root, Cloud Hubs run the operational platform (API, control plane, databases), and ManagedClusters host OpenShell Gateway workloads. Every OpenShift cluster in the topology runs the full operator stack (ArgoCD, Vault, Keycloak, CNPG, Prometheus, Grafana) but serves different purposes at each tier.
 
+**Platform delivery is GitOps pull, not hub push.** ArgoCD runs on *every* cluster and reconciles **only itself**: each cluster's ArgoCD pulls its own path from a single central GitOps repository ([`hypershell-gitops`](https://github.com/openshift-online/hypershell-gitops)) and applies the operator stack and HyperShell platform components locally. No cluster stores another cluster's kubeconfig, and no central ArgoCD pushes manifests outward. The GitOps repo is the single source of desired *platform* state; a bootstrap agent seeds each cluster (installs ArgoCD and points it at the cluster's own path), after which the cluster self-reconciles.
+
+> **Two distinct reconciliation planes — do not conflate them.** (1) **Platform GitOps** (this section) deploys the operator stack and HyperShell components; it is *pull*, sourced from Git, per cluster. (2) **Control-plane tenant reconciliation** (see "Control Plane Reconciliation Flow") provisions per-tenant OpenShell Gateway resources at runtime; it is *push* from the Cloud Hub control plane into ManagedClusters, sourced from the Cloud Hub PostgreSQL (the source of truth for tenant desired state) and driven by gRPC watch events. Inverting the GitOps layer to pull does **not** change the control-plane tenant plane.
+
 > **Terminology.** "Gateway" is overloaded, so this document uses fully-qualified
 > names. **OpenShell Gateway** is the tenant workload (the pod, its Supervisor,
 > and its Sandboxes) that HyperShell provisions. **Gateway API** is the upstream
@@ -21,16 +25,19 @@ HyperShell uses a three-tier hub-and-spoke architecture. Each tier runs the full
 
 ```mermaid
 graph TB
+    Repo[(central GitOps repo<br/>hypershell-gitops)]
+
     subgraph Global["Global Hub (Identity Root)"]
+        GArgo[ArgoCD<br/>self-reconcile]
         GK[Keycloak<br/>Federated to RH SSO]
         GV[Vault<br/>Reserved]
         GG[Grafana<br/>Cross-Cloud Dashboard]
     end
 
     subgraph AWS["Cloud Hub: AWS"]
+        AArgo[ArgoCD<br/>self-reconcile]
         AK[Keycloak<br/>Federates to Global]
         AV[Vault<br/>Service Secrets]
-        AArgo[ArgoCD<br/>Fleet GitOps]
         ADB[(PostgreSQL<br/>CNPG)]
         ACP[Control Plane]
         AAPI[API Server]
@@ -40,9 +47,9 @@ graph TB
     end
 
     subgraph IBM["Cloud Hub: IBM Cloud"]
+        IArgo[ArgoCD<br/>self-reconcile]
         IK[Keycloak<br/>Federates to Global]
         IV[Vault<br/>Service Secrets]
-        IArgo[ArgoCD<br/>Fleet GitOps]
         IDB[(PostgreSQL<br/>CNPG)]
         ICP[Control Plane]
         IAPI[API Server]
@@ -52,6 +59,7 @@ graph TB
     end
 
     subgraph MC1["ManagedCluster: AWS us-east-1"]
+        M1Argo[ArgoCD<br/>self-reconcile]
         M1K[Keycloak<br/>Gateway Clients]
         M1V[Vault<br/>Gateway Secrets]
         M1DB[(PostgreSQL<br/>CNPG)]
@@ -60,6 +68,7 @@ graph TB
     end
 
     subgraph MC2["ManagedCluster: AWS us-west-2"]
+        M2Argo[ArgoCD<br/>self-reconcile]
         M2K[Keycloak<br/>Gateway Clients]
         M2V[Vault<br/>Gateway Secrets]
         M2DB[(PostgreSQL<br/>CNPG)]
@@ -68,6 +77,7 @@ graph TB
     end
 
     subgraph MC3["ManagedCluster: IBM us-east"]
+        M3Argo[ArgoCD<br/>self-reconcile]
         M3K[Keycloak<br/>Gateway Clients]
         M3V[Vault<br/>Gateway Secrets]
         M3DB[(PostgreSQL<br/>CNPG)]
@@ -75,15 +85,24 @@ graph TB
         M3GW[Gateway Namespaces]
     end
 
+    %% Platform GitOps: each cluster's ArgoCD PULLS its own path from the central repo
+    Repo -.->|pull own path| GArgo
+    Repo -.->|pull own path| AArgo
+    Repo -.->|pull own path| IArgo
+    Repo -.->|pull own path| M1Argo
+    Repo -.->|pull own path| M2Argo
+    Repo -.->|pull own path| M3Argo
+
     GK -->|Federation| AK
     GK -->|Federation| IK
     AK -->|Federation| M1K
     AK -->|Federation| M2K
     IK -->|Federation| M3K
-    
-    ACP -->|Reconcile| M1GW
-    ACP -->|Reconcile| M2GW
-    ICP -->|Reconcile| M3GW
+
+    %% Control-plane tenant plane (runtime, DB-sourced) — distinct from GitOps pull above
+    ACP -->|Reconcile tenants| M1GW
+    ACP -->|Reconcile tenants| M2GW
+    ICP -->|Reconcile tenants| M3GW
     
     M1P -->|Metrics| AP
     M2P -->|Metrics| AP
@@ -92,6 +111,7 @@ graph TB
     AP -->|Aggregate| GG
     IP -->|Aggregate| GG
 
+    style Repo fill:#e2d4f0
     style Global fill:#e1f5ff
     style AWS fill:#fff3cd
     style IBM fill:#fff3cd
@@ -105,6 +125,7 @@ graph TB
 **Purpose**: Identity federation root and cross-cloud observability.
 
 **Components**:
+- ArgoCD (self-reconciles this hub's operator stack and config from its own path in the central GitOps repo)
 - Keycloak (federates to Red Hat SSO)
 - Vault (reserved for future global secrets)
 - Grafana (single-pane-of-glass aggregating metrics from all Cloud Hubs)
@@ -118,19 +139,22 @@ graph TB
 **Components**:
 - API Server, Control Plane, Web UI (HA deployment)
 - PostgreSQL (via CNPG) - source of truth for Fleet, Gateway, ManagedCluster resources
-- ArgoCD - reconciles this cloud's infrastructure from Git
+- ArgoCD - self-reconciles *this* Cloud Hub's operator stack and HyperShell platform components (API server, control plane, Web UI) by pulling its own path from the central GitOps repo; it does **not** reconcile into ManagedClusters
 - Keycloak - federates to Global Keycloak, serves cloud services
 - Vault - secrets for cloud hub services (API server, control plane)
 - Prometheus - aggregates metrics from this cloud's ManagedClusters
 - Grafana - cloud-level dashboards
 
-**Operational Role**: The control plane is the reconciliation engine for the fleet. It watches the API server via gRPC and provisions the full set of OpenShell resources into ManagedClusters - not just OpenShell Gateways, but the tenant namespaces, per-tenant PKI, RBAC, ingress objects, CNPG databases, and supporting workloads each gateway depends on. ArgoCD defines and provisions the ManagedClusters themselves (cluster infrastructure and the operator stack); the control plane then reconciles tenant-managed resources onto them.
+**Operational Role**: The control plane is the *tenant* reconciliation engine for the fleet. It watches the API server via gRPC and provisions the full set of OpenShell resources into ManagedClusters - not just OpenShell Gateways, but the tenant namespaces, per-tenant PKI, RBAC, ingress objects, CNPG databases, and supporting workloads each gateway depends on. This tenant plane is a runtime *push* sourced from the Cloud Hub PostgreSQL, and is distinct from platform GitOps.
+
+The *platform* layer beneath it is pull-based GitOps: each ManagedCluster's own ArgoCD installs and self-reconciles that cluster's operator stack and baseline config from its own path in the central GitOps repo. So responsibilities split cleanly — a cluster's local ArgoCD owns the cluster's platform (operators, CRDs, cluster-scoped config), and the Cloud Hub control plane owns the tenant resources layered on top. The control plane never installs the operator stack on a ManagedCluster; it assumes the cluster has already self-reconciled it from Git.
 
 ### Tier 3: ManagedCluster
 
 **Purpose**: Hosts OpenShell Gateway workloads - the OpenShell Gateway pod, its Supervisor, and the Sandboxes it launches to execute user sessions. Multiple per cloud, deployed close to users (regional).
 
 **Components**:
+- ArgoCD - self-reconciles this ManagedCluster's operator stack and baseline config from its own path in the central GitOps repo (pull); the Cloud Hub control plane layers tenant resources on top at runtime
 - Keycloak - federates to Cloud Hub Keycloak, holds OIDC clients for OpenShell Gateways on this cluster
 - Vault - keystore for gateway secrets
 - PostgreSQL (via CNPG) - gateway-specific databases
@@ -231,8 +255,39 @@ sequenceDiagram
 - PostgreSQL on the Cloud Hub (the HyperShell API server's database) is the source of truth for the **desired state** of HyperShell-managed resources - Fleet, Gateway, ManagedCluster, and related records. It is not a source of truth for every datum in the system.
 - Runtime state owned by each OpenShell Gateway (active Sandboxes, provider credentials, live sessions) lives in that gateway's own database on its ManagedCluster, not in the Cloud Hub PostgreSQL. Where a fact could live in either store, this document names which one owns it.
 - Control Plane watches API server via gRPC streams
-- Control Plane reconciles resources into ManagedClusters via kubeconfig secrets
+- Control Plane reconciles *tenant* resources into ManagedClusters via kubeconfig secrets (runtime push; distinct from the platform GitOps pull below)
 - Gateway databases run as CNPG Clusters in the gateway namespace on the ManagedCluster
+
+### Platform GitOps Pull Flow
+
+The platform layer (operator stack + HyperShell components) is delivered by each cluster's *own* ArgoCD pulling from the central GitOps repo. There is no central ArgoCD holding remote kubeconfigs and no push from a hub — every cluster reconciles itself.
+
+```mermaid
+sequenceDiagram
+    participant Eng as Platform Engineer
+    participant Repo as Central GitOps Repo<br/>(hypershell-gitops)
+    participant Boot as Bootstrap Agent
+    participant Argo as Cluster-local ArgoCD
+    participant K8s as This cluster's<br/>K8s API
+
+    Note over Eng,Repo: Desired platform state committed once, centrally
+    Eng->>Repo: commit manifests under clusters/<this-cluster>/
+    Boot->>K8s: install ArgoCD (one-time seed)
+    Boot->>Argo: point at clusters/<this-cluster>/ path in repo
+    loop continuous self-reconcile
+        Argo->>Repo: pull own path (git)
+        Repo-->>Argo: desired manifests
+        Argo->>K8s: apply locally (operators, CRDs, HyperShell components)
+        K8s-->>Argo: live state
+        Note over Argo: drift corrected against Git, no external push
+    end
+```
+
+**Key Points**:
+- ArgoCD runs on every cluster and syncs **only that cluster's own path** in the central repo. No cluster holds another cluster's credentials.
+- The central GitOps repo is the single source of truth for **platform** desired state (operators, CRDs, HyperShell component manifests). It is *not* the source of truth for tenant gateways — those live in the Cloud Hub PostgreSQL and flow through the control plane (above).
+- A bootstrap agent (in `hypershell-gitops`) performs the one-time seed: install ArgoCD on the cluster and register it against the cluster's path. Steady-state reconciliation is pull-only.
+- A hub outage does not stop a ManagedCluster from reconciling its platform; each cluster is self-sufficient against Git.
 
 
 ## Ingress Architecture
@@ -751,7 +806,7 @@ the gateway database.
 | Component | Tool | Purpose |
 |-----------|------|---------|
 | Database operator | CNPG (CloudNativePG) | PostgreSQL lifecycle (replaces per-gateway cloud databases) |
-| GitOps | ArgoCD | Reconciles cluster state from Git |
+| GitOps | ArgoCD (on every cluster) | Each cluster self-reconciles its own platform state by pulling its path from the central GitOps repo (pull model) |
 | Secret management | Vault | Stores and rotates secrets with cloud-native drivers |
 | Identity | Keycloak | OIDC authentication for gateways and console |
 | Cluster provisioning | Terraform | VPC, subnet, and cluster provisioning |
@@ -951,36 +1006,59 @@ Managed clusters are not restricted to OpenShift. Standard Kubernetes distributi
 
 ## GitOps Repository Structure
 
-ArgoCD manages cluster state from a Git repository. Each cloud and region has its own overlay.
+The central [`hypershell-gitops`](https://github.com/openshift-online/hypershell-gitops)
+repository is the single source of truth for **platform** desired state. It is
+organized for the **pull model**: reusable bases hold shared manifests, and each
+cluster gets its own top-level directory that its local ArgoCD points at and
+self-reconciles. There is no hub-side `Application` that targets remote managed
+clusters; a cluster's directory *is* its own entrypoint.
 
 ```
-gitops-repo/
-├── base/
+hypershell-gitops/
+├── bases/                          # reusable, cluster-agnostic manifests
 │   ├── hypershell/
-│   │   ├── api-server.yaml
-│   │   ├── controller.yaml
-│   │   └── postgres.yaml
-│   ├── cnpg/
-│   ├── cert-manager/
-│   ├── vault/
-│   └── keycloak/
-├── overlays/
-│   ├── ibm-us-east/
-│   │   ├── kustomization.yaml
-│   │   └── patches/
-│   ├── aws-us-east/
-│   │   ├── kustomization.yaml
-│   │   └── patches/
-│   └── aws-eu-west/
-│       ├── kustomization.yaml
-│       └── patches/
-└── clusters/
-    ├── ibm-hub.yaml        (ArgoCD Application)
-    ├── aws-hub.yaml
-    └── managed/
-        ├── rosa-vteam.yaml
-        └── eks-staging.yaml
+│   │   ├── base/                   # api-server, control plane, postgres, keycloak
+│   │   ├── tiers/                  # int / stage / prod overlays
+│   │   ├── ingress-openshift/      # gateway-api ingress mode
+│   │   └── ingress-k8s/            # route ingress mode
+│   └── operators/                  # one base per operator (channel + subscription)
+│       ├── openshift-gitops/       # ArgoCD itself
+│       ├── cloudnative-pg/
+│       ├── keycloak-operator/
+│       ├── grafana-operator/
+│       ├── external-secrets/
+│       ├── vault/
+│       ├── openshift-pipelines/
+│       └── agent-sandbox-controller/
+├── clusters/                       # ONE directory per cluster = its ArgoCD entrypoint
+│   ├── global/                     # Global Hub: operators, gitops apps, instances
+│   │   ├── operators/
+│   │   ├── gitops/                 # ArgoCD Applications this cluster syncs (self)
+│   │   └── instances/
+│   ├── hysh-ibm-01/                # a Cloud Hub / ManagedCluster
+│   │   ├── operators/
+│   │   └── keycloak/
+│   └── uat/
+│       ├── operators/
+│       └── keycloak/
+└── bin/
+    ├── bootstrap                   # one-time seed: install ArgoCD, point it at clusters/<name>/
+    └── register-cluster           # add a new cluster directory + seed its ArgoCD
 ```
+
+**How a cluster self-reconciles:**
+
+1. The bootstrap agent installs ArgoCD on the cluster (`bin/bootstrap`) and
+   registers a root Application pointing at `clusters/<cluster-name>/` in this repo.
+2. That cluster's ArgoCD pulls its own directory and applies the operator stack
+   (via `bases/operators/*`) and any cluster-scoped config, ordered by sync-waves.
+3. To onboard a new cluster, add a `clusters/<name>/` directory (referencing the
+   shared `bases/`) and run `bin/register-cluster`. No existing cluster's config
+   changes, and no central credential store grows.
+
+The canonical repo URL is set once (a Kustomize replacement) and propagated to
+every `Application`, so each cluster's ArgoCD resolves the same central repo while
+syncing a different path.
 
 ## Design Decisions
 
@@ -988,14 +1066,14 @@ gitops-repo/
 |----------|-----------|
 | Three-tier topology | Separates concerns: Global (identity root), Cloud Hub (operations), ManagedCluster (workloads) |
 | Cloud Hub as primary unit | One HA instance per cloud runs API/control-plane/database; cloud isolation for latency and compliance |
-| Full operator stack on all tiers | Every cluster has ArgoCD, Vault, Keycloak, CNPG, Prometheus - but serves different purposes per tier |
+| Full operator stack on all tiers | Every cluster has ArgoCD, Vault, Keycloak, CNPG, Prometheus - but serves different purposes per tier. Because each cluster's own ArgoCD installs its stack from Git, the stack is present before any tenant workload lands. |
 | Federated Keycloak chain | RH SSO → Global → Cloud Hub → ManagedCluster - identity flows down, authentication bubbles up |
 | Vault per tier with distinct purposes | Cloud Hub Vault: service secrets; ManagedCluster Vault: gateway keystores |
 | CNPG on all clusters | Kubernetes-native lifecycle, portable across clouds, no vendor lock-in |
 | PostgreSQL on Cloud Hub as source of truth | All Fleet/Gateway/ManagedCluster resource state lives in Cloud Hub database |
 | ManagedClusters can be standard K8s | Maximizes deployment flexibility; only hubs need OpenShift |
 | Tekton over bash scripts | Deterministic, auditable, cattle-not-pets infrastructure |
-| ArgoCD on Cloud Hubs | Each Cloud Hub ArgoCD reconciles its own ManagedClusters from Git |
+| ArgoCD on every cluster (pull model) | Every cluster runs its own ArgoCD and self-reconciles only its own path from the central GitOps repo. No cluster stores another's kubeconfig and no hub pushes manifests outward, so credential blast radius is minimized and a hub outage never stalls a spoke's platform reconciliation. (Distinct from control-plane tenant reconciliation, which remains a runtime push from the Cloud Hub.) |
 | Prometheus metrics hierarchy | ManagedCluster → Cloud Hub → Global Hub; supports cloud-level and cross-cloud dashboards |
 | Namespace-per-gateway | Isolation boundary for RBAC, NetworkPolicy, resource quotas, and CNPG Cluster |
 | Terraform for provisioning | IaC for VPC, subnet, and cluster lifecycle; cloud-agnostic |
