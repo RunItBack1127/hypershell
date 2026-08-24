@@ -84,7 +84,8 @@ func ReconcileGateway(
 		}
 	}
 
-	if opts.ReconcileDatabase {
+	switch opts.DatabaseProvider {
+	case "cnpg":
 		if opts.CNPG.ClusterNamespace == "" {
 			return fmt.Errorf("CNPG cluster namespace is required for gateway database reconciliation in namespace %s", nsConfig.Name)
 		}
@@ -101,6 +102,15 @@ func ReconcileGateway(
 				return fmt.Errorf("rotate database credentials in %s: %w", nsConfig.Name, err)
 			}
 		}
+	case "deployment":
+		if opts.DeploymentDBNamespace == "" {
+			return fmt.Errorf("deployment database namespace is required for gateway database reconciliation in namespace %s", nsConfig.Name)
+		}
+		if err := copyDeploymentDatabaseCredentials(ctx, clientset, opts.DeploymentDBNamespace, nsConfig.Name); err != nil {
+			return fmt.Errorf("copy deployment database credentials to %s: %w", nsConfig.Name, err)
+		}
+	default:
+		return fmt.Errorf("unsupported database provider %q for gateway in namespace %s", opts.DatabaseProvider, nsConfig.Name)
 	}
 
 	if nsConfig.Gateway.CredentialDriver == nil {
@@ -1351,6 +1361,65 @@ func reconcileCNPGDatabaseResources(
 	}
 
 	log.Printf("INFO CNPG database provisioning complete for gateway %s in %s", gatewayID, tenantNamespace)
+	return nil
+}
+
+func copyDeploymentDatabaseCredentials(
+	ctx context.Context,
+	clientset *kubernetes.Clientset,
+	sourceNamespace string,
+	tenantNamespace string,
+) error {
+	gwSecretName := "openshell-gateway-db-credentials"
+
+	_, err := clientset.CoreV1().Secrets(tenantNamespace).Get(ctx, gwSecretName, metav1.GetOptions{})
+	if err == nil {
+		log.Printf("DEBUG gateway credentials secret %s already exists in %s, skipping copy", gwSecretName, tenantNamespace)
+		return nil
+	}
+	if !k8serrors.IsNotFound(err) {
+		return fmt.Errorf("get gateway credentials secret: %w", err)
+	}
+
+	sourceSecretName := "openshell-db-credentials"
+	sourceSecret, err := clientset.CoreV1().Secrets(sourceNamespace).Get(ctx, sourceSecretName, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("read source database credentials from %s/%s: %w", sourceNamespace, sourceSecretName, err)
+	}
+
+	host := fmt.Sprintf("openshell-gateway-db.%s.svc.cluster.local", sourceNamespace)
+	port := "5432"
+	dbname := string(sourceSecret.Data["dbname"])
+	user := string(sourceSecret.Data["user"])
+	password := string(sourceSecret.Data["password"])
+	dbURI := fmt.Sprintf("postgresql://%s:%s@%s:%s/%s?sslmode=disable",
+		user, url.QueryEscape(password), host, port, dbname)
+
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      gwSecretName,
+			Namespace: tenantNamespace,
+			Labels: map[string]string{
+				"app.kubernetes.io/name":       "openshell",
+				"app.kubernetes.io/component":  "database",
+				"app.kubernetes.io/managed-by": "hypershell-control-plane",
+				"hypershell.redhat.io/managed": "true",
+			},
+		},
+		Type: corev1.SecretTypeOpaque,
+		StringData: map[string]string{
+			"host":     host,
+			"port":     port,
+			"dbname":   dbname,
+			"user":     user,
+			"password": password,
+			"uri":      dbURI,
+		},
+	}
+	if _, err := clientset.CoreV1().Secrets(tenantNamespace).Create(ctx, secret, metav1.CreateOptions{}); err != nil {
+		return fmt.Errorf("create gateway credentials secret: %w", err)
+	}
+	log.Printf("INFO copied deployment database credentials to %s (host=%s db=%s)", tenantNamespace, host, dbname)
 	return nil
 }
 

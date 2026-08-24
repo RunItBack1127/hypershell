@@ -12,15 +12,6 @@ import (
 
 const gatewaysLockType db.LockType = "gateways"
 
-type ClusterFleetResolver interface {
-	FleetIDForCluster(ctx context.Context, clusterID string) (fleetID string, err error)
-}
-
-type FleetDatabaseFinder interface {
-	FindSoleInFleet(ctx context.Context, fleetID string) (databaseID string, err error)
-	FindSole(ctx context.Context) (databaseID string, fleetID string, err error)
-}
-
 type GatewayService interface {
 	Get(ctx context.Context, id string) (*Gateway, *errors.ServiceError)
 	GetUnscoped(ctx context.Context, id string) (*Gateway, *errors.ServiceError)
@@ -49,26 +40,23 @@ func NewGatewayService(
 	lockFactory db.LockFactory,
 	gatewayDao GatewayDao,
 	events services.EventService,
-	dbFinder FleetDatabaseFinder,
-	clusterResolver ClusterFleetResolver,
+	placement PlacementResolver,
 ) GatewayService {
 	return &sqlGatewayService{
-		lockFactory:     lockFactory,
-		gatewayDao:      gatewayDao,
-		events:          events,
-		dbFinder:        dbFinder,
-		clusterResolver: clusterResolver,
+		lockFactory: lockFactory,
+		gatewayDao:  gatewayDao,
+		events:      events,
+		placement:   placement,
 	}
 }
 
 var _ GatewayService = &sqlGatewayService{}
 
 type sqlGatewayService struct {
-	lockFactory     db.LockFactory
-	gatewayDao      GatewayDao
-	events          services.EventService
-	dbFinder        FleetDatabaseFinder
-	clusterResolver ClusterFleetResolver
+	lockFactory db.LockFactory
+	gatewayDao  GatewayDao
+	events      services.EventService
+	placement   PlacementResolver
 }
 
 func (s *sqlGatewayService) OnUpsert(ctx context.Context, id string) error {
@@ -107,41 +95,13 @@ func (s *sqlGatewayService) GetUnscoped(ctx context.Context, id string) (*Gatewa
 }
 
 func (s *sqlGatewayService) Create(ctx context.Context, gateway *Gateway) (*Gateway, *errors.ServiceError) {
-	if gateway.FleetId == "" && gateway.ClusterId != "" && s.clusterResolver != nil {
-		fleetID, err := s.clusterResolver.FleetIDForCluster(ctx, gateway.ClusterId)
-		if err != nil {
-			return nil, errors.GeneralError("resolve fleet from cluster %s: %s", gateway.ClusterId, err)
+	if s.placement != nil {
+		if err := s.placement.Resolve(ctx, gateway); err != nil {
+			return nil, errors.Validation("%s", err)
 		}
-		if fleetID == "" {
-			return nil, errors.Validation("cluster %s does not belong to a fleet", gateway.ClusterId)
-		}
-		gateway.FleetId = fleetID
 	}
-
 	if gateway.DatabaseId == "" {
-		if s.dbFinder == nil {
-			return nil, errors.Validation("database_id is required")
-		}
-		if gateway.FleetId != "" {
-			dbID, findErr := s.dbFinder.FindSoleInFleet(ctx, gateway.FleetId)
-			if findErr != nil {
-				return nil, errors.GeneralError("resolve fleet database: %s", findErr)
-			}
-			if dbID == "" {
-				return nil, errors.Validation("database_id is required: fleet %s has zero or multiple ManagedDatabases", gateway.FleetId)
-			}
-			gateway.DatabaseId = dbID
-		} else {
-			dbID, fleetID, findErr := s.dbFinder.FindSole(ctx)
-			if findErr != nil {
-				return nil, errors.GeneralError("resolve database: %s", findErr)
-			}
-			if dbID == "" {
-				return nil, errors.Validation("database_id is required: zero or multiple ManagedDatabases exist")
-			}
-			gateway.DatabaseId = dbID
-			gateway.FleetId = fleetID
-		}
+		return nil, errors.Validation("database_id is required")
 	}
 
 	gateway, err := s.gatewayDao.Create(ctx, gateway)

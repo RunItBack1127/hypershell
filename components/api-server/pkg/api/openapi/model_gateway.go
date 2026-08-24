@@ -31,7 +31,7 @@ type Gateway struct {
 	FleetId    string     `json:"fleet_id"`
 	ClusterId  string     `json:"cluster_id"`
 	ReleaseId  string     `json:"release_id"`
-	DatabaseId string     `json:"database_id"`
+	DatabaseId *string    `json:"database_id,omitempty"`
 	// API-assigned Kubernetes namespace derived from the Gateway identifier
 	Namespace   string  `json:"namespace"`
 	ExternalDns *string `json:"external_dns,omitempty"`
@@ -67,13 +67,12 @@ type _Gateway Gateway
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewGateway(name string, fleetId string, clusterId string, releaseId string, databaseId string, namespace string) *Gateway {
+func NewGateway(name string, fleetId string, clusterId string, releaseId string, namespace string) *Gateway {
 	this := Gateway{}
 	this.Name = name
 	this.FleetId = fleetId
 	this.ClusterId = clusterId
 	this.ReleaseId = releaseId
-	this.DatabaseId = databaseId
 	this.Namespace = namespace
 	return &this
 }
@@ -342,28 +341,36 @@ func (o *Gateway) SetReleaseId(v string) {
 	o.ReleaseId = v
 }
 
-// GetDatabaseId returns the DatabaseId field value
+// GetDatabaseId returns the DatabaseId field value if set, zero value otherwise.
 func (o *Gateway) GetDatabaseId() string {
-	if o == nil {
+	if o == nil || IsNil(o.DatabaseId) {
 		var ret string
 		return ret
 	}
-
-	return o.DatabaseId
+	return *o.DatabaseId
 }
 
-// GetDatabaseIdOk returns a tuple with the DatabaseId field value
+// GetDatabaseIdOk returns a tuple with the DatabaseId field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 func (o *Gateway) GetDatabaseIdOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.DatabaseId) {
 		return nil, false
 	}
-	return &o.DatabaseId, true
+	return o.DatabaseId, true
 }
 
-// SetDatabaseId sets field value
+// HasDatabaseId returns a boolean if a field has been set.
+func (o *Gateway) HasDatabaseId() bool {
+	if o != nil && !IsNil(o.DatabaseId) {
+		return true
+	}
+
+	return false
+}
+
+// SetDatabaseId gets a reference to the given string and assigns it to the DatabaseId field.
 func (o *Gateway) SetDatabaseId(v string) {
-	o.DatabaseId = v
+	o.DatabaseId = &v
 }
 
 // GetNamespace returns the Namespace field value
@@ -899,7 +906,9 @@ func (o Gateway) ToMap() (map[string]interface{}, error) {
 	toSerialize["fleet_id"] = o.FleetId
 	toSerialize["cluster_id"] = o.ClusterId
 	toSerialize["release_id"] = o.ReleaseId
-	toSerialize["database_id"] = o.DatabaseId
+	if !IsNil(o.DatabaseId) {
+		toSerialize["database_id"] = o.DatabaseId
+	}
 	toSerialize["namespace"] = o.Namespace
 	if !IsNil(o.ExternalDns) {
 		toSerialize["external_dns"] = o.ExternalDns
@@ -958,7 +967,6 @@ func (o *Gateway) UnmarshalJSON(data []byte) (err error) {
 		"fleet_id",
 		"cluster_id",
 		"release_id",
-		"database_id",
 		"namespace",
 	}
 

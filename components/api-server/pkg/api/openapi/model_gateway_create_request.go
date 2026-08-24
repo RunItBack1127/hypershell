@@ -25,7 +25,7 @@ type GatewayCreateRequest struct {
 	FleetId     string  `json:"fleet_id"`
 	ClusterId   string  `json:"cluster_id"`
 	ReleaseId   string  `json:"release_id"`
-	DatabaseId  string  `json:"database_id"`
+	DatabaseId  *string `json:"database_id,omitempty"`
 	ExternalDns *string `json:"external_dns,omitempty"`
 	TlsMode     *string `json:"tls_mode,omitempty"`
 	ServiceType *string `json:"service_type,omitempty"`
@@ -51,13 +51,12 @@ type _GatewayCreateRequest GatewayCreateRequest
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewGatewayCreateRequest(name string, fleetId string, clusterId string, releaseId string, databaseId string) *GatewayCreateRequest {
+func NewGatewayCreateRequest(name string, fleetId string, clusterId string, releaseId string) *GatewayCreateRequest {
 	this := GatewayCreateRequest{}
 	this.Name = name
 	this.FleetId = fleetId
 	this.ClusterId = clusterId
 	this.ReleaseId = releaseId
-	this.DatabaseId = databaseId
 	return &this
 }
 
@@ -165,28 +164,36 @@ func (o *GatewayCreateRequest) SetReleaseId(v string) {
 	o.ReleaseId = v
 }
 
-// GetDatabaseId returns the DatabaseId field value
+// GetDatabaseId returns the DatabaseId field value if set, zero value otherwise.
 func (o *GatewayCreateRequest) GetDatabaseId() string {
-	if o == nil {
+	if o == nil || IsNil(o.DatabaseId) {
 		var ret string
 		return ret
 	}
-
-	return o.DatabaseId
+	return *o.DatabaseId
 }
 
-// GetDatabaseIdOk returns a tuple with the DatabaseId field value
+// GetDatabaseIdOk returns a tuple with the DatabaseId field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 func (o *GatewayCreateRequest) GetDatabaseIdOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.DatabaseId) {
 		return nil, false
 	}
-	return &o.DatabaseId, true
+	return o.DatabaseId, true
 }
 
-// SetDatabaseId sets field value
+// HasDatabaseId returns a boolean if a field has been set.
+func (o *GatewayCreateRequest) HasDatabaseId() bool {
+	if o != nil && !IsNil(o.DatabaseId) {
+		return true
+	}
+
+	return false
+}
+
+// SetDatabaseId gets a reference to the given string and assigns it to the DatabaseId field.
 func (o *GatewayCreateRequest) SetDatabaseId(v string) {
-	o.DatabaseId = v
+	o.DatabaseId = &v
 }
 
 // GetExternalDns returns the ExternalDns field value if set, zero value otherwise.
@@ -555,7 +562,9 @@ func (o GatewayCreateRequest) ToMap() (map[string]interface{}, error) {
 	toSerialize["fleet_id"] = o.FleetId
 	toSerialize["cluster_id"] = o.ClusterId
 	toSerialize["release_id"] = o.ReleaseId
-	toSerialize["database_id"] = o.DatabaseId
+	if !IsNil(o.DatabaseId) {
+		toSerialize["database_id"] = o.DatabaseId
+	}
 	if !IsNil(o.ExternalDns) {
 		toSerialize["external_dns"] = o.ExternalDns
 	}
@@ -601,7 +610,6 @@ func (o *GatewayCreateRequest) UnmarshalJSON(data []byte) (err error) {
 		"fleet_id",
 		"cluster_id",
 		"release_id",
-		"database_id",
 	}
 
 	allProperties := make(map[string]interface{})

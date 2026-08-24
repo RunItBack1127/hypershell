@@ -299,7 +299,6 @@ export function createGatewayControlPlaneAdapter(
           await apiClient(apiFactory, context).gateways.create(
             {
               cluster_id: input.clusterId,
-              database_id: "",
               fleet_id: "",
               name: input.name,
               release_id: "",

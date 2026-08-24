@@ -8,7 +8,7 @@ Name | Type | Description | Notes
 **FleetId** | **string** |  | 
 **ClusterId** | **string** |  | 
 **ReleaseId** | **string** |  | 
-**DatabaseId** | **string** |  | 
+**DatabaseId** | Pointer to **string** |  | [optional] 
 **ExternalDns** | Pointer to **string** |  | [optional] 
 **TlsMode** | Pointer to **string** |  | [optional] 
 **ServiceType** | Pointer to **string** |  | [optional] 
@@ -25,7 +25,7 @@ Name | Type | Description | Notes
 
 ### NewGatewayCreateRequest
 
-`func NewGatewayCreateRequest(name string, fleetId string, clusterId string, releaseId string, databaseId string, ) *GatewayCreateRequest`
+`func NewGatewayCreateRequest(name string, fleetId string, clusterId string, releaseId string, ) *GatewayCreateRequest`
 
 NewGatewayCreateRequest instantiates a new GatewayCreateRequest object
 This constructor will assign default values to properties that have it defined,
@@ -139,6 +139,11 @@ and a boolean to check if the value has been set.
 
 SetDatabaseId sets DatabaseId field to given value.
 
+### HasDatabaseId
+
+`func (o *GatewayCreateRequest) HasDatabaseId() bool`
+
+HasDatabaseId returns a boolean if a field has been set.
 
 ### GetExternalDns
 

@@ -13,7 +13,7 @@ Name | Type | Description | Notes
 **FleetId** | **string** |  | 
 **ClusterId** | **string** |  | 
 **ReleaseId** | **string** |  | 
-**DatabaseId** | **string** |  | 
+**DatabaseId** | Pointer to **string** |  | [optional] 
 **Namespace** | **string** | API-assigned Kubernetes namespace derived from the Gateway identifier | [readonly] 
 **ExternalDns** | Pointer to **string** |  | [optional] 
 **TlsMode** | Pointer to **string** |  | [optional] 
@@ -35,7 +35,7 @@ Name | Type | Description | Notes
 
 ### NewGateway
 
-`func NewGateway(name string, fleetId string, clusterId string, releaseId string, databaseId string, namespace string, ) *Gateway`
+`func NewGateway(name string, fleetId string, clusterId string, releaseId string, namespace string, ) *Gateway`
 
 NewGateway instantiates a new Gateway object
 This constructor will assign default values to properties that have it defined,
@@ -274,6 +274,11 @@ and a boolean to check if the value has been set.
 
 SetDatabaseId sets DatabaseId field to given value.
 
+### HasDatabaseId
+
+`func (o *Gateway) HasDatabaseId() bool`
+
+HasDatabaseId returns a boolean if a field has been set.
 
 ### GetNamespace
 

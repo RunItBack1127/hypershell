@@ -13,7 +13,9 @@ func ConvertGateway(gateway openapi.GatewayCreateRequest) *Gateway {
 	c.FleetId = gateway.FleetId
 	c.ClusterId = gateway.ClusterId
 	c.ReleaseId = gateway.ReleaseId
-	c.DatabaseId = gateway.DatabaseId
+	if gateway.DatabaseId != nil {
+		c.DatabaseId = *gateway.DatabaseId
+	}
 	c.ExternalDns = gateway.ExternalDns
 	c.TlsMode = gateway.TlsMode
 	c.ServiceType = gateway.ServiceType
@@ -46,7 +48,7 @@ func PresentGateway(gateway *Gateway, createdBy string) openapi.Gateway {
 		FleetId:          gateway.FleetId,
 		ClusterId:        gateway.ClusterId,
 		ReleaseId:        gateway.ReleaseId,
-		DatabaseId:       gateway.DatabaseId,
+		DatabaseId:       openapi.PtrString(gateway.DatabaseId),
 		Namespace:        gateway.Namespace,
 		ExternalDns:      gateway.ExternalDns,
 		TlsMode:          gateway.TlsMode,

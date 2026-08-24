@@ -3,6 +3,8 @@ package reconciler
 import (
 	"bytes"
 	"context"
+	cryptoRand "crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -19,6 +21,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -154,18 +157,25 @@ func (r *ManagedDatabaseReconciler) handleOne(ctx context.Context, event watcher
 		return nil
 	}
 
-	if db.Provider != "cnpg" {
+	switch db.Provider {
+	case "cnpg":
+		return r.handleCNPGDatabase(ctx, event, db)
+	case "deployment":
+		return r.handleDeploymentDatabase(ctx, event, db)
+	default:
 		log.Printf("WARN ManagedDatabase %s has unsupported provider %q, skipping", event.ResourceID, db.Provider)
 		return nil
 	}
+}
 
+func (r *ManagedDatabaseReconciler) handleCNPGDatabase(ctx context.Context, event watcher.Event[*pb.ManagedDatabase], db *pb.ManagedDatabase) error {
 	if event.Type == watcher.EventDeleted {
 		log.Printf("INFO ManagedDatabase %s deleted, cleaning up CNPG cluster in namespace %s", event.ResourceID, db.Namespace)
 		r.deleteCNPGCluster(ctx, db.Namespace)
 		return nil
 	}
 
-	log.Printf("INFO reconciling ManagedDatabase %s name=%s namespace=%s (event=%d)",
+	log.Printf("INFO reconciling ManagedDatabase %s name=%s namespace=%s provider=cnpg (event=%d)",
 		event.ResourceID, db.Name, db.Namespace, event.Type)
 
 	if !r.hasCNPG {
@@ -203,6 +213,36 @@ func (r *ManagedDatabaseReconciler) handleOne(ctx context.Context, event watcher
 
 	r.updateManagedDatabaseStatusIfChanged(ctx, event.ResourceID, "Provisioning", "Ready")
 	log.Printf("INFO ManagedDatabase %s CNPG cluster provisioned in namespace %s", event.ResourceID, db.Namespace)
+	return nil
+}
+
+func (r *ManagedDatabaseReconciler) handleDeploymentDatabase(ctx context.Context, event watcher.Event[*pb.ManagedDatabase], db *pb.ManagedDatabase) error {
+	if event.Type == watcher.EventDeleted {
+		log.Printf("INFO ManagedDatabase %s deleted, cleaning up deployment database in namespace %s", event.ResourceID, db.Namespace)
+		r.deleteDeploymentDatabase(ctx, db.Namespace)
+		return nil
+	}
+
+	log.Printf("INFO reconciling ManagedDatabase %s name=%s namespace=%s provider=deployment (event=%d)",
+		event.ResourceID, db.Name, db.Namespace, event.Type)
+
+	currentStatus := managedDatabaseStatus(db)
+
+	deploymentReady, _, err := gateway.DeploymentReadiness(ctx, r.clientset, db.Namespace, "openshell-gateway-db")
+	if err == nil && deploymentReady && currentStatus == "Ready" {
+		log.Printf("DEBUG ManagedDatabase %s status=Ready and deployment healthy, skipping reconciliation", event.ResourceID)
+		return nil
+	}
+
+	r.updateManagedDatabaseStatusIfChanged(ctx, event.ResourceID, currentStatus, "Provisioning")
+
+	if err := r.reconcileDeploymentDatabase(ctx, db); err != nil {
+		r.updateManagedDatabaseStatusIfChanged(ctx, event.ResourceID, "Provisioning", fmt.Sprintf("Failed: %v", err))
+		return fmt.Errorf("reconcile deployment database for ManagedDatabase %s: %w", db.Name, err)
+	}
+
+	r.updateManagedDatabaseStatusIfChanged(ctx, event.ResourceID, "Provisioning", "Ready")
+	log.Printf("INFO ManagedDatabase %s deployment database provisioned in namespace %s", event.ResourceID, db.Namespace)
 	return nil
 }
 
@@ -373,6 +413,352 @@ func (r *ManagedDatabaseReconciler) deleteCNPGCluster(ctx context.Context, names
 	}
 }
 
+func (r *ManagedDatabaseReconciler) reconcileDeploymentDatabase(ctx context.Context, db *pb.ManagedDatabase) error {
+	namespace := db.Namespace
+
+	if !gateway.NamespaceExists(ctx, r.clientset, namespace) {
+		if err := gateway.CreateManagedNamespace(ctx, r.clientset, namespace); err != nil {
+			return fmt.Errorf("create namespace %s: %w", namespace, err)
+		}
+	}
+
+	credentialsName := "openshell-db-credentials"
+	_, err := r.clientset.CoreV1().Secrets(namespace).Get(ctx, credentialsName, metav1.GetOptions{})
+	if err != nil {
+		if !k8serrors.IsNotFound(err) {
+			return fmt.Errorf("get database credentials secret: %w", err)
+		}
+
+		passwordBytes := make([]byte, 32)
+		if _, err := cryptoRand.Read(passwordBytes); err != nil {
+			return fmt.Errorf("generate database password: %w", err)
+		}
+		password := hex.EncodeToString(passwordBytes)
+		dbName := "openshell"
+		dbUser := "openshell"
+
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      credentialsName,
+				Namespace: namespace,
+				Labels: map[string]string{
+					"app.kubernetes.io/name":       "openshell",
+					"app.kubernetes.io/component":  "database",
+					"app.kubernetes.io/managed-by": "hypershell-control-plane",
+					"hypershell.redhat.io/managed": "true",
+				},
+			},
+			Type: corev1.SecretTypeOpaque,
+			StringData: map[string]string{
+				"host":     fmt.Sprintf("openshell-gateway-db.%s.svc.cluster.local", namespace),
+				"port":     "5432",
+				"dbname":   dbName,
+				"user":     dbUser,
+				"password": password,
+			},
+		}
+		if _, err := r.clientset.CoreV1().Secrets(namespace).Create(ctx, secret, metav1.CreateOptions{}); err != nil {
+			return fmt.Errorf("create database credentials secret: %w", err)
+		}
+		log.Printf("INFO created database credentials secret %s in %s", credentialsName, namespace)
+	}
+
+	dbImage := os.Getenv("HYPERSHELL_DATABASE_IMAGE")
+	if dbImage == "" {
+		dbImage = "postgres:18"
+	}
+
+	pvc := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "PersistentVolumeClaim",
+			"metadata": map[string]interface{}{
+				"name":      "openshell-gateway-db-data",
+				"namespace": namespace,
+				"labels": map[string]interface{}{
+					"app.kubernetes.io/name":       "openshell",
+					"app.kubernetes.io/component":  "database",
+					"app.kubernetes.io/managed-by": "hypershell-control-plane",
+					"hypershell.redhat.io/managed": "true",
+				},
+			},
+			"spec": map[string]interface{}{
+				"accessModes": []interface{}{"ReadWriteOnce"},
+				"resources": map[string]interface{}{
+					"requests": map[string]interface{}{
+						"storage": "1Gi",
+					},
+				},
+			},
+		},
+	}
+
+	deployment := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apps/v1",
+			"kind":       "Deployment",
+			"metadata": map[string]interface{}{
+				"name":      "openshell-gateway-db",
+				"namespace": namespace,
+				"labels": map[string]interface{}{
+					"app.kubernetes.io/name":       "openshell",
+					"app.kubernetes.io/component":  "database",
+					"app.kubernetes.io/managed-by": "hypershell-control-plane",
+					"hypershell.redhat.io/managed": "true",
+				},
+			},
+			"spec": map[string]interface{}{
+				"replicas": int64(1),
+				"strategy": map[string]interface{}{
+					"type": "Recreate",
+				},
+				"selector": map[string]interface{}{
+					"matchLabels": map[string]interface{}{
+						"app.kubernetes.io/name":     "openshell",
+						"app.kubernetes.io/instance": "openshell-gateway-db",
+					},
+				},
+				"template": map[string]interface{}{
+					"metadata": map[string]interface{}{
+						"labels": map[string]interface{}{
+							"app.kubernetes.io/name":       "openshell",
+							"app.kubernetes.io/instance":   "openshell-gateway-db",
+							"app.kubernetes.io/component":  "database",
+							"app.kubernetes.io/managed-by": "hypershell-control-plane",
+							"hypershell.redhat.io/managed": "true",
+						},
+					},
+					"spec": map[string]interface{}{
+						"terminationGracePeriodSeconds": int64(30),
+						"containers": []interface{}{
+							map[string]interface{}{
+								"name":            "postgresql",
+								"image":           dbImage,
+								"imagePullPolicy": "IfNotPresent",
+								"securityContext": map[string]interface{}{
+									"allowPrivilegeEscalation": false,
+									"runAsNonRoot":             true,
+									"runAsUser":                int64(1001),
+									"seccompProfile": map[string]interface{}{
+										"type": "RuntimeDefault",
+									},
+									"capabilities": map[string]interface{}{
+										"drop": []interface{}{"ALL"},
+									},
+								},
+								"env": []interface{}{
+									map[string]interface{}{
+										"name": "POSTGRES_USER",
+										"valueFrom": map[string]interface{}{
+											"secretKeyRef": map[string]interface{}{
+												"name": credentialsName,
+												"key":  "user",
+											},
+										},
+									},
+									map[string]interface{}{
+										"name": "POSTGRES_PASSWORD",
+										"valueFrom": map[string]interface{}{
+											"secretKeyRef": map[string]interface{}{
+												"name": credentialsName,
+												"key":  "password",
+											},
+										},
+									},
+									map[string]interface{}{
+										"name": "POSTGRES_DB",
+										"valueFrom": map[string]interface{}{
+											"secretKeyRef": map[string]interface{}{
+												"name": credentialsName,
+												"key":  "dbname",
+											},
+										},
+									},
+									map[string]interface{}{
+										"name":  "PGDATA",
+										"value": "/var/lib/postgresql/data/pgdata",
+									},
+								},
+								"ports": []interface{}{
+									map[string]interface{}{
+										"name":          "postgresql",
+										"containerPort": int64(5432),
+										"protocol":      "TCP",
+									},
+								},
+								"readinessProbe": map[string]interface{}{
+									"tcpSocket": map[string]interface{}{
+										"port": int64(5432),
+									},
+									"initialDelaySeconds": int64(5),
+									"periodSeconds":       int64(10),
+								},
+								"livenessProbe": map[string]interface{}{
+									"tcpSocket": map[string]interface{}{
+										"port": int64(5432),
+									},
+									"initialDelaySeconds": int64(30),
+									"periodSeconds":       int64(10),
+								},
+								"volumeMounts": []interface{}{
+									map[string]interface{}{
+										"name":      "db-data",
+										"mountPath": "/var/lib/postgresql/data",
+									},
+								},
+								"resources": map[string]interface{}{
+									"requests": map[string]interface{}{
+										"cpu":    "100m",
+										"memory": "256Mi",
+									},
+									"limits": map[string]interface{}{
+										"cpu":    "500m",
+										"memory": "512Mi",
+									},
+								},
+							},
+						},
+						"volumes": []interface{}{
+							map[string]interface{}{
+								"name": "db-data",
+								"persistentVolumeClaim": map[string]interface{}{
+									"claimName": "openshell-gateway-db-data",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	svc := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "Service",
+			"metadata": map[string]interface{}{
+				"name":      "openshell-gateway-db",
+				"namespace": namespace,
+				"labels": map[string]interface{}{
+					"app.kubernetes.io/name":       "openshell",
+					"app.kubernetes.io/component":  "database",
+					"app.kubernetes.io/managed-by": "hypershell-control-plane",
+					"hypershell.redhat.io/managed": "true",
+				},
+			},
+			"spec": map[string]interface{}{
+				"type": "ClusterIP",
+				"ports": []interface{}{
+					map[string]interface{}{
+						"port":       int64(5432),
+						"targetPort": "postgresql",
+						"protocol":   "TCP",
+						"name":       "postgresql",
+					},
+				},
+				"selector": map[string]interface{}{
+					"app.kubernetes.io/name":     "openshell",
+					"app.kubernetes.io/instance": "openshell-gateway-db",
+				},
+			},
+		},
+	}
+
+	for _, obj := range []*unstructured.Unstructured{pvc, svc, deployment} {
+		if err := r.applyUnstructured(ctx, obj); err != nil {
+			return fmt.Errorf("reconcile %s %s: %w", obj.GetKind(), obj.GetName(), err)
+		}
+	}
+
+	deadline := time.After(2 * time.Minute)
+	ticker := time.NewTicker(3 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline:
+			return fmt.Errorf("timed out waiting for deployment database to become ready in %s", namespace)
+		case <-ticker.C:
+			ready, _, err := gateway.DeploymentReadiness(ctx, r.clientset, namespace, "openshell-gateway-db")
+			if err != nil {
+				log.Printf("WARN error checking deployment database readiness in %s: %v", namespace, err)
+				continue
+			}
+			if ready {
+				log.Printf("INFO deployment database ready in %s", namespace)
+				return nil
+			}
+		}
+	}
+}
+
+var kindToGVR = map[string]schema.GroupVersionResource{
+	"PersistentVolumeClaim": {Version: "v1", Resource: "persistentvolumeclaims"},
+	"Service":               {Version: "v1", Resource: "services"},
+	"Deployment":            {Group: "apps", Version: "v1", Resource: "deployments"},
+}
+
+func (r *ManagedDatabaseReconciler) applyUnstructured(ctx context.Context, obj *unstructured.Unstructured) error {
+	gvr, ok := kindToGVR[obj.GetKind()]
+	if !ok {
+		return fmt.Errorf("unknown kind %q for applyUnstructured", obj.GetKind())
+	}
+
+	ns := obj.GetNamespace()
+	name := obj.GetName()
+
+	existing, err := r.dynamicClient.Resource(gvr).Namespace(ns).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		if !k8serrors.IsNotFound(err) {
+			return fmt.Errorf("get %s/%s: %w", obj.GetKind(), name, err)
+		}
+		if _, err := r.dynamicClient.Resource(gvr).Namespace(ns).Create(ctx, obj, metav1.CreateOptions{}); err != nil {
+			return fmt.Errorf("create %s/%s: %w", obj.GetKind(), name, err)
+		}
+		log.Printf("INFO created %s %s in %s", obj.GetKind(), name, ns)
+		return nil
+	}
+
+	obj.SetResourceVersion(existing.GetResourceVersion())
+	if _, err := r.dynamicClient.Resource(gvr).Namespace(ns).Update(ctx, obj, metav1.UpdateOptions{}); err != nil {
+		return fmt.Errorf("update %s/%s: %w", obj.GetKind(), name, err)
+	}
+	log.Printf("INFO updated %s %s in %s", obj.GetKind(), name, ns)
+	return nil
+}
+
+func (r *ManagedDatabaseReconciler) deleteDeploymentDatabase(ctx context.Context, namespace string) {
+	resources := []struct {
+		gvr  schema.GroupVersionResource
+		name string
+	}{
+		{schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}, "openshell-gateway-db"},
+		{schema.GroupVersionResource{Version: "v1", Resource: "services"}, "openshell-gateway-db"},
+		{schema.GroupVersionResource{Version: "v1", Resource: "persistentvolumeclaims"}, "openshell-gateway-db-data"},
+		{schema.GroupVersionResource{Version: "v1", Resource: "secrets"}, "openshell-db-credentials"},
+	}
+
+	for _, res := range resources {
+		if err := r.dynamicClient.Resource(res.gvr).Namespace(namespace).Delete(ctx, res.name, metav1.DeleteOptions{}); err != nil {
+			if !k8serrors.IsNotFound(err) {
+				log.Printf("WARN failed to delete %s %s in %s: %v", res.gvr.Resource, res.name, namespace, err)
+			}
+		} else {
+			log.Printf("INFO deleted %s %s from %s", res.gvr.Resource, res.name, namespace)
+		}
+	}
+
+	if err := r.clientset.CoreV1().Namespaces().Delete(ctx, namespace, metav1.DeleteOptions{}); err != nil {
+		if !k8serrors.IsNotFound(err) {
+			log.Printf("WARN failed to delete namespace %s: %v", namespace, err)
+		}
+	} else {
+		log.Printf("INFO deleted namespace %s", namespace)
+	}
+}
+
 func (r *ManagedDatabaseReconciler) updateManagedDatabaseStatusIfChanged(ctx context.Context, id, current, desired string) {
 	if current == desired {
 		return
@@ -529,9 +915,9 @@ func (r *GatewayReconciler) Handle(ctx context.Context, event watcher.Event[*pb.
 			return nil
 		}
 
-		deleteCNPGConfig, cnpgErr := r.resolveCNPGConfig(ctx, gw)
-		if cnpgErr != nil {
-			log.Printf("WARN gateway %s deleted but could not resolve CNPG config: %v; CNPG resources may require manual cleanup", event.ResourceID, cnpgErr)
+		deleteDBConfig, dbErr := r.resolveDatabaseConfig(ctx, gw)
+		if dbErr != nil {
+			log.Printf("WARN gateway %s deleted but could not resolve database config: %v; database resources may require manual cleanup", event.ResourceID, dbErr)
 		}
 		log.Printf("INFO gateway %s deleted, cleaning up resources in namespace %s", event.ResourceID, namespace)
 		opts := gateway.ReconcileOpts{
@@ -540,7 +926,9 @@ func (r *GatewayReconciler) Handle(ctx context.Context, event watcher.Event[*pb.
 			HasGatewayAPI:         r.hasGatewayAPI,
 			SkipNetworkPolicies:   r.skipNetworkPolicies,
 			HasCNPG:               r.hasCNPG,
-			CNPG:                  deleteCNPGConfig,
+			CNPG:                  deleteDBConfig.CNPG,
+			DatabaseProvider:      deleteDBConfig.Provider,
+			DeploymentDBNamespace: deleteDBConfig.SourceNamespace,
 			ControlPlaneNamespace: r.controlPlaneNamespace,
 			KeycloakClient:        r.keycloakClient,
 			GatewayID:             event.ResourceID,
@@ -597,16 +985,9 @@ func (r *GatewayReconciler) Handle(ctx context.Context, event watcher.Event[*pb.
 		return nil
 	}
 
-	reconcileDatabase := gw.DatabaseId != ""
-	var cnpgConfig gateway.CNPGConfig
-	if reconcileDatabase {
-		var resolveErr error
-		cnpgConfig, resolveErr = r.resolveCNPGConfig(ctx, gw)
-		if resolveErr != nil {
-			return fmt.Errorf("resolve CNPG config for gateway %s: %w", gw.Name, resolveErr)
-		}
-	} else {
-		log.Printf("INFO gateway %s has no database_id; skipping database reconciliation (existing database resources left untouched)", event.ResourceID)
+	dbConfig, err := r.resolveDatabaseConfig(ctx, gw)
+	if err != nil {
+		return fmt.Errorf("resolve database config for gateway %s: %w", gw.Name, err)
 	}
 
 	namespace, err := gatewayNamespace(gw)
@@ -679,8 +1060,9 @@ func (r *GatewayReconciler) Handle(ctx context.Context, event watcher.Event[*pb.
 		HasGatewayAPI:         r.hasGatewayAPI,
 		SkipNetworkPolicies:   r.skipNetworkPolicies,
 		HasCNPG:               r.hasCNPG,
-		ReconcileDatabase:     reconcileDatabase,
-		CNPG:                  cnpgConfig,
+		DatabaseProvider:      dbConfig.Provider,
+		CNPG:                  dbConfig.CNPG,
+		DeploymentDBNamespace: dbConfig.SourceNamespace,
 		ControlPlaneNamespace: r.controlPlaneNamespace,
 		GatewayID:             event.ResourceID,
 		UpdateRouteAddress:    r.makeRouteAddressUpdater(event.ResourceID),
@@ -1075,32 +1457,48 @@ func (r *GatewayReconciler) updateConsoleAddress(ctx context.Context, gatewayID 
 	return nil
 }
 
-func (r *GatewayReconciler) resolveCNPGConfig(ctx context.Context, gw *pb.Gateway) (gateway.CNPGConfig, error) {
+type databaseConfig struct {
+	Provider        string
+	CNPG            gateway.CNPGConfig
+	SourceNamespace string
+}
+
+func (r *GatewayReconciler) resolveDatabaseConfig(ctx context.Context, gw *pb.Gateway) (databaseConfig, error) {
 	if gw.DatabaseId == "" {
-		return gateway.CNPGConfig{}, fmt.Errorf("gateway has no database_id; assign a ManagedDatabase to the fleet")
+		return databaseConfig{}, fmt.Errorf("gateway has no database_id; assign a ManagedDatabase to the fleet")
 	}
 
 	client := pb.NewManagedDatabaseServiceClient(r.grpcConn)
 	resp, err := client.GetManagedDatabase(ctx, &pb.GetManagedDatabaseRequest{Id: gw.DatabaseId})
 	if err != nil {
-		return gateway.CNPGConfig{}, fmt.Errorf("resolve ManagedDatabase %s: %w", gw.DatabaseId, err)
+		return databaseConfig{}, fmt.Errorf("resolve ManagedDatabase %s: %w", gw.DatabaseId, err)
 	}
 
 	db := resp.ManagedDatabase
 	if db == nil {
-		return gateway.CNPGConfig{}, fmt.Errorf("gateway configuration error: ManagedDatabase %s returned empty payload", gw.DatabaseId)
-	}
-	if db.Provider != "cnpg" {
-		return gateway.CNPGConfig{}, fmt.Errorf("gateway database_id references a non-CNPG managed database; only provider=cnpg is supported")
+		return databaseConfig{}, fmt.Errorf("gateway configuration error: ManagedDatabase %s returned empty payload", gw.DatabaseId)
 	}
 	if db.Namespace == "" {
-		return gateway.CNPGConfig{}, fmt.Errorf("ManagedDatabase %s has no namespace assigned", gw.DatabaseId)
+		return databaseConfig{}, fmt.Errorf("ManagedDatabase %s has no namespace assigned", gw.DatabaseId)
 	}
 
-	return gateway.CNPGConfig{
-		ClusterName:      "openshell-db",
-		ClusterNamespace: db.Namespace,
-	}, nil
+	switch db.Provider {
+	case "cnpg":
+		return databaseConfig{
+			Provider: "cnpg",
+			CNPG: gateway.CNPGConfig{
+				ClusterName:      "openshell-db",
+				ClusterNamespace: db.Namespace,
+			},
+		}, nil
+	case "deployment":
+		return databaseConfig{
+			Provider:        "deployment",
+			SourceNamespace: db.Namespace,
+		}, nil
+	default:
+		return databaseConfig{}, fmt.Errorf("ManagedDatabase %s has unsupported provider %q", gw.DatabaseId, db.Provider)
+	}
 }
 
 func (r *GatewayReconciler) makeOIDCUpdater(gatewayID string) func(ctx context.Context, oidcJSON string) error {

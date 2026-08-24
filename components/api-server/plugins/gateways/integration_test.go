@@ -51,7 +51,7 @@ func TestGatewayPost(t *testing.T) {
 		FleetId:     "test-fleet_id",
 		ClusterId:   "test-cluster_id",
 		ReleaseId:   "test-release_id",
-		DatabaseId:  "test-database_id",
+		DatabaseId:  openapi.PtrString("test-database_id"),
 		ExternalDns: openapi.PtrString("test-external_dns"),
 		TlsMode:     openapi.PtrString("test-tls_mode"),
 		ServiceType: openapi.PtrString("test-service_type"),
@@ -88,7 +88,7 @@ func TestGatewayPostAllowsEmptyReconcilerOwnedIDs(t *testing.T) {
 		FleetId:    "",
 		ClusterId:  "",
 		ReleaseId:  "",
-		DatabaseId: "test-database_id",
+		DatabaseId: openapi.PtrString("test-database_id"),
 	}
 
 	gatewayOutput, resp, err := client.DefaultAPI.CreateGateway(ctx).GatewayCreateRequest(gatewayInput).Execute()
@@ -97,7 +97,7 @@ func TestGatewayPostAllowsEmptyReconcilerOwnedIDs(t *testing.T) {
 	Expect(gatewayOutput.FleetId).To(BeEmpty())
 	Expect(gatewayOutput.ClusterId).To(BeEmpty())
 	Expect(gatewayOutput.ReleaseId).To(BeEmpty())
-	Expect(gatewayOutput.DatabaseId).To(Equal("test-database_id"))
+	Expect(gatewayOutput.GetDatabaseId()).To(Equal("test-database_id"))
 	Expect(gatewayOutput.Namespace).To(MatchRegexp(`^openshell-[0-9a-f]{16}$`))
 }
 
@@ -111,7 +111,7 @@ func TestGatewayPostRejectsEmptyDatabaseId(t *testing.T) {
 		FleetId:    "",
 		ClusterId:  "",
 		ReleaseId:  "",
-		DatabaseId: "",
+		DatabaseId: openapi.PtrString(""),
 	}
 
 	_, resp, err := client.DefaultAPI.CreateGateway(ctx).GatewayCreateRequest(gatewayInput).Execute()
@@ -130,7 +130,7 @@ func TestGatewayPostWithoutRouteRemainsUnrouted(t *testing.T) {
 		FleetId:    "",
 		ClusterId:  "",
 		ReleaseId:  "",
-		DatabaseId: "test-database_id",
+		DatabaseId: openapi.PtrString("test-database_id"),
 	}
 
 	gatewayOutput, resp, err := client.DefaultAPI.CreateGateway(ctx).GatewayCreateRequest(gatewayInput).Execute()
@@ -151,7 +151,7 @@ func TestGatewayPostPreservesExplicitRoute(t *testing.T) {
 		FleetId:    "",
 		ClusterId:  "",
 		ReleaseId:  "",
-		DatabaseId: "test-database_id",
+		DatabaseId: openapi.PtrString("test-database_id"),
 		Route:      openapi.PtrString(customRoute),
 	}
 
@@ -243,7 +243,7 @@ func TestGatewayPostWithCredentialDriver(t *testing.T) {
 		FleetId:          "test-fleet_id",
 		ClusterId:        "test-cluster_id",
 		ReleaseId:        "test-release_id",
-		DatabaseId:       "test-database_id",
+		DatabaseId:       openapi.PtrString("test-database_id"),
 		CredentialDriver: openapi.PtrString(credDriver),
 	}
 

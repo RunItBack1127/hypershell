@@ -2574,7 +2574,6 @@ components:
             type: string
         required:
         - cluster_id
-        - database_id
         - fleet_id
         - name
         - namespace
@@ -3040,7 +3039,6 @@ components:
           type: string
       required:
       - cluster_id
-      - database_id
       - fleet_id
       - name
       - release_id

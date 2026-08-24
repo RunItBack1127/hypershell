@@ -176,10 +176,13 @@ type ReconcileOpts struct {
 	HasCertManager bool
 	HasGatewayAPI  bool
 	HasCNPG        bool
-	// ReconcileDatabase indicates that the Gateway has a database_id and its
-	// managed CNPG database resources should be reconciled.
-	ReconcileDatabase     bool
-	CNPG                  CNPGConfig
+	// DatabaseProvider is the ManagedDatabase provider ("cnpg" or "deployment").
+	DatabaseProvider string
+	CNPG             CNPGConfig
+	// DeploymentDBNamespace is the namespace where the Deployment-managed
+	// database lives. Used when DatabaseProvider is "deployment" to copy
+	// credentials into the tenant namespace.
+	DeploymentDBNamespace string
 	ControlPlaneNamespace string
 	Images                ImageDefaults
 	// SkipNetworkPolicies disables creation of the per-tenant gateway

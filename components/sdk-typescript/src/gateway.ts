@@ -35,7 +35,7 @@ export type GatewayList = ListMeta & {
 export type GatewayCreateRequest = {
   cluster_id: string;
   credential_driver?: string;
-  database_id: string;
+  database_id?: string;
   external_dns?: string;
   fleet_id: string;
   image?: string;

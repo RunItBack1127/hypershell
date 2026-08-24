@@ -459,7 +459,6 @@ describe("gateway API operations adapter", () => {
     expect(gatewayApi.create).toHaveBeenCalledWith(
       {
         cluster_id: "cluster-east",
-        database_id: "",
         fleet_id: "",
         name: "team-gateway",
         release_id: "",

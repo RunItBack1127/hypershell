@@ -228,7 +228,6 @@ components:
             - fleet_id
             - cluster_id
             - release_id
-            - database_id
             - namespace
           properties:
             name:
@@ -300,7 +299,6 @@ components:
         - fleet_id
         - cluster_id
         - release_id
-        - database_id
       properties:
         name:
           type: string
