@@ -272,8 +272,8 @@ sequenceDiagram
 
     Note over Eng,Repo: Desired platform state committed once, centrally
     Eng->>Repo: commit manifests under clusters/<this-cluster>/
-    Boot->>K8s: install ArgoCD (one-time seed)
-    Boot->>Argo: point at clusters/<this-cluster>/ path in repo
+    Boot->>K8s: install OpenShift GitOps operator (one-time seed)
+    Boot->>Argo: oc apply -k clusters/<this-cluster>/gitops (app-of-apps)
     loop continuous self-reconcile
         Argo->>Repo: pull own path (git)
         Repo-->>Argo: desired manifests
@@ -286,7 +286,7 @@ sequenceDiagram
 **Key Points**:
 - ArgoCD runs on every cluster and syncs **only that cluster's own path** in the central repo. No cluster holds another cluster's credentials.
 - The central GitOps repo is the single source of truth for **platform** desired state (operators, CRDs, HyperShell component manifests). It is *not* the source of truth for tenant gateways — those live in the Cloud Hub PostgreSQL and flow through the control plane (above).
-- A bootstrap agent (in `hypershell-gitops`) performs the one-time seed: install ArgoCD on the cluster and register it against the cluster's path. Steady-state reconciliation is pull-only.
+- `bin/bootstrap <cluster>` (in `hypershell-gitops`) performs the one-time seed: install the OpenShift GitOps operator, then `oc apply -k clusters/<cluster>/gitops` (the app-of-apps). Steady-state reconciliation is pull-only.
 - A hub outage does not stop a ManagedCluster from reconciling its platform; each cluster is self-sufficient against Git.
 
 
@@ -1008,57 +1008,72 @@ Managed clusters are not restricted to OpenShift. Standard Kubernetes distributi
 
 The central [`hypershell-gitops`](https://github.com/openshift-online/hypershell-gitops)
 repository is the single source of truth for **platform** desired state. It is
-organized for the **pull model**: reusable bases hold shared manifests, and each
-cluster gets its own top-level directory that its local ArgoCD points at and
-self-reconciles. There is no hub-side `Application` that targets remote managed
-clusters; a cluster's directory *is* its own entrypoint.
+organized for the **pull model**: reusable `bases/` hold shared, cluster-agnostic
+manifests, and each cluster gets its own directory under `clusters/` whose own
+in-cluster ArgoCD applies it. There is no hub-side `Application` that targets a
+remote cluster — **every** ArgoCD `Application`/`ApplicationSet` in the repo has
+`destination: name: in-cluster`, so a cluster's directory *is* its own entrypoint.
 
 ```
 hypershell-gitops/
-├── bases/                          # reusable, cluster-agnostic manifests
+├── bases/                              # reusable, cluster-agnostic manifests
 │   ├── hypershell/
-│   │   ├── base/                   # api-server, control plane, postgres, keycloak
-│   │   ├── tiers/                  # int / stage / prod overlays
-│   │   ├── ingress-openshift/      # gateway-api ingress mode
-│   │   └── ingress-k8s/            # route ingress mode
-│   └── operators/                  # one base per operator (channel + subscription)
-│       ├── openshift-gitops/       # ArgoCD itself
+│   │   ├── base/                       # ESO wiring, NetworkPolicies, ServiceMonitor, name refs
+│   │   ├── profiles/{main,canary}/     # CNPG profile overlays
+│   │   ├── keycloak/                   # Keycloak + realm import
+│   │   ├── ingress-openshift/          # OpenShift Route ingress
+│   │   └── ingress-k8s/                # plain-k8s Ingress
+│   └── operators/                      # one base (+ channel overlays) per operator
+│       ├── openshift-gitops/           # ArgoCD itself
+│       ├── openshift-pipelines/
 │       ├── cloudnative-pg/
 │       ├── keycloak-operator/
 │       ├── grafana-operator/
-│       ├── external-secrets/
-│       ├── vault/
-│       ├── openshift-pipelines/
+│       ├── vault/                      # Helm repo + init job + cluster-secret-store
 │       └── agent-sandbox-controller/
-├── clusters/                       # ONE directory per cluster = its ArgoCD entrypoint
-│   ├── global/                     # Global Hub: operators, gitops apps, instances
-│   │   ├── operators/
-│   │   ├── gitops/                 # ArgoCD Applications this cluster syncs (self)
-│   │   └── instances/
-│   ├── hysh-ibm-01/                # a Cloud Hub / ManagedCluster
-│   │   ├── operators/
-│   │   └── keycloak/
-│   └── uat/
-│       ├── operators/
-│       └── keycloak/
+├── clusters/                           # ONE directory per cluster (each self-reconciles)
+│   └── vteam-stage/                    # also: hysh-ibm-01 (ROKS), vteam-uat
+│       ├── gitops/                     # <- app-of-apps ENTRYPOINT (bootstrap applies this)
+│       │   ├── kustomization.yaml      #    lists the Applications + repo-url replacement
+│       │   ├── operators.application.yaml      # wave 2  -> ../operators
+│       │   ├── vault-helm.application.yaml      # wave 2  (Helm)
+│       │   ├── eso.application.yaml             # wave 2  (Helm, External Secrets)
+│       │   ├── vault-init.application.yaml      # wave 3  -> ../apps/vault
+│       │   ├── postgres.application.yaml        # wave 4  -> ../apps/postgres
+│       │   ├── keycloak.application.yaml        # wave 5  -> ../apps/keycloak
+│       │   ├── hypershell.applicationset.yaml   # wave 10 -> ../apps/hypershell/*
+│       │   └── repo-url-patch.yaml              # repo-config ConfigMap (fork here)
+│       ├── apps/                       # the overlays the Applications point at
+│       │   ├── hypershell/<inst>/      #   per-instance descriptor (app.yaml) + overlay
+│       │   ├── keycloak/
+│       │   ├── postgres/
+│       │   └── vault/
+│       └── operators/                  # this cluster's OLM Subscriptions (RAW manifests on ROKS)
 └── bin/
-    ├── bootstrap                   # one-time seed: install ArgoCD, point it at clusters/<name>/
-    └── register-cluster           # add a new cluster directory + seed its ArgoCD
+    └── bootstrap                       # bin/bootstrap <cluster>: install ArgoCD + apply clusters/<cluster>/gitops
 ```
 
 **How a cluster self-reconciles:**
 
-1. The bootstrap agent installs ArgoCD on the cluster (`bin/bootstrap`) and
-   registers a root Application pointing at `clusters/<cluster-name>/` in this repo.
-2. That cluster's ArgoCD pulls its own directory and applies the operator stack
-   (via `bases/operators/*`) and any cluster-scoped config, ordered by sync-waves.
-3. To onboard a new cluster, add a `clusters/<name>/` directory (referencing the
-   shared `bases/`) and run `bin/register-cluster`. No existing cluster's config
-   changes, and no central credential store grows.
+1. Install the OpenShift GitOps operator on the cluster. `bin/bootstrap <cluster>`
+   does this via OLM; on ROKS (`hysh-ibm-01`) OperatorHub is unusable, so it is
+   installed from raw manifests out-of-band first.
+2. `oc apply -k clusters/<cluster>/gitops` — the self-contained app-of-apps. That
+   cluster's in-cluster ArgoCD then reconciles everything by sync-wave: operators →
+   Vault/ESO → postgres → Keycloak → HyperShell instances, all `in-cluster`.
+3. Add a HyperShell instance by committing
+   `clusters/<cluster>/apps/hypershell/<name>/{app.yaml,kustomization.yaml}`; the
+   `hypershell` `ApplicationSet`'s git-file generator discovers the descriptor and
+   creates one Application per instance automatically.
+4. Onboard a new cluster by adding a `clusters/<name>/` directory (its own
+   `gitops/` + `apps/` + `operators/`, referencing the shared `bases/`) and running
+   `bin/bootstrap <name>`. No existing cluster's config changes, and no central
+   credential store grows.
 
-The canonical repo URL is set once (a Kustomize replacement) and propagated to
-every `Application`, so each cluster's ArgoCD resolves the same central repo while
-syncing a different path.
+The canonical repo URL is set once per cluster in `gitops/repo-url-patch.yaml` (a
+`repo-config` ConfigMap) and propagated to every `Application`/`ApplicationSet` via
+a Kustomize `replacements` rule, so each cluster's ArgoCD resolves the same central
+repo while syncing a different path. To fork the repo, edit only that file.
 
 ## Design Decisions
 
