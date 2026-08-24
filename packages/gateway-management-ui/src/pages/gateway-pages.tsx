@@ -3,6 +3,7 @@ import {
   AlertActionCloseButton,
   AlertGroup,
   Button,
+  Content,
   DescriptionList,
   DescriptionListDescription,
   DescriptionListGroup,
@@ -16,7 +17,7 @@ import {
   Title,
 } from "@patternfly/react-core";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 
 import {
@@ -25,6 +26,7 @@ import {
   type GatewayListRequest,
   type GatewayRecord,
   type GatewaySortField,
+  type OpenShellGatewayServiceAccountListRequest,
 } from "../application/gateway-types";
 import { useGatewayLink, useGatewayUi } from "../gateway-ui-provider";
 import { useConsoleWaitTracker } from "../gateways/console-wait-tracker";
@@ -56,6 +58,8 @@ import {
 } from "../shared/resource-table";
 import { ResourceRefreshButton } from "../shared/resource-refresh-button";
 import { useDebouncedValue } from "../shared/use-debounced-value";
+import { ServiceAccountsPage } from "../service-accounts/service-accounts-page";
+import { type ServiceAccountLeaveGuard } from "../service-accounts/service-account-create-dialog";
 import { messages } from "../messages";
 import styles from "./gateway-pages.module.css";
 
@@ -353,7 +357,7 @@ export function GatewaysPage({
       id: "name",
       label: intl.formatMessage(messages.gatewayName),
       render: (gateway) => <GatewayDetailLink gateway={gateway} />,
-      width: 25,
+      width: 20,
     },
     {
       // active_sandbox_count is control-plane-owned and advisory; the API does
@@ -384,13 +388,21 @@ export function GatewaysPage({
       id: "status",
       label: intl.formatMessage(messages.status),
       render: ({ status }) => <GatewayStatus status={status} />,
-      width: 15,
+      width: 10,
     },
     {
       id: "created",
       label: intl.formatMessage(messages.created),
       render: ({ createdAt }) => <GatewayCreatedDate createdAt={createdAt} />,
-      width: 15,
+      width: 10,
+    },
+    {
+      id: "owner",
+      label: intl.formatMessage(messages.owner),
+      render: ({ createdBy }) =>
+        createdBy ?? intl.formatMessage(messages.notAvailable),
+      sortable: false,
+      width: 10,
     },
     {
       id: "endpoint",
@@ -495,10 +507,11 @@ export function GatewaysPage({
   );
 }
 
-export type GatewayDetailTab = "connection" | "details";
+export type GatewayDetailTab = "connection" | "details" | "service-accounts";
 
 const gatewayDetailTabs: readonly GatewayDetailTab[] = [
   "connection",
+  "service-accounts",
   "details",
 ];
 
@@ -516,7 +529,13 @@ export interface GatewayPageProps {
   gateway?: GatewayRecord;
   gatewayId: string;
   onDeleted?: (gatewayName: string) => Promise<void> | void;
+  onLeaveGuardChange?: (guard: ServiceAccountLeaveGuard | null) => void;
+  onServiceAccountCollectionStateChange?: (
+    state: OpenShellGatewayServiceAccountListRequest,
+    reason: ResourceTableStateChangeReason,
+  ) => void;
   onTabChange?: (tab: GatewayDetailTab) => void;
+  serviceAccountCollectionState?: OpenShellGatewayServiceAccountListRequest;
 }
 
 export function GatewayPage({
@@ -524,19 +543,45 @@ export function GatewayPage({
   gateway,
   gatewayId,
   onDeleted,
+  onLeaveGuardChange,
+  onServiceAccountCollectionStateChange,
   onTabChange,
+  serviceAccountCollectionState,
 }: GatewayPageProps) {
   const intl = useIntl();
   const { gateways, navigation } = useGatewayUi();
   const trackConsoleWait = useConsoleWaitTracker();
   const [localTab, setLocalTab] = useState<GatewayDetailTab>("connection");
   const currentTab = activeTab ?? localTab;
+  // The service-accounts tab may register a guard while it holds an
+  // unrecoverable one-time secret. Consulting it here prevents a tab switch from
+  // silently unmounting the dialog and discarding that secret. The same guard is
+  // forwarded to the host (via onLeaveGuardChange) so a route-level blocker can
+  // also intercept SPA route changes and browser Back/Forward.
+  const leaveGuardRef = useRef<ServiceAccountLeaveGuard | null>(null);
+  const registerLeaveGuard = useCallback(
+    (guard: ServiceAccountLeaveGuard | null) => {
+      leaveGuardRef.current = guard;
+      onLeaveGuardChange?.(guard);
+    },
+    [onLeaveGuardChange],
+  );
   const changeTab = (tab: GatewayDetailTab) => {
-    if (onTabChange) {
-      onTabChange(tab);
-    } else {
-      setLocalTab(tab);
+    const applyTab = () => {
+      if (onTabChange) {
+        onTabChange(tab);
+      } else {
+        setLocalTab(tab);
+      }
+    };
+    const guard = leaveGuardRef.current;
+    if (tab !== currentTab && guard?.shouldBlock()) {
+      // Cancelling keeps the current tab, so there is nothing to undo.
+      const keepCurrentTab = () => undefined;
+      guard.confirmLeave({ onCancel: keepCurrentTab, onConfirm: applyTab });
+      return;
     }
+    applyTab();
   };
   const [renamedGatewayName, setRenamedGatewayName] = useState<string>();
   const gatewayQuery = useQuery({
@@ -612,6 +657,7 @@ export function GatewayPage({
           onSelect={(_event, eventKey) => {
             changeTab(toGatewayDetailTab(String(eventKey)));
           }}
+          unmountOnExit
         >
           <Tab
             eventKey="connection"
@@ -621,7 +667,35 @@ export function GatewayPage({
               </TabTitleText>
             }
           >
+            <Content component="p">
+              <Button
+                isInline
+                onClick={() => {
+                  changeTab("service-accounts");
+                }}
+                variant="link"
+              >
+                <FormattedMessage {...messages.manageServiceAccounts} />
+              </Button>
+            </Content>
             <GatewayConnectionSteps gateway={connection} />
+          </Tab>
+          <Tab
+            eventKey="service-accounts"
+            title={
+              <TabTitleText>
+                <FormattedMessage {...messages.serviceAccountsTab} />
+              </TabTitleText>
+            }
+          >
+            <ServiceAccountsPage
+              collectionState={serviceAccountCollectionState}
+              gatewayId={gatewayId}
+              isActive={currentTab === "service-accounts"}
+              key={gatewayId}
+              onCollectionStateChange={onServiceAccountCollectionStateChange}
+              registerLeaveGuard={registerLeaveGuard}
+            />
           </Tab>
           <Tab
             eventKey="details"

@@ -47,14 +47,19 @@ const {
 }));
 
 const gatewayOperations = {
+  createOpenShellGatewayServiceAccount: vi.fn(),
+  deleteOpenShellGatewayServiceAccount: vi.fn(),
   findGatewayPlacements: vi.fn(),
   getGateway: vi.fn(),
   getGatewayPlacement: getGatewayPlacementMock,
   getGatewayPlacements: getGatewayPlacementsMock,
+  getOpenShellGatewayServiceAccount: vi.fn(),
   listGateways: listGatewaysMock,
+  listOpenShellGatewayServiceAccounts: vi.fn(),
   provisionGateway: vi.fn(),
   removeGateway: deleteGatewayMock,
   renameGateway: renameGatewayMock,
+  revokeOpenShellGatewayServiceAccount: vi.fn(),
 };
 
 const navigation = {
@@ -77,6 +82,52 @@ function gatewayResponse(id: string, name: string) {
     releaseId: "release-1",
     status: "Ready",
   };
+}
+
+const serviceAccountCreateResult = {
+  credential: {
+    accessTokenLifetimeSeconds: 300,
+    audience: "gateway-client",
+    clientId: "service-client",
+    clientSecret: "one-time-client-secret",
+    gatewayEndpoint: "gateway.example.test:443",
+    gatewayName: "Team gateway",
+    issuer: "https://issuer.example.test/realms/openshell",
+    tokenEndpoint:
+      "https://issuer.example.test/realms/openshell/protocol/openid-connect/token",
+  },
+  serviceAccount: {
+    clientId: "service-client",
+    createdAt: "2026-08-21T12:00:00Z",
+    createdByUserId: "user-1",
+    expiresAt: "2026-11-19T12:00:00Z",
+    gatewayId: "gateway-1",
+    id: "account-1",
+    name: "release-bot",
+    role: "openshell-user" as const,
+    status: "ready" as const,
+    subject: "service-subject",
+    updatedAt: "2026-08-21T12:00:00Z",
+  },
+};
+
+function mockServiceAccountCollection() {
+  gatewayOperations.listOpenShellGatewayServiceAccounts.mockResolvedValue({
+    capabilities: {
+      allowedRoles: ["openshell-user"],
+      canCreate: true,
+      canManageAll: false,
+      expirationPolicy: {
+        defaultSeconds: 7_776_000,
+        maximumSeconds: 31_536_000,
+        minimumSeconds: 3_600,
+      },
+    },
+    items: [],
+    page: 1,
+    size: 20,
+    total: 0,
+  });
 }
 
 function renderPage(Page: () => React.ReactNode) {
@@ -393,7 +444,7 @@ describe("gateway shell pages", () => {
     ).toBeNull();
   });
 
-  it("encodes the active tab through its host", async () => {
+  it("encodes service-account and detail tabs through its host", async () => {
     const user = userEvent.setup();
     const onTabChange = vi.fn();
     renderPage(() => (
@@ -405,8 +456,149 @@ describe("gateway shell pages", () => {
       />
     ));
 
+    await user.click(screen.getByRole("tab", { name: "Service accounts" }));
+    expect(onTabChange).toHaveBeenCalledWith("service-accounts");
+
+    await user.click(
+      screen.getByRole("button", { name: "Create or manage service accounts" }),
+    );
+    expect(onTabChange).toHaveBeenLastCalledWith("service-accounts");
+
     await user.click(screen.getByRole("tab", { name: "Details" }));
     expect(onTabChange).toHaveBeenCalledWith("details");
+  });
+
+  it("blocks a tab switch that would discard an unacknowledged secret", async () => {
+    mockServiceAccountCollection();
+    gatewayOperations.createOpenShellGatewayServiceAccount.mockResolvedValue(
+      serviceAccountCreateResult,
+    );
+    const user = userEvent.setup();
+    renderPage(() => (
+      <GatewayPage
+        gateway={gatewayResponse("gateway-1", "Team gateway")}
+        gatewayId="gateway-1"
+      />
+    ));
+
+    await user.click(screen.getByRole("tab", { name: "Service accounts" }));
+    await user.click(
+      await screen.findByRole("button", { name: "Create service account" }),
+    );
+    await user.type(
+      screen.getByRole("textbox", { name: "Service account name" }),
+      "release-bot",
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Create service account" }),
+    );
+    const secret =
+      await screen.findByLabelText<HTMLInputElement>("Client secret");
+    expect(secret.value).toBe("one-time-client-secret");
+
+    // Switching tabs would unmount the dialog and discard the secret, so the
+    // loss confirmation must intercept it instead of losing it silently.
+    await user.click(
+      screen.getByRole("tab", { hidden: true, name: "Connection" }),
+    );
+    expect(
+      screen.getByRole("dialog", {
+        name: "Leave without saving the client secret?",
+      }),
+    ).toBeTruthy();
+
+    // Returning keeps the secret available and stays on the tab.
+    await user.click(screen.getByRole("button", { name: "Return to setup" }));
+    expect(
+      screen.getByRole("dialog", { name: "Set up release-bot" }),
+    ).toBeTruthy();
+    expect(screen.getByLabelText<HTMLInputElement>("Client secret").value).toBe(
+      "one-time-client-secret",
+    );
+  });
+
+  it("discards the one-time secret only after confirming the tab switch", async () => {
+    mockServiceAccountCollection();
+    gatewayOperations.createOpenShellGatewayServiceAccount.mockResolvedValue(
+      serviceAccountCreateResult,
+    );
+    const user = userEvent.setup();
+    renderPage(() => (
+      <GatewayPage
+        gateway={gatewayResponse("gateway-1", "Team gateway")}
+        gatewayId="gateway-1"
+      />
+    ));
+
+    await user.click(screen.getByRole("tab", { name: "Service accounts" }));
+    await user.click(
+      await screen.findByRole("button", { name: "Create service account" }),
+    );
+    await user.type(
+      screen.getByRole("textbox", { name: "Service account name" }),
+      "release-bot",
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Create service account" }),
+    );
+    await screen.findByLabelText<HTMLInputElement>("Client secret");
+
+    await user.click(
+      screen.getByRole("tab", { hidden: true, name: "Connection" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Leave setup" }));
+
+    expect(screen.queryByLabelText("Client secret")).toBeNull();
+    expect(
+      screen.queryByRole("dialog", { name: "Set up release-bot" }),
+    ).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Create or manage service accounts" }),
+    ).toBeTruthy();
+  });
+
+  it("blocks a tab switch while a create request is still pending", async () => {
+    mockServiceAccountCollection();
+    let resolveCreate: (
+      value: typeof serviceAccountCreateResult,
+    ) => void = () => undefined;
+    gatewayOperations.createOpenShellGatewayServiceAccount.mockReturnValue(
+      new Promise<typeof serviceAccountCreateResult>((resolve) => {
+        resolveCreate = resolve;
+      }),
+    );
+    const user = userEvent.setup();
+    renderPage(() => (
+      <GatewayPage
+        gateway={gatewayResponse("gateway-1", "Team gateway")}
+        gatewayId="gateway-1"
+      />
+    ));
+
+    await user.click(screen.getByRole("tab", { name: "Service accounts" }));
+    await user.click(
+      await screen.findByRole("button", { name: "Create service account" }),
+    );
+    await user.type(
+      screen.getByRole("textbox", { name: "Service account name" }),
+      "release-bot",
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Create service account" }),
+    );
+
+    // The request has not resolved, so navigating away could discard the
+    // eventual one-time secret; the guard intercepts the switch.
+    await user.click(
+      screen.getByRole("tab", { hidden: true, name: "Connection" }),
+    );
+    expect(
+      screen.getByRole("dialog", {
+        name: "Leave without saving the client secret?",
+      }),
+    ).toBeTruthy();
+
+    resolveCreate(serviceAccountCreateResult);
   });
 
   it("polls gateway details until its lifecycle reaches a terminal state", async () => {
@@ -932,7 +1124,37 @@ describe("gateway shell pages", () => {
     expect(within(busyRow).getByText("3")).toBeTruthy();
 
     const idleRow = screen.getByRole("row", { name: /gw-idle/u });
-    expect(within(idleRow).getByText("Not available")).toBeTruthy();
+    const sandboxCell = idleRow.querySelector(
+      "[data-label='Active sandboxes']",
+    );
+    expect(sandboxCell?.textContent).toBe("Not available");
+  });
+
+  it("shows the gateway owner with a not-available fallback when unset", () => {
+    renderPage(() => (
+      <GatewaysPage
+        gateways={[
+          {
+            ...previewGateway,
+            createdBy: "alice@example.com",
+            id: "gw-owned",
+            name: "gw-owned",
+          },
+          { ...previewGateway, id: "gw-unowned", name: "gw-unowned" },
+        ]}
+      />
+    ));
+
+    expect(
+      screen.getByRole("columnheader", { name: "Created by" }),
+    ).toBeTruthy();
+
+    const ownedRow = screen.getByRole("row", { name: /gw-owned/u });
+    expect(within(ownedRow).getByText("alice@example.com")).toBeTruthy();
+
+    const unownedRow = screen.getByRole("row", { name: /gw-unowned/u });
+    const ownerCell = unownedRow.querySelector("[data-label='Created by']");
+    expect(ownerCell?.textContent).toBe("Not available");
   });
 
   it("sorts the gateway list by creation date", async () => {
@@ -1014,7 +1236,7 @@ describe("gateway shell pages", () => {
       />
     ));
 
-    expect(await screen.findByText("Not available")).toBeTruthy();
+    expect(await screen.findAllByText("Not available")).toBeTruthy();
     expect(screen.queryByText("cluster-east")).toBeNull();
   });
 
